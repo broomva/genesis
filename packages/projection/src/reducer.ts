@@ -1,23 +1,25 @@
 // Projection reducer — the make-or-break piece of Genesis Phase 1.
 // Folds the parsed NDJSON AgentEvent stream into a single run-phase state
-// machine the chat layer renders: running | awaiting | blocked | done.
+// machine the chat layer renders: idle | running | awaiting | blocked | done.
+//
+// Invariants (hardened after P20 cross-review):
+//  - `done` and `blocked` are ABSORBING — trailing system/assistant lines after
+//    a result (the CLI flushes these on --resume) can never un-terminate a run.
+//  - the FIRST terminal result wins (a later success cannot erase an earlier error).
+//  - `awaiting` survives a turn-ending `result`: under `claude -p` an
+//    AskUserQuestion ends the turn, but the human still owes an answer, so the
+//    run stays gated (HITL signal preserved) until a real answer arrives.
 
 import { type AgentEvent, sessionIdOf, textBlocks, toolUses } from "./parser";
 
-export type RunPhase = "running" | "awaiting" | "blocked" | "done";
+export type RunPhase = "idle" | "running" | "awaiting" | "blocked" | "done";
 
 export interface RunState {
-  /** Current projected phase. */
   phase: RunPhase;
-  /** Resumable session id (Houston `session_id_tracker` continuity). */
   sessionId?: string;
-  /** Last assistant text seen — what the chat surface shows as the reply. */
   lastText?: string;
-  /** Number of assistant turns observed. */
   turns: number;
-  /** When `phase === "awaiting"`, the question put to the human. */
   pendingQuestion?: string;
-  /** When `phase === "blocked"`, why. */
   error?: string;
 }
 
@@ -26,25 +28,29 @@ export const initialState: RunState = { phase: "running", turns: 0 };
 /** Tool names that pause the run for human input (Phase 3 HITL seam). */
 const AWAIT_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
 
+function isTerminal(phase: RunPhase): boolean {
+  return phase === "done" || phase === "blocked";
+}
+
 function extractQuestion(input: unknown): string | undefined {
   if (typeof input !== "object" || input === null) return undefined;
   const qs = (input as { questions?: unknown }).questions;
-  if (Array.isArray(qs) && qs.length > 0) {
-    const first = qs[0];
-    if (
-      first &&
-      typeof first === "object" &&
-      typeof (first as { question?: unknown }).question === "string"
-    ) {
-      return (first as { question: string }).question;
-    }
-  }
-  return undefined;
+  if (!Array.isArray(qs) || qs.length === 0) return undefined;
+  const texts = qs
+    .map((q) =>
+      q && typeof q === "object" && typeof (q as { question?: unknown }).question === "string"
+        ? (q as { question: string }).question
+        : undefined,
+    )
+    .filter((t): t is string => t !== undefined);
+  return texts.length > 0 ? texts.join(" | ") : undefined;
 }
 
 /** Apply one event to the run state. Pure; safe to replay. */
 export function reduce(state: RunState, event: AgentEvent): RunState {
+  if (isTerminal(state.phase)) return state; // absorbing terminal states (F2/F3)
   const sessionId = sessionIdOf(event) ?? state.sessionId;
+
   switch (event.type) {
     case "system":
       return { ...state, sessionId, phase: "running" };
@@ -74,9 +80,25 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       const errored =
         event.is_error === true || (event.subtype !== undefined && event.subtype !== "success");
       if (errored) {
-        return { ...state, sessionId, phase: "blocked", error: event.subtype ?? "error" };
+        return {
+          ...state,
+          sessionId,
+          phase: "blocked",
+          error: event.subtype ?? "error",
+          pendingQuestion: undefined,
+        };
       }
-      return { ...state, sessionId, phase: "done", lastText: event.result ?? state.lastText };
+      // A turn-ending result while gated on a human keeps the run awaiting (F4).
+      if (state.phase === "awaiting") {
+        return { ...state, sessionId };
+      }
+      return {
+        ...state,
+        sessionId,
+        phase: "done",
+        lastText: event.result ?? state.lastText,
+        pendingQuestion: undefined,
+      };
     }
 
     default:

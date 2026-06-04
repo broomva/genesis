@@ -1,10 +1,14 @@
 // Supervisor — the control plane. resolve(threadId) → Session, then
 // dispatch(text) → run the agent → project NDJSON → record turns → reply.
 // The runner is injected so the supervisor is unit-testable without a live CLI.
+//
+// Dispatches are serialized PER THREAD (F19): the default channel uses a
+// constant thread id, so two near-simultaneous messages on one session would
+// otherwise stomp each other's phase + agentSessionId (corrupting --resume).
 
 import type { ExecutionHost } from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
-import { type RunOptions, type RunResult, cleanupWorktree, runAgent } from "@genesis/runner";
+import { type RunOptions, type RunResult, removeWorktree, runAgent } from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, Workspace } from "./types";
 
@@ -30,8 +34,10 @@ export class Supervisor {
   private readonly store: Store;
   private readonly run: RunnerFn;
   private readonly host?: ExecutionHost;
-  private readonly defaultWorkspace: Workspace;
   private readonly extraArgs?: string[];
+  private readonly defaultWorkspace: Workspace;
+  /** Per-thread promise chain — serializes dispatches on the same session. */
+  private readonly chains = new Map<string, Promise<unknown>>();
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
@@ -49,13 +55,27 @@ export class Supervisor {
       id: newId("sess"),
       workspaceId: this.defaultWorkspace.id,
       threadId,
-      phase: "done",
+      phase: "idle", // a never-run session is idle, not done (F20)
       createdAt: isoNow(),
     });
   }
 
-  /** Run one turn: dispatch text to the agent, project, record, reply. */
-  async dispatch(
+  /** Run one turn, serialized against any in-flight turn on the same thread. */
+  dispatch(
+    threadId: string,
+    text: string,
+    onState?: (state: RunState, event: AgentEvent) => void,
+  ): Promise<DispatchResult> {
+    const prev = this.chains.get(threadId) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(() => this.runTurn(threadId, text, onState));
+    this.chains.set(
+      threadId,
+      next.catch(() => {}),
+    );
+    return next;
+  }
+
+  private async runTurn(
     threadId: string,
     text: string,
     onState?: (state: RunState, event: AgentEvent) => void,
@@ -86,9 +106,11 @@ export class Supervisor {
     const reply = result.state.lastText ?? "(no output)";
     this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
 
-    // Phase 1: discard the worktree. Phase 2+ merges the branch back.
+    // Phase 1: discard the worktree AND its branch. Phase 2+ merges back instead.
     if (result.worktreePath) {
-      await cleanupWorktree(workspace.rootPath, result.worktreePath, this.host).catch(() => {});
+      await removeWorktree(workspace.rootPath, result.worktreePath, result.branch, this.host).catch(
+        (e) => console.error(`[genesis] worktree cleanup failed: ${e}`),
+      );
     }
 
     return { session, reply, phase: result.state.phase };

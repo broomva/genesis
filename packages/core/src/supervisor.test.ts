@@ -62,3 +62,29 @@ describe("supervisor", () => {
     expect(r.phase).toBe("blocked");
   });
 });
+
+describe("supervisor — per-thread serialization (F19)", () => {
+  test("two concurrent dispatches on one thread run sequentially, not interleaved", async () => {
+    let active = 0;
+    let maxConcurrent = 0;
+    const order: string[] = [];
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: async (o) => {
+        active++;
+        maxConcurrent = Math.max(maxConcurrent, active);
+        await new Promise((r) => setTimeout(r, 10));
+        order.push(o.prompt);
+        active--;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: o.prompt, turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await Promise.all([sup.dispatch("same", "first"), sup.dispatch("same", "second")]);
+    expect(maxConcurrent).toBe(1); // never overlapped
+    expect(order).toEqual(["first", "second"]); // FIFO
+  });
+});

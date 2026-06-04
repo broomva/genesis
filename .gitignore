@@ -8,3 +8,8 @@ dist/
 .DS_Store
 .genesis-runs/
 .control/
+# never commit tsc emit — packages are consumed as TS source
+**/src/**/*.js
+**/src/**/*.d.ts
+**/src/**/*.d.ts.map
+**/src/**/*.js.map

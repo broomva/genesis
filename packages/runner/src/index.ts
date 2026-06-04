@@ -58,7 +58,7 @@ function agentArgs(opts: RunOptions): string[] {
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const host = opts.host ?? new LocalHost();
   const id = runId();
-  let runCwd = opts.cwd;
+  const runCwd = opts.cwd;
   let worktreePath: string | undefined;
   let branch: string | undefined;
 
@@ -70,28 +70,53 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
       cwd: opts.cwd,
     });
     if (add.code !== 0) throw new Error(`worktree add failed: ${add.stderr}`);
-    runCwd = worktreePath;
   }
 
   const handle = host.spawnStream(agentArgs(opts), { cwd: runCwd });
   const events: AgentEvent[] = [];
   let state = initialState;
-  for await (const line of handle.stdout) {
-    const event = parseLine(line);
-    if (!event) continue;
-    events.push(event);
-    state = reduce(state, event);
-    opts.onState?.(state, event);
+  let exitCode = -1;
+  try {
+    for await (const line of handle.stdout) {
+      const event = parseLine(line);
+      if (!event) continue;
+      events.push(event);
+      state = reduce(state, event);
+      opts.onState?.(state, event);
+    }
+    exitCode = await handle.exitCode;
+  } catch (err) {
+    // Mid-stream failure: never leak a worktree/branch (F13). Kill the child (F14).
+    handle.kill();
+    if (worktreePath) await removeWorktree(opts.cwd, worktreePath, branch, host).catch(() => {});
+    throw err;
+  } finally {
+    handle.kill(); // idempotent; reaps the child on every exit path (F14)
   }
-  const exitCode = await handle.exitCode;
+
+  // A crash with no terminal result must surface as blocked, not a stuck "running" (F20).
+  if (
+    state.phase !== "done" &&
+    state.phase !== "blocked" &&
+    state.phase !== "awaiting" &&
+    exitCode !== 0
+  ) {
+    state = { ...state, phase: "blocked", error: `agent exited ${exitCode}` };
+  }
   return { state, events, worktreePath, branch, exitCode };
 }
 
-/** Remove a run's worktree (keep the branch for merge-back). */
-export async function cleanupWorktree(
+/** Remove a run's worktree AND its branch. Phase 1 discards both; merge-back
+ *  (Phase 2) will use a distinct promote path before removal. */
+export async function removeWorktree(
   cwd: string,
   worktreePath: string,
+  branch?: string,
   host: ExecutionHost = new LocalHost(),
 ): Promise<void> {
   await host.exec(["git", "worktree", "remove", "--force", worktreePath], { cwd });
+  if (branch) await host.exec(["git", "branch", "-D", branch], { cwd });
 }
+
+/** @deprecated use removeWorktree (which also deletes the leaked branch). */
+export const cleanupWorktree = removeWorktree;

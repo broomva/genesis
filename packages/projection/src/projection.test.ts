@@ -107,3 +107,54 @@ describe("projection reducer — RunPhase state machine", () => {
     expect(reduceAll(evs)).toEqual(reduceAll(evs));
   });
 });
+
+describe("projection reducer — hardened edges (post-P20)", () => {
+  test("terminal states are absorbing: a trailing system after result stays done", () => {
+    const done = reduceAll(fixture("success.ndjson"));
+    expect(done.phase).toBe("done");
+    const after = reduce(done, { type: "system", session_id: "sess-abc" });
+    expect(after.phase).toBe("done"); // not re-opened to running
+  });
+
+  test("first terminal result wins: a later success cannot erase an earlier error", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, { type: "result", subtype: "error_max_turns", is_error: true });
+    expect(s.phase).toBe("blocked");
+    s = reduce(s, { type: "result", subtype: "success", result: "ok" });
+    expect(s.phase).toBe("blocked"); // absorbed
+  });
+
+  test("awaiting survives a turn-ending result (HITL signal preserved)", () => {
+    let s = reduceAll(fixture("awaiting.ndjson"));
+    expect(s.phase).toBe("awaiting");
+    s = reduce(s, { type: "result", subtype: "success", result: "turn ended" });
+    expect(s.phase).toBe("awaiting");
+    expect(s.pendingQuestion).toBe("Deploy to Railway or AWS?");
+  });
+
+  test("done clears any dangling pendingQuestion", () => {
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Bash", input: {} }] },
+    });
+    s = reduce(s, { type: "result", subtype: "success", result: "fin" });
+    expect(s.phase).toBe("done");
+    expect(s.pendingQuestion).toBeUndefined();
+  });
+
+  test("multiple questions are joined, not silently truncated", () => {
+    const s = reduce(initialState, {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            input: { questions: [{ question: "A?" }, { question: "B?" }] },
+          },
+        ],
+      },
+    });
+    expect(s.pendingQuestion).toBe("A? | B?");
+  });
+});

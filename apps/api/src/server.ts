@@ -10,6 +10,8 @@ const { upgradeWebSocket, websocket } = createBunWebSocket();
 export interface BuildOpts {
   workspaceRoot: string;
   extraArgs?: string[];
+  /** When set, /message requires `Authorization: Bearer <token>` (or ?token=). */
+  token?: string;
 }
 
 export function build(opts: BuildOpts) {
@@ -20,17 +22,26 @@ export function build(opts: BuildOpts) {
     extraArgs: opts.extraArgs,
   });
 
+  if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {
+    console.warn(
+      "[genesis] WARNING: agent runs with --dangerously-skip-permissions and /message is unauthenticated. " +
+        "Bind to localhost only, or set GENESIS_TOKEN. (Phase 2 wires Better Auth.)",
+    );
+  }
+
   const app = new Hono();
 
   app.get("/", (c) => c.html(PAGE));
   app.get("/health", (c) => c.json({ ok: true, workspace: opts.workspaceRoot }));
-
-  // history for a thread
   app.get("/threads/:id", (c) => c.json({ turns: supervisor.history(c.req.param("id")) }));
 
-  // send a message → dispatch → live-stream phases over the hub → reply
   app.post("/message", async (c) => {
-    const body = (await c.req.json()) as { threadId?: string; text?: string };
+    if (opts.token) {
+      const auth = c.req.header("authorization");
+      const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.query("token");
+      if (bearer !== opts.token) return c.json({ error: "unauthorized" }, 401);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { threadId?: string; text?: string };
     const threadId = body.threadId ?? "local";
     const text = body.text ?? "";
     if (!text.trim()) return c.json({ error: "empty message" }, 400);
@@ -52,7 +63,6 @@ export function build(opts: BuildOpts) {
     });
   });
 
-  // live session-event stream
   app.get(
     "/ws",
     upgradeWebSocket((c) => {
@@ -66,9 +76,12 @@ export function build(opts: BuildOpts) {
         onClose() {
           unsub();
         },
+        onError() {
+          unsub(); // disconnect without a clean close must still reclaim (F17)
+        },
       };
     }),
   );
 
-  return { app, websocket, supervisor };
+  return { app, websocket, supervisor, hub };
 }

@@ -8,7 +8,7 @@ export const PAGE = `<!doctype html>
   header { padding:14px 18px; border-bottom:1px solid #1d2230; display:flex; gap:12px; align-items:center; }
   header b { color:#7aa2ff; } .pill{ font-size:12px; padding:2px 9px; border-radius:999px; border:1px solid #2a3142; }
   .running{color:#7aa2ff;border-color:#2a3a6a} .awaiting{color:#ffcf6a;border-color:#5a4a1a}
-  .blocked{color:#ff7a7a;border-color:#5a2020} .done{color:#7ee0a5;border-color:#1f5a3a}
+  .idle{color:#8a93a6;border-color:#2a3142} .blocked{color:#ff7a7a;border-color:#5a2020} .done{color:#7ee0a5;border-color:#1f5a3a}
   #log { padding:16px 18px; display:flex; flex-direction:column; gap:10px; max-width:900px; }
   .msg { padding:10px 12px; border-radius:10px; border:1px solid #1d2230; white-space:pre-wrap; }
   .user { background:#11151f; } .agent { background:#0e1726; border-color:#1f2d4a; }
