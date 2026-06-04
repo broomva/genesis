@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"sess-ask","model":"claude-opus","cwd":"/tmp/wt"}
+{"type":"assistant","session_id":"sess-ask","message":{"role":"assistant","content":[{"type":"text","text":"I need a decision."},{"type":"tool_use","id":"tu2","name":"AskUserQuestion","input":{"questions":[{"question":"Deploy to Railway or AWS?","header":"Target"}]}}]}}

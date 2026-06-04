@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sess-tool","model":"claude-opus","cwd":"/tmp/wt"}
+{"type":"assistant","session_id":"sess-tool","message":{"role":"assistant","content":[{"type":"text","text":"Let me check the files."},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","session_id":"sess-tool","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"README.md"}]}}
+{"type":"assistant","session_id":"sess-tool","message":{"role":"assistant","content":[{"type":"text","text":"Found README.md."}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"sess-tool","result":"Listed files."}

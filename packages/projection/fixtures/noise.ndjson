@@ -1,0 +1,5 @@
+
+{"type":"system","subtype":"init","session_id":"sess-noise"}
+warning: deprecated flag
+{"type":"result","subtype":"success","is_error":false,"session_id":"sess-noise","result":"ok"}
+not json at all {{{

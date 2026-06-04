@@ -1,0 +1,20 @@
+{
+  "name": "@genesis/api",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "cli": "bun src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@genesis/core": "workspace:*",
+    "@genesis/host": "workspace:*",
+    "@genesis/projection": "workspace:*",
+    "@genesis/runner": "workspace:*",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": { "@types/bun": "latest", "typescript": "^5.7.2" }
+}
