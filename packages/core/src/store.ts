@@ -12,8 +12,9 @@ export interface Store {
   turnsForSession(sessionId: string): Promise<Turn[]>;
 }
 
-let counter = 0;
-const id = (p: string) => `${p}-${(++counter).toString(36)}-${process.pid.toString(36)}`;
+// Collision-safe across restarts, PIDs, and instances — required now that IDs
+// are primary keys in durable storage (a counter+PID repeats after a restart).
+const id = (p: string) => `${p}-${crypto.randomUUID()}`;
 const now = () => new Date(performance.timeOrigin + performance.now()).toISOString();
 
 export class InMemoryStore implements Store {

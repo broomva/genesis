@@ -1,6 +1,11 @@
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Store } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import { build } from "./server";
+
+const defaultDataDir = () =>
+  process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
 
 /** Pick the durable store by deployment (Phase 2 — durable by default):
  *  DATABASE_URL → Postgres (Railway in prod); else persistent pglite on disk
@@ -8,7 +13,7 @@ import { build } from "./server";
 async function selectStore(): Promise<{ store: Store; label: string }> {
   const url = process.env.DATABASE_URL;
   if (url) return { store: await createPostgresStore(url), label: "postgres" };
-  const dir = process.env.GENESIS_DATA_DIR ?? `${process.env.HOME}/.genesis/data`;
+  const dir = defaultDataDir();
   return { store: await createPgliteStore(dir), label: `pglite:${dir}` };
 }
 

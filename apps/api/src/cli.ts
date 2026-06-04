@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { type Store, Supervisor } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import { LocalHost } from "@genesis/host";
@@ -13,9 +15,8 @@ const extraArgs = process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean);
 
 // Durable by default so a CLI thread resumes across invocations (FS-as-truth).
 const url = process.env.DATABASE_URL;
-const store: Store = url
-  ? await createPostgresStore(url)
-  : await createPgliteStore(process.env.GENESIS_DATA_DIR ?? `${process.env.HOME}/.genesis/data`);
+const dataDir = process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
+const store: Store = url ? await createPostgresStore(url) : await createPgliteStore(dataDir);
 
 const sup = new Supervisor({
   defaultWorkspace: { id: "ws-cli", name: "cli", rootPath: workspaceRoot },
