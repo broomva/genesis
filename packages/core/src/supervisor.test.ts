@@ -88,3 +88,12 @@ describe("supervisor — per-thread serialization (F19)", () => {
     expect(order).toEqual(["first", "second"]); // FIFO
   });
 });
+
+describe("supervisor — chains map reclaim (P20 round-2)", () => {
+  test("the per-thread chain entry is reclaimed after the dispatch settles", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    await sup.dispatch("ephemeral", "hi");
+    await new Promise((r) => setTimeout(r, 0)); // let the post-settle microtask run
+    expect((sup as unknown as { chains: Map<string, unknown> }).chains.size).toBe(0);
+  });
+});

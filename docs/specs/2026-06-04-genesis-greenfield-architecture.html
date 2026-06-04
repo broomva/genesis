@@ -1,0 +1,134 @@
+<!doctype html>
+<!-- meta:
+title: Genesis — Greenfield Architecture (Phase 1 walking skeleton)
+ticket: BRO-1357
+epic: BRO-1356
+date: 2026-06-04
+audience: human
+category: C
+-->
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Genesis — Greenfield Architecture</title>
+<style>
+  :root{--bg:#0b0d12;--panel:#11151f;--ink:#e6e9ef;--dim:#8a93a6;--line:#1d2230;
+        --blue:#7aa2ff;--green:#7ee0a5;--amber:#ffcf6a;--red:#ff7a7a;--violet:#b79cff;color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1040px;margin:0 auto;padding:48px 24px 96px}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:-.02em}
+  h2{font-size:21px;margin:44px 0 12px;letter-spacing:-.01em;border-bottom:1px solid var(--line);padding-bottom:8px}
+  h3{font-size:16px;margin:24px 0 8px;color:var(--blue)}
+  .sub{color:var(--dim);font-size:15px;margin:0 0 8px}
+  code{font-family:ui-monospace,Menlo,monospace;background:#0e1726;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px}
+  .tag{display:inline-block;font:12px ui-monospace,monospace;padding:2px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim);margin-right:6px}
+  .pill{display:inline-block;font:12px ui-monospace,monospace;padding:2px 8px;border-radius:999px;border:1px solid}
+  .running{color:var(--blue);border-color:#2a3a6a}.awaiting{color:var(--amber);border-color:#5a4a1a}
+  .blocked{color:var(--red);border-color:#5a2020}.done{color:var(--green);border-color:#1f5a3a}.idle{color:var(--dim);border-color:var(--line)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  td code{font-size:12px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .lede{font-size:17px;color:#c9cfdb}
+  .ok{color:var(--green)} .crit{color:var(--red)} .hi{color:var(--amber)}
+  ul{margin:8px 0 8px 0;padding-left:20px} li{margin:4px 0}
+  .foot{color:var(--dim);font-size:13px;margin-top:40px;border-top:1px solid var(--line);padding-top:16px}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr}}
+</style></head>
+<body><div class="wrap">
+
+<p><span class="tag">BRO-1357</span><span class="tag">epic BRO-1356</span><span class="tag">2026-06-04</span><span class="tag">Phase 1 · shipped</span></p>
+<h1>Genesis — the agentic engine</h1>
+<p class="sub">Greenfield architecture · all-TypeScript · walking skeleton</p>
+<p class="lede">Genesis turns a chat message into a supervised coding-agent run. A <b>supervisor</b> resolves the message to a session; a <b>runner</b> spawns a coding-agent CLI (<code>claude -p --output-format stream-json</code>) inside an isolated git worktree on an <b>ExecutionHost</b>; a <b>projection reducer</b> folds the NDJSON event stream into a live phase machine the chat surface renders.</p>
+
+<div class="panel">
+  <b>Decisions locked 2026-06-04.</b> Greenfield standalone (not extending Hawthorne) ·
+  execution core <b>all-TypeScript</b> (no Rust sidecar) · durable spine <b>Trigger.dev v4</b>
+  (scaffolded, activates Phase&nbsp;5) · cloud sandbox <b>deferred</b> (<code>ExecutionHost.snapshot?</code>
+  optional; Local + VPS now, microVM Phase&nbsp;4). Reuses <i>learnings, not code</i> from Houston, Hawthorne, caltext/midday.
+</div>
+
+<h2>Request lifecycle</h2>
+<svg viewBox="0 0 980 430" width="100%" role="img" aria-label="Genesis request lifecycle">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7aa2ff"/></marker>
+    <style>.b{fill:#11151f;stroke:#2a3142;rx:10} .t{fill:#e6e9ef;font:13px ui-monospace,monospace}
+      .d{fill:#8a93a6;font:11px ui-monospace,monospace} .e{stroke:#7aa2ff;stroke-width:1.5;fill:none;marker-end:url(#a)}
+      .seam{stroke:#b79cff;stroke-dasharray:5 4;stroke-width:1.5}</style>
+  </defs>
+  <rect class="b" x="20" y="24" width="170" height="58" rx="10"/>
+  <text class="t" x="32" y="50">channel</text><text class="d" x="32" y="68">telegram · web · MCP</text>
+  <rect class="b" x="20" y="150" width="170" height="64" rx="10"/>
+  <text class="t" x="32" y="178">supervisor</text><text class="d" x="32" y="196">resolve→dispatch</text><text class="d" x="32" y="210">serialized / thread</text>
+  <rect class="b" x="20" y="300" width="170" height="64" rx="10"/>
+  <text class="t" x="32" y="328">ExecutionHost</text><text class="d" x="32" y="346">local · vps · microvm</text><text class="d" x="32" y="360">snapshot?</text>
+  <rect class="b" x="420" y="300" width="190" height="64" rx="10"/>
+  <text class="t" x="432" y="328">runner</text><text class="d" x="432" y="346">claude -p stream-json</text><text class="d" x="432" y="360">git worktree</text>
+  <rect class="b" x="700" y="300" width="250" height="64" rx="10"/>
+  <text class="t" x="712" y="328">projection reducer</text><text class="d" x="712" y="346">NDJSON → RunPhase</text><text class="d" x="712" y="360">running/awaiting/blocked/done</text>
+  <rect class="b" x="700" y="150" width="250" height="64" rx="10"/>
+  <text class="t" x="712" y="178">reply + live /ws</text><text class="d" x="712" y="196">turn recorded · phase pill</text>
+  <rect class="b" x="420" y="150" width="190" height="64" rx="10"/>
+  <text class="t" x="432" y="178">store</text><text class="d" x="432" y="196">Run·Session·Turn</text>
+  <!-- edges -->
+  <path class="e" d="M105,82 L105,150"/>
+  <path class="e" d="M105,214 L105,300"/>
+  <path class="e" d="M190,332 L420,332"/>
+  <path class="e" d="M610,332 L700,332"/>
+  <path class="e" d="M825,300 L825,214"/>
+  <path class="e" d="M700,182 L610,182"/>
+  <path class="e" d="M420,182 L190,182"/>
+  <line class="seam" x1="210" y1="280" x2="970" y2="280"/>
+  <text class="d" x="214" y="274">— host-invariance seam: identical code above, host varies below —</text>
+</svg>
+<p class="sub">A turn-ending <span class="pill awaiting">awaiting</span> survives a <code>result</code> (the HITL signal is preserved); <span class="pill done">done</span> and <span class="pill blocked">blocked</span> are absorbing — trailing post-result lines can never un-terminate a run.</p>
+
+<h2>Packages</h2>
+<table>
+<tr><th>Package</th><th>Responsibility</th><th>Reuse (learning)</th></tr>
+<tr><td><code>@genesis/projection</code></td><td>NDJSON parser + the run-phase reducer — TDD'd first, the make-or-break piece</td><td>Houston <code>parser.rs</code> · Hawthorne <code>hawthorne-terminal</code></td></tr>
+<tr><td><code>@genesis/host</code></td><td><code>ExecutionHost</code> seam: <code>LocalHost</code> + <code>VpsHost</code> (ssh); <code>snapshot?</code> optional</td><td>the host-invariance insight</td></tr>
+<tr><td><code>@genesis/runner</code></td><td>spawn the agent CLI in a git worktree, fold output through the reducer, kill+clean on every path</td><td>Houston <code>claude_runner</code> · <code>session_id_tracker</code></td></tr>
+<tr><td><code>@genesis/core</code></td><td>domain model + <code>Supervisor</code> (resolve→dispatch), per-thread serialized</td><td>Hawthorne <code>hawthorne-core</code> Run/Session model</td></tr>
+<tr><td><code>@genesis/api</code></td><td>Hono server: <code>/message</code>, live <code>/ws</code>, local web channel, CLI</td><td>Converse L1.5 <code>/ws</code> stream</td></tr>
+</table>
+
+<h2>The host-invariance insight</h2>
+<p>Runtime = <code>{ filesystem + bash + egress }</code>. Local, VPS, and microVM are interchangeable behind <code>ExecutionHost</code>. The sharp consequence: <b>host ownership determines persistence AND credential tier — they are one choice, not two.</b></p>
+<table>
+<tr><th>kind</th><th>persistence</th><th>credential tier</th><th>phase</th></tr>
+<tr><td><code>local</code></td><td>ephemeral (this box)</td><td class="ok">subscription-clean</td><td>1 ✓</td></tr>
+<tr><td><code>vps</code></td><td>durable (user box)</td><td class="ok">subscription-clean</td><td>1 ✓</td></tr>
+<tr><td><code>microvm</code></td><td>snapshot-suspend (idle ≈ free)</td><td class="hi">keyed (boundary-injected)</td><td>4 (deferred)</td></tr>
+</table>
+<p class="sub">Anthropic's 2026 ToS is load-bearing here: subscription OAuth is prohibited in third-party cloud, so the keyed-credential tier is a <i>consequence</i> of choosing an un-owned host, not an independent knob.</p>
+
+<h2>Phase roadmap (BRO-1356)</h2>
+<div class="grid2">
+  <div class="panel"><h3>1 · Walking skeleton <span class="pill done">shipped</span></h3>text → supervisor → runner → projection → reply. LocalHost, one channel. <b>This document.</b></div>
+  <div class="panel"><h3>2 · Soul substrate</h3>Postgres + Drizzle (Run/Session/Turn), Upstash slot-locks, <code>.sid</code> continuity, consciousness stack, Better Auth identity.</div>
+  <div class="panel"><h3>3 · Relationship (HITL)</h3>per-session MCP back-channel — <code>AskUserQuestion</code> surfaces as chat, ambiguity-gated. The <code>awaiting</code> phase is already wired.</div>
+  <div class="panel"><h3>4 · Host abstraction</h3><code>MicroVMHost</code> (E2B/Morph) behind the unchanged seam; <code>snapshot()</code> lights up; deny-all net + git-credential proxy.</div>
+  <div class="panel"><h3>5 · Autonomy</h3>Trigger.dev durable spine, metacognition loop (observe→decide→act→escalate), idle-reaper + heartbeat.</div>
+  <div class="panel"><h3>6 · Self-improvement</h3>Crystallize patterns → skills; out-of-band verifier on an immutable journal; guard predicates.</div>
+</div>
+
+<h2>Cross-review hardening (P20)</h2>
+<p>A cross-model adversarial review (fresh-context skeptic, devil's-advocate brief) scored the first cut <b>5/10</b> and surfaced defects a single-model self-review would have shared. All fixed before merge, with regression tests:</p>
+<table>
+<tr><th>Finding</th><th>Fix</th></tr>
+<tr><td class="crit">F8 — VpsHost path command-injection</td><td><code>shQuote</code> all interpolated shell values; exit-code checked</td></tr>
+<tr><td class="hi">F2/F3 — reducer terminals not absorbing</td><td><code>done</code>/<code>blocked</code> absorbing; first terminal result wins</td></tr>
+<tr><td class="hi">F4 — awaiting dropped on result</td><td><code>awaiting</code> survives turn-end (HITL preserved)</td></tr>
+<tr><td class="hi">F13/F14 — worktree/branch/zombie leaks</td><td>try/finally kills child + removes worktree AND branch on every path</td></tr>
+<tr><td class="hi">F17/F18 — Hub map DoS / unguarded broadcast</td><td>reclaim empty sets; guard each delivery; ws <code>onError</code></td></tr>
+<tr><td class="hi">F19 — concurrent dispatch corruption</td><td>per-thread promise-chain serialization</td></tr>
+<tr><td>F15/F16/F20/F12</td><td>stderr deadlock; 16 MiB line cap; <code>idle</code> phase; optional bearer token</td></tr>
+</table>
+
+<p class="foot">Repo <code>github.com/broomva/genesis</code> (MIT) · 24 tests green · live-verified end-to-end ·
+Bun · Turborepo · Biome · Hono. Format follows audience (P18): this is a human-read artifact, authored as self-contained HTML.</p>
+</div></body></html>

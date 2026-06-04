@@ -68,10 +68,13 @@ export class Supervisor {
   ): Promise<DispatchResult> {
     const prev = this.chains.get(threadId) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(() => this.runTurn(threadId, text, onState));
-    this.chains.set(
-      threadId,
-      next.catch(() => {}),
-    );
+    const guarded = next.catch(() => {});
+    this.chains.set(threadId, guarded);
+    // Compare-and-delete once this turn settles, unless a newer dispatch replaced
+    // it — keeps the per-thread chain map from growing unbounded (P20 round-2 LOW).
+    void guarded.then(() => {
+      if (this.chains.get(threadId) === guarded) this.chains.delete(threadId);
+    });
     return next;
   }
 
