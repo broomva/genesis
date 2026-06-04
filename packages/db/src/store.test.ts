@@ -40,9 +40,10 @@ describe("DrizzleStore (pglite) — Store contract", () => {
       createdAt: "2026-01-01T00:00:00Z",
     });
     const got = await store.findSessionByThread("t-1");
-    expect(got?.id).toBe("s1");
-    expect(got?.agentSessionId).toBeUndefined(); // stored null → read undefined
-    await store.upsertSession({ ...got!, agentSessionId: "sid-9", phase: "done" });
+    if (!got) throw new Error("session not found");
+    expect(got.id).toBe("s1");
+    expect(got.agentSessionId).toBeUndefined(); // stored null → read undefined
+    await store.upsertSession({ ...got, agentSessionId: "sid-9", phase: "done" });
     const updated = await store.findSessionByThread("t-1");
     expect(updated?.agentSessionId).toBe("sid-9");
     expect(updated?.phase).toBe("done");
@@ -121,5 +122,23 @@ describe("Supervisor + DrizzleStore — sessions become selves", () => {
       "again",
     ]);
     await store2.close();
+  });
+});
+
+describe("DrizzleStore (pglite) — deterministic ordering (P20 #4)", () => {
+  test("turns stamped in the same millisecond preserve insertion order via seq", async () => {
+    const store = await createPgliteStore();
+    const inserted: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const t = await store.addTurn({
+        sessionId: "sQ",
+        role: i % 2 ? "agent" : "user",
+        text: `m${i}`,
+      });
+      inserted.push(t.text);
+    }
+    const got = (await store.turnsForSession("sQ")).map((t) => t.text);
+    expect(got).toEqual(inserted); // monotonic seq, not millisecond-collision-dependent
+    await store.close();
   });
 });

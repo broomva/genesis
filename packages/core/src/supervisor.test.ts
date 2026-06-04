@@ -97,3 +97,36 @@ describe("supervisor — chains map reclaim (P20 round-2)", () => {
     expect((sup as unknown as { chains: Map<string, unknown> }).chains.size).toBe(0);
   });
 });
+
+describe("supervisor — ensureWorkspace is not poisoned by a transient failure (P20 #1)", () => {
+  test("a dispatch retries workspace persistence after the first attempt rejects", async () => {
+    let calls = 0;
+    const flakyStore = {
+      async upsertWorkspace(w: unknown) {
+        calls++;
+        if (calls === 1) throw new Error("transient db blip");
+        return w;
+      },
+      async getWorkspace() {
+        return ws;
+      },
+      async findSessionByThread() {
+        return undefined;
+      },
+      async upsertSession(s: unknown) {
+        return s;
+      },
+      async addTurn(t: unknown) {
+        return { ...(t as object), id: "t", createdAt: "2026-01-01T00:00:00Z" };
+      },
+      async turnsForSession() {
+        return [];
+      },
+    } as unknown as ConstructorParameters<typeof Supervisor>[0]["store"];
+    const sup = new Supervisor({ defaultWorkspace: ws, store: flakyStore, run: fakeRunner("ok") });
+    await expect(sup.dispatch("t", "first")).rejects.toThrow("transient db blip");
+    const r = await sup.dispatch("t", "second"); // not poisoned — retries the upsert
+    expect(r.phase).toBe("done");
+    expect(calls).toBe(2);
+  });
+});

@@ -28,3 +28,9 @@ process.stderr.write(`[genesis] dispatching to ${workspaceRoot}\n`);
 const r = await sup.dispatch("cli", prompt, (s) => process.stderr.write(`  · ${s.phase}\n`));
 process.stderr.write(`[genesis] phase=${r.phase} session=${r.session.agentSessionId ?? "-"}\n`);
 console.log(r.reply);
+
+// Release the store (a postgres-js pool would otherwise keep the event loop
+// alive and hang the CLI forever — P20 #2). pglite has a close() too.
+if ("close" in store && typeof store.close === "function") {
+  await (store as { close: () => Promise<void> }).close();
+}

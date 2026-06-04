@@ -14,7 +14,20 @@ async function selectStore(): Promise<{ store: Store; label: string }> {
 
 const workspaceRoot = process.env.GENESIS_WORKSPACE ?? process.cwd();
 const port = Number(process.env.PORT ?? 8787);
-const { store, label } = await selectStore();
+
+// NOTE (Phase 2 Slice A): dispatch is serialized per-thread IN-PROCESS only.
+// Run a SINGLE instance until Slice B adds Upstash slot-locks — two replicas on
+// one Postgres can race the same thread and corrupt --resume continuity (P20 #3).
+let store: Store;
+let label: string;
+try {
+  ({ store, label } = await selectStore());
+} catch (e) {
+  console.error(
+    `[genesis] failed to open the store (check DATABASE_URL): ${e instanceof Error ? e.message : String(e)}`,
+  );
+  process.exit(1);
+}
 const { app, websocket } = build({
   workspaceRoot,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),

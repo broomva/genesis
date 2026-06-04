@@ -52,7 +52,15 @@ export class Supervisor {
   }
 
   private ensureWorkspace(): Promise<void> {
-    this.workspaceEnsured ??= this.store.upsertWorkspace(this.defaultWorkspace).then(() => {});
+    // Clear the memo on rejection so a transient first-dispatch failure (e.g. a
+    // Postgres connect blip) doesn't poison every later dispatch (P20 #1).
+    this.workspaceEnsured ??= this.store
+      .upsertWorkspace(this.defaultWorkspace)
+      .then(() => {})
+      .catch((e) => {
+        this.workspaceEnsured = undefined;
+        throw e;
+      });
     return this.workspaceEnsured;
   }
 

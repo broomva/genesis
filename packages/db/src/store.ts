@@ -6,7 +6,7 @@ import { type Session, type Store, type Turn, type Workspace, isoNow, newId } fr
 import { eq } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
-// biome-ignore lint/suspicious/noExplicitAny: drizzle db type varies by driver
+// drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
 type DrizzleDb = any;
 
 interface SessionRow {
@@ -83,7 +83,7 @@ export class DrizzleStore implements Store {
       .select()
       .from(turns)
       .where(eq(turns.sessionId, sessionId))
-      .orderBy(turns.createdAt);
+      .orderBy(turns.seq); // DB-assigned monotonic order (P20 #4)
     return r.map((x: Turn) => ({
       id: x.id,
       sessionId: x.sessionId,

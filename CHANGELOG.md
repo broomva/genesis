@@ -15,9 +15,17 @@
 - `Store` contract is now **async**; `Supervisor.resolve`/`history` are async.
   `InMemoryStore` retained for dev/tests.
 
+### Deploy constraint
+- **Run a single instance** until Slice B (Upstash slot-locks). Dispatch is
+  serialized per-thread *in-process only*; two replicas on one Postgres can race
+  the same thread and corrupt `--resume` continuity. The `thread_id` UNIQUE
+  constraint turns that race into a loud error rather than silent corruption.
+
 ### Tests
-- +14 (30 total): Store contract, FS-as-truth continuity (close/reopen),
-  Supervisor restart resume, and live API durability across a server restart.
+- +tests: Store contract, FS-as-truth continuity (close/reopen),
+  Supervisor restart resume, live API durability across a server restart,
+  deterministic turn ordering for same-millisecond turns, and supervisor retry
+  after a transient first-dispatch store failure.
 
 ## [Unreleased] — Phase 1: Walking Skeleton (BRO-1357)
 

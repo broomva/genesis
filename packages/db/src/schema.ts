@@ -1,6 +1,6 @@
 // Drizzle schema — the durable shape of a Genesis "self".
 // Phase 2 promotes the Phase-1 in-memory Workspace/Session/Turn to Postgres rows.
-import { index, pgTable, text } from "drizzle-orm/pg-core";
+import { bigserial, index, pgTable, text } from "drizzle-orm/pg-core";
 
 export const workspaces = pgTable("workspaces", {
   id: text("id").primaryKey(),
@@ -21,6 +21,10 @@ export const turns = pgTable(
   "turns",
   {
     id: text("id").primaryKey(),
+    // DB-assigned monotonic order — the authoritative transcript ordering, so
+    // turns stamped in the same millisecond still order deterministically and
+    // correctly across restarts (P20 #4). `createdAt` alone is not enough.
+    seq: bigserial("seq", { mode: "number" }),
     sessionId: text("session_id").notNull(),
     role: text("role").notNull(),
     text: text("text").notNull(),
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE TABLE IF NOT EXISTS turns (
   id text PRIMARY KEY,
+  seq bigserial,
   session_id text NOT NULL,
   role text NOT NULL,
   text text NOT NULL,
