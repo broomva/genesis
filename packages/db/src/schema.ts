@@ -33,8 +33,11 @@ export const turns = pgTable(
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
 
-// Idempotent schema bootstrap — runs on store creation (FS-as-truth: the DB IS
-// the truth, recreated on demand). Multi-statement; executed via the raw client.
+// Fresh-schema bootstrap — runs on store creation (CREATE … IF NOT EXISTS).
+// It creates missing tables but does NOT ALTER existing ones: additive schema
+// changes (e.g. a new column) need real migrations (drizzle-kit; a Slice B+
+// concern). Safe re-run on an up-to-date DB; greenfield-only for now.
+// Multi-statement; executed via the raw client.
 export const MIGRATE_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id text PRIMARY KEY,
