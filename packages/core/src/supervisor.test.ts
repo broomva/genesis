@@ -19,10 +19,10 @@ function fakeRunner(
 }
 
 describe("supervisor", () => {
-  test("resolve creates a session bound to the default workspace, stable per thread", () => {
+  test("resolve creates a session bound to the default workspace, stable per thread", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("hi") });
-    const a = sup.resolve("thread-x");
-    const b = sup.resolve("thread-x");
+    const a = await sup.resolve("thread-x");
+    const b = await sup.resolve("thread-x");
     expect(a.id).toBe(b.id);
     expect(a.workspaceId).toBe("ws-1");
   });
@@ -32,7 +32,7 @@ describe("supervisor", () => {
     const r = await sup.dispatch("t1", "do the thing");
     expect(r.reply).toBe("the answer");
     expect(r.phase).toBe("done");
-    const hist = sup.history("t1");
+    const hist = await sup.history("t1");
     expect(hist.map((t) => t.role)).toEqual(["user", "agent"]);
     expect(hist[1]?.text).toBe("the answer");
   });

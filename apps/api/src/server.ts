@@ -1,4 +1,4 @@
-import { Supervisor } from "@genesis/core";
+import { type Store, Supervisor } from "@genesis/core";
 import { LocalHost } from "@genesis/host";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
@@ -12,6 +12,8 @@ export interface BuildOpts {
   extraArgs?: string[];
   /** When set, /message requires `Authorization: Bearer <token>` (or ?token=). */
   token?: string;
+  /** Durable store (Phase 2). Omit → in-memory (Phase 1 dev behavior). */
+  store?: Store;
 }
 
 export function build(opts: BuildOpts) {
@@ -20,6 +22,7 @@ export function build(opts: BuildOpts) {
     defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
     host: new LocalHost(),
     extraArgs: opts.extraArgs,
+    store: opts.store,
   });
 
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {
@@ -33,7 +36,9 @@ export function build(opts: BuildOpts) {
 
   app.get("/", (c) => c.html(PAGE));
   app.get("/health", (c) => c.json({ ok: true, workspace: opts.workspaceRoot }));
-  app.get("/threads/:id", (c) => c.json({ turns: supervisor.history(c.req.param("id")) }));
+  app.get("/threads/:id", async (c) =>
+    c.json({ turns: await supervisor.history(c.req.param("id")) }),
+  );
 
   app.post("/message", async (c) => {
     if (opts.token) {

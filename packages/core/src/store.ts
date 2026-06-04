@@ -1,17 +1,19 @@
 import type { Session, Turn, Workspace } from "./types";
 
-/** Persistence seam. Phase 1 = in-memory; Phase 2 swaps in Postgres/Drizzle. */
+/** Persistence seam. Async so a real DB (Drizzle/Postgres) can back it.
+ *  Phase 1 used a synchronous in-memory map; Phase 2 makes the contract async
+ *  and adds a durable Drizzle implementation (`@genesis/db`). */
 export interface Store {
-  getWorkspace(id: string): Workspace | undefined;
-  upsertWorkspace(ws: Workspace): Workspace;
-  findSessionByThread(threadId: string): Session | undefined;
-  upsertSession(s: Session): Session;
-  addTurn(t: Omit<Turn, "id" | "createdAt">): Turn;
-  turnsForSession(sessionId: string): Turn[];
+  getWorkspace(id: string): Promise<Workspace | undefined>;
+  upsertWorkspace(ws: Workspace): Promise<Workspace>;
+  findSessionByThread(threadId: string): Promise<Session | undefined>;
+  upsertSession(s: Session): Promise<Session>;
+  addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
+  turnsForSession(sessionId: string): Promise<Turn[]>;
 }
 
 let counter = 0;
-const id = (p: string) => `${p}-${(++counter).toString(36)}`;
+const id = (p: string) => `${p}-${(++counter).toString(36)}-${process.pid.toString(36)}`;
 const now = () => new Date(performance.timeOrigin + performance.now()).toISOString();
 
 export class InMemoryStore implements Store {
@@ -19,27 +21,27 @@ export class InMemoryStore implements Store {
   private sessions = new Map<string, Session>();
   private turns: Turn[] = [];
 
-  getWorkspace(wid: string) {
+  async getWorkspace(wid: string) {
     return this.workspaces.get(wid);
   }
-  upsertWorkspace(ws: Workspace) {
+  async upsertWorkspace(ws: Workspace) {
     this.workspaces.set(ws.id, ws);
     return ws;
   }
-  findSessionByThread(threadId: string) {
+  async findSessionByThread(threadId: string) {
     for (const s of this.sessions.values()) if (s.threadId === threadId) return s;
     return undefined;
   }
-  upsertSession(s: Session) {
-    this.sessions.set(s.id, s);
+  async upsertSession(s: Session) {
+    this.sessions.set(s.id, { ...s });
     return s;
   }
-  addTurn(t: Omit<Turn, "id" | "createdAt">) {
+  async addTurn(t: Omit<Turn, "id" | "createdAt">) {
     const turn: Turn = { ...t, id: id("turn"), createdAt: now() };
     this.turns.push(turn);
     return turn;
   }
-  turnsForSession(sessionId: string) {
+  async turnsForSession(sessionId: string) {
     return this.turns.filter((t) => t.sessionId === sessionId);
   }
 }
