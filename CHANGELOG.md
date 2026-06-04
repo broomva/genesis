@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased] — Phase 2: Soul Substrate · Slice A — durable persistence (BRO-1358)
+
+### Added
+- `@genesis/db` — durable `DrizzleStore` (Drizzle schema for workspaces/sessions/turns).
+  Driver-agnostic factories: `createPgliteStore(dir?)` (pglite — persistent
+  FS-as-truth default, in-memory for tests) and `createPostgresStore(url)`
+  (Railway Postgres in prod via `DATABASE_URL`).
+- API + CLI are **durable by default** (pglite at `~/.genesis/data`;
+  `DATABASE_URL` → Postgres). Sessions + resume continuity (`agentSessionId`)
+  now survive a process restart.
+
+### Changed
+- `Store` contract is now **async**; `Supervisor.resolve`/`history` are async.
+  `InMemoryStore` retained for dev/tests.
+
+### Deploy constraint
+- **Run a single instance** until Slice B (Upstash slot-locks). Dispatch is
+  serialized per-thread *in-process only*; two replicas on one Postgres can race
+  the same thread and corrupt `--resume` continuity. The `thread_id` UNIQUE
+  constraint turns that race into a loud error rather than silent corruption.
+
+### Tests
+- +tests: Store contract, FS-as-truth continuity (close/reopen),
+  Supervisor restart resume, live API durability across a server restart,
+  deterministic turn ordering for same-millisecond turns, and supervisor retry
+  after a transient first-dispatch store failure.
+
 ## [Unreleased] — Phase 1: Walking Skeleton (BRO-1357)
 
 ### Added

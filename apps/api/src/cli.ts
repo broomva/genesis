@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
-import { Supervisor } from "@genesis/core";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { type Store, Supervisor } from "@genesis/core";
+import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import { LocalHost } from "@genesis/host";
 
 const prompt = process.argv.slice(2).join(" ").trim();
@@ -10,13 +13,25 @@ if (!prompt) {
 const workspaceRoot = process.env.GENESIS_WORKSPACE ?? process.cwd();
 const extraArgs = process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean);
 
+// Durable by default so a CLI thread resumes across invocations (FS-as-truth).
+const url = process.env.DATABASE_URL;
+const dataDir = process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
+const store: Store = url ? await createPostgresStore(url) : await createPgliteStore(dataDir);
+
 const sup = new Supervisor({
   defaultWorkspace: { id: "ws-cli", name: "cli", rootPath: workspaceRoot },
   host: new LocalHost(),
   extraArgs,
+  store,
 });
 
 process.stderr.write(`[genesis] dispatching to ${workspaceRoot}\n`);
 const r = await sup.dispatch("cli", prompt, (s) => process.stderr.write(`  · ${s.phase}\n`));
 process.stderr.write(`[genesis] phase=${r.phase} session=${r.session.agentSessionId ?? "-"}\n`);
 console.log(r.reply);
+
+// Release the store (a postgres-js pool would otherwise keep the event loop
+// alive and hang the CLI forever — P20 #2). pglite has a close() too.
+if ("close" in store && typeof store.close === "function") {
+  await (store as { close: () => Promise<void> }).close();
+}

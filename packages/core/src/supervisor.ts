@@ -5,12 +5,14 @@
 // Dispatches are serialized PER THREAD (F19): the default channel uses a
 // constant thread id, so two near-simultaneous messages on one session would
 // otherwise stomp each other's phase + agentSessionId (corrupting --resume).
+// The store is async (Phase 2) so a durable Drizzle/Postgres backend can be
+// swapped in behind the same Supervisor — sessions survive a restart.
 
 import type { ExecutionHost } from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
 import { type RunOptions, type RunResult, removeWorktree, runAgent } from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
-import type { Session, Workspace } from "./types";
+import type { Session, Turn, Workspace } from "./types";
 
 export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
 
@@ -38,18 +40,34 @@ export class Supervisor {
   private readonly defaultWorkspace: Workspace;
   /** Per-thread promise chain — serializes dispatches on the same session. */
   private readonly chains = new Map<string, Promise<unknown>>();
+  /** Memoized one-shot persistence of the default workspace (async ctor work). */
+  private workspaceEnsured?: Promise<void>;
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
     this.run = cfg.run ?? runAgent;
     this.host = cfg.host;
     this.extraArgs = cfg.extraArgs;
-    this.defaultWorkspace = this.store.upsertWorkspace(cfg.defaultWorkspace);
+    this.defaultWorkspace = cfg.defaultWorkspace;
+  }
+
+  private ensureWorkspace(): Promise<void> {
+    // Clear the memo on rejection so a transient first-dispatch failure (e.g. a
+    // Postgres connect blip) doesn't poison every later dispatch (P20 #1).
+    this.workspaceEnsured ??= this.store
+      .upsertWorkspace(this.defaultWorkspace)
+      .then(() => {})
+      .catch((e) => {
+        this.workspaceEnsured = undefined;
+        throw e;
+      });
+    return this.workspaceEnsured;
   }
 
   /** chat-id/thread → Session (created + bound to the default workspace if new). */
-  resolve(threadId: string): Session {
-    const existing = this.store.findSessionByThread(threadId);
+  async resolve(threadId: string): Promise<Session> {
+    await this.ensureWorkspace();
+    const existing = await this.store.findSessionByThread(threadId);
     if (existing) return existing;
     return this.store.upsertSession({
       id: newId("sess"),
@@ -83,12 +101,12 @@ export class Supervisor {
     text: string,
     onState?: (state: RunState, event: AgentEvent) => void,
   ): Promise<DispatchResult> {
-    const session = this.resolve(threadId);
-    const workspace = this.store.getWorkspace(session.workspaceId) ?? this.defaultWorkspace;
-    this.store.addTurn({ sessionId: session.id, role: "user", text });
+    const session = await this.resolve(threadId);
+    const workspace = (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
+    await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
     session.phase = "running";
-    this.store.upsertSession(session);
+    await this.store.upsertSession(session);
 
     const result = await this.run({
       prompt: text,
@@ -104,10 +122,10 @@ export class Supervisor {
 
     if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
     session.phase = result.state.phase;
-    this.store.upsertSession(session);
+    await this.store.upsertSession(session);
 
     const reply = result.state.lastText ?? "(no output)";
-    this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
+    await this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
 
     // Phase 1: discard the worktree AND its branch. Phase 2+ merges back instead.
     if (result.worktreePath) {
@@ -119,8 +137,8 @@ export class Supervisor {
     return { session, reply, phase: result.state.phase };
   }
 
-  history(threadId: string) {
-    const s = this.store.findSessionByThread(threadId);
+  async history(threadId: string): Promise<Turn[]> {
+    const s = await this.store.findSessionByThread(threadId);
     return s ? this.store.turnsForSession(s.id) : [];
   }
 }
