@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased] — Phase 4: Host Abstraction · microVM tier = Vercel Sandbox (BRO-1360)
+
+### Added
+- `@genesis/host` `VercelSandboxHost` — the microVM `ExecutionHost` tier
+  (`kind: "microvm"`, `credentialTier: "keyed"`) backed by Vercel Sandbox
+  (Firecracker microVMs, deny-all egress, snapshot API). Lights up the optional
+  `ExecutionHost.snapshot?()` capability.
+- `createVercelSandboxHost()` factory — lazy-imports `@vercel/sandbox`; per-session
+  persistent VMs via `Sandbox.get({name})` (continuity composes with the Phase-2
+  store); git source; boundary-injected keyed creds (`ANTHROPIC_API_KEY`);
+  `deny-all` default; optional one-time bootstrap commands.
+- API host selection: `GENESIS_HOST=vercel` runs the agent in a Vercel Sandbox
+  (see `.env.example`). Default stays `LocalHost` — no behavior change.
+
+### Changed
+- Runner is microVM-aware: on a `microvm` host it skips the local git worktree
+  (the VM is the isolation boundary) and runs at `remoteCwd` (default
+  `/vercel/sandbox`).
+
+### Fixed
+- Latent Phase-1 bug: a cut worktree was created but the agent still ran in the
+  main tree (`runCwd` was never reassigned). The agent now runs INSIDE the
+  worktree (regression-tested).
+
+### Tests
+- +14 (44 total): VercelSandboxHost (injected `SandboxLike` fake — CI needs no
+  cloud creds), log line-buffering, runner microVM branch (no worktree), and the
+  worktree-cwd regression guard. Live Vercel integration is env-gated.
+
 ## [Unreleased] — Phase 2: Soul Substrate · Slice A — durable persistence (BRO-1358)
 
 ### Added

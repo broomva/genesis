@@ -14,5 +14,8 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@vercel/sandbox": "^2.1.1"
   }
 }

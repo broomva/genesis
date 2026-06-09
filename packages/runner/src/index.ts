@@ -21,8 +21,12 @@ export interface RunOptions {
   host?: ExecutionHost;
   /** CLI binary; default "claude". */
   agentBin?: string;
-  /** Cut an isolated git worktree for the run (default true). */
+  /** Cut an isolated git worktree for the run (default true). Ignored on a
+   *  microVM host — the VM is itself the isolation boundary. */
   worktree?: boolean;
+  /** Working dir inside a microVM host (default: the sandbox default,
+   *  /vercel/sandbox). Ignored on local/VPS hosts (they use cwd). */
+  remoteCwd?: string;
   /** Extra CLI flags appended verbatim (e.g. --dangerously-skip-permissions). */
   extraArgs?: string[];
   /** Called on every projected state transition. */
@@ -58,11 +62,15 @@ function agentArgs(opts: RunOptions): string[] {
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const host = opts.host ?? new LocalHost();
   const id = runId();
-  const runCwd = opts.cwd;
+  const isMicroVM = host.kind === "microvm";
+  // microVM: the VM is the isolation boundary and the repo lives inside it, so
+  // there is no local worktree and the cwd is a sandbox path (default
+  // /vercel/sandbox). local/VPS: run at opts.cwd, in a cut worktree if enabled.
+  let runCwd: string | undefined = isMicroVM ? opts.remoteCwd : opts.cwd;
   let worktreePath: string | undefined;
   let branch: string | undefined;
 
-  const wantWorktree = opts.worktree !== false && (await isGitRepo(host, opts.cwd));
+  const wantWorktree = opts.worktree !== false && !isMicroVM && (await isGitRepo(host, opts.cwd));
   if (wantWorktree) {
     branch = `genesis/${id}`;
     worktreePath = `${opts.cwd.replace(/\/$/, "")}/.genesis-runs/${id}`;
@@ -70,6 +78,7 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
       cwd: opts.cwd,
     });
     if (add.code !== 0) throw new Error(`worktree add failed: ${add.stderr}`);
+    runCwd = worktreePath; // run IN the isolated worktree (was incorrectly opts.cwd)
   }
 
   const handle = host.spawnStream(agentArgs(opts), { cwd: runCwd });

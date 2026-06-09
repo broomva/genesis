@@ -159,3 +159,16 @@ export class VpsHost implements ExecutionHost {
     }
   }
 }
+
+export {
+  type SandboxCommandLike,
+  type SandboxLike,
+  VercelSandboxHost,
+  linesFromLogs,
+} from "./sandbox";
+export {
+  type SandboxRuntime,
+  type VercelSandboxHandle,
+  type VercelSandboxOptions,
+  createVercelSandboxHost,
+} from "./sandbox-factory";
