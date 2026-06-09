@@ -130,3 +130,23 @@ describe("supervisor — ensureWorkspace is not poisoned by a transient failure 
     expect(calls).toBe(2);
   });
 });
+
+describe("supervisor — remoteCwd threading (P20 MED-1)", () => {
+  test("forwards remoteCwd to the runner (microVM working dir)", async () => {
+    let seenRemoteCwd: string | undefined = "unset";
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      remoteCwd: "/vercel/sandbox/app",
+      run: async (o) => {
+        seenRemoteCwd = o.remoteCwd;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("t-remote", "go");
+    expect(seenRemoteCwd).toBe("/vercel/sandbox/app");
+  });
+});

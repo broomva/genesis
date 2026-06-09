@@ -39,8 +39,9 @@ export interface ExecutionHost {
 }
 
 /** Cap a single un-newlined line at 16 MiB so a runaway/malicious agent
- *  emitting one giant line cannot OOM the host (F16). */
-const MAX_LINE_BYTES = 16 * 1024 * 1024;
+ *  emitting one giant line cannot OOM the host (F16). Shared by every host's
+ *  line-buffering path (LocalHost toLines + VercelSandboxHost linesFromLogs). */
+export const MAX_LINE_BYTES = 16 * 1024 * 1024;
 
 /** POSIX single-quote a string for safe interpolation into a remote shell. */
 export function shQuote(s: string): string {
@@ -159,3 +160,19 @@ export class VpsHost implements ExecutionHost {
     }
   }
 }
+
+export {
+  type SandboxCommandLike,
+  type SandboxLike,
+  VercelSandboxHost,
+  linesFromLogs,
+} from "./sandbox";
+export {
+  DEFAULT_AGENT_ALLOWLIST,
+  type SandboxNetworkPolicy,
+  type SandboxRuntime,
+  type VercelSandboxHandle,
+  type VercelSandboxOptions,
+  applyBootstrap,
+  createVercelSandboxHost,
+} from "./sandbox-factory";

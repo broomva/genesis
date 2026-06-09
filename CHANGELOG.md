@@ -1,5 +1,45 @@
 # Changelog
 
+## [Unreleased] — Phase 4: Host Abstraction · microVM tier = Vercel Sandbox (BRO-1360)
+
+### Added
+- `@genesis/host` `VercelSandboxHost` — the microVM `ExecutionHost` tier
+  (`kind: "microvm"`, `credentialTier: "keyed"`) backed by Vercel Sandbox
+  (Firecracker microVMs, snapshot API). Lights up the optional
+  `ExecutionHost.snapshot?()` capability.
+- `createVercelSandboxHost()` factory — lazy-imports `@vercel/sandbox`; per-session
+  persistent VMs via `Sandbox.getOrCreate({name})` (continuity composes with the
+  Phase-2 store); git source; boundary-injected keyed creds (`ANTHROPIC_API_KEY`);
+  optional one-time bootstrap commands (stop-on-failure → never leaks a VM).
+- Egress: deny-by-default **allow-list** (`DEFAULT_AGENT_ALLOWLIST` —
+  api.anthropic.com + npm registries) so the keyed agent can reach the LLM while
+  everything else is denied. `networkPolicy` accepts `"deny-all"`/`"allow-all"`/an
+  allow-list object. NOTE: the default is intentionally narrow — tasks that
+  git-push, clone other repos, pip-install, or call MCP servers need a wider
+  `GENESIS_NETWORK_POLICY` allow-list (see `.env.example`).
+- API host selection: `GENESIS_HOST=vercel` runs the agent in a Vercel Sandbox
+  (see `.env.example`); graceful-shutdown handler calls `stop()` so the
+  persistent-by-default VM snapshots on exit. Default stays `LocalHost`.
+
+### Changed
+- Runner is microVM-aware: on a `microvm` host it skips the local git worktree
+  (the VM is the isolation boundary) and runs at `remoteCwd` (default
+  `/vercel/sandbox`). `remoteCwd` is threaded API → Supervisor → runner.
+
+### Fixed
+- Latent Phase-1 bug: a cut worktree was created but the agent still ran in the
+  main tree (`runCwd` was never reassigned). The agent now runs INSIDE the
+  worktree (regression-tested).
+- F16 line cap (16 MiB) now also applies to the microVM stdout path
+  (`linesFromLogs`), not just `LocalHost`.
+
+### Tests
+- +19 (49 total, 1 env-gated skip): VercelSandboxHost (injected `SandboxLike`
+  fake — CI needs no cloud creds), log line-buffering + the line cap, bootstrap
+  stop-on-failure (no VM leak), runner microVM branch (no worktree), worktree-cwd
+  regression guard, Supervisor `remoteCwd` threading, and a real **env-gated live
+  Vercel integration test** (`sandbox-live.test.ts`, skips without Vercel auth).
+
 ## [Unreleased] — Phase 2: Soul Substrate · Slice A — durable persistence (BRO-1358)
 
 ### Added

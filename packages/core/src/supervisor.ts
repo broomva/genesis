@@ -24,6 +24,9 @@ export interface SupervisorConfig {
   run?: RunnerFn;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
+  /** Working dir inside a microVM host (forwarded to the runner; ignored on
+   *  local/VPS). Default: the sandbox default (/vercel/sandbox). */
+  remoteCwd?: string;
 }
 
 export interface DispatchResult {
@@ -37,6 +40,7 @@ export class Supervisor {
   private readonly run: RunnerFn;
   private readonly host?: ExecutionHost;
   private readonly extraArgs?: string[];
+  private readonly remoteCwd?: string;
   private readonly defaultWorkspace: Workspace;
   /** Per-thread promise chain — serializes dispatches on the same session. */
   private readonly chains = new Map<string, Promise<unknown>>();
@@ -48,6 +52,7 @@ export class Supervisor {
     this.run = cfg.run ?? runAgent;
     this.host = cfg.host;
     this.extraArgs = cfg.extraArgs;
+    this.remoteCwd = cfg.remoteCwd;
     this.defaultWorkspace = cfg.defaultWorkspace;
   }
 
@@ -114,6 +119,7 @@ export class Supervisor {
       resumeSessionId: session.agentSessionId,
       host: this.host,
       extraArgs: this.extraArgs,
+      remoteCwd: this.remoteCwd,
       onState: (state, event) => {
         session.phase = state.phase;
         onState?.(state, event);
