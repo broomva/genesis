@@ -15,8 +15,10 @@ export interface BuildOpts {
   /** Durable store (Phase 2). Omit → in-memory (Phase 1 dev behavior). */
   store?: Store;
   /** Execution host. Omit → LocalHost (default). A VercelSandboxHost wires the
-   *  microVM tier (Phase 4). When microVM, set runner remoteCwd via extraArgs ctx. */
+   *  microVM tier (Phase 4). */
   host?: ExecutionHost;
+  /** Working dir inside a microVM host (default /vercel/sandbox). Ignored on local. */
+  remoteCwd?: string;
 }
 
 export function build(opts: BuildOpts) {
@@ -25,6 +27,7 @@ export function build(opts: BuildOpts) {
     defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
     host: opts.host ?? new LocalHost(),
     extraArgs: opts.extraArgs,
+    remoteCwd: opts.remoteCwd,
     store: opts.store,
   });
 

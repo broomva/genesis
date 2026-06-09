@@ -5,6 +5,7 @@ import {
   VercelSandboxHost,
   linesFromLogs,
 } from "./sandbox";
+import { applyBootstrap } from "./sandbox-factory";
 
 type LogEntry = { stream: "stdout" | "stderr"; data: string };
 
@@ -157,5 +158,43 @@ describe("VercelSandboxHost", () => {
     expect(await host.snapshot()).toBe("snap-123");
     await host.stop();
     expect(sb.stopped).toBe(true);
+  });
+});
+
+describe("linesFromLogs — F16 line cap", () => {
+  test("throws when an un-newlined stream exceeds the 16 MiB cap", async () => {
+    async function* huge() {
+      // 17 x 1 MiB chunks, no newline → must trip the cap before OOM
+      for (let i = 0; i < 17; i++)
+        yield { stream: "stdout" as const, data: "x".repeat(1024 * 1024) };
+    }
+    await expect(
+      (async () => {
+        for await (const _ of linesFromLogs(huge(), "stdout")) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toThrow("16 MiB");
+  });
+});
+
+describe("applyBootstrap — never leak a VM on failure (P20 HIGH-1)", () => {
+  test("stops the sandbox and throws when a bootstrap command fails", async () => {
+    const sb = new FakeSandbox((cmd) => ({
+      logs: [{ stream: "stderr", data: "boom" }],
+      exit: cmd === "false" ? 1 : 0,
+    }));
+    await expect(applyBootstrap(sb, [["false"]])).rejects.toThrow("bootstrap failed");
+    expect(sb.stopped).toBe(true); // VM torn down, not leaked
+  });
+
+  test("runs all commands and does not stop on success", async () => {
+    const sb = new FakeSandbox(() => ({ logs: [], exit: 0 }));
+    await applyBootstrap(sb, [
+      ["npm", "i", "-g", "@anthropic-ai/claude-code"],
+      ["node", "-v"],
+    ]);
+    expect(sb.runCalls.map((c) => c.cmd)).toEqual(["npm", "node"]);
+    expect(sb.stopped).toBe(false);
   });
 });

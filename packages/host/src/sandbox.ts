@@ -11,7 +11,13 @@
 // Structurally typed against `SandboxLike` (the slice of @vercel/sandbox we use)
 // so it is unit-testable with an injected fake — CI needs no cloud credentials.
 
-import type { ExecOpts, ExecResult, ExecutionHost, SpawnHandle } from "./index";
+import {
+  type ExecOpts,
+  type ExecResult,
+  type ExecutionHost,
+  MAX_LINE_BYTES,
+  type SpawnHandle,
+} from "./index";
 
 /** A detached command handle (subset of @vercel/sandbox `Command`). */
 export interface SandboxCommandLike {
@@ -49,6 +55,7 @@ export async function* linesFromLogs(
   for await (const entry of logs) {
     if (entry.stream !== stream) continue;
     buf += entry.data;
+    if (buf.length > MAX_LINE_BYTES) throw new Error("line exceeds 16 MiB cap"); // F16
     let idx = buf.indexOf("\n");
     while (idx >= 0) {
       yield buf.slice(0, idx);
@@ -108,7 +115,10 @@ export class VercelSandboxHost implements ExecutionHost {
   }
 
   /** Optional ExecutionHost capability — lit up because Vercel Sandbox snapshots.
-   *  Returns the snapshot id for later restore (source: { snapshot }). */
+   *  Returns the snapshot id for later restore (source: { snapshot }).
+   *  NOTE: per the @vercel/sandbox API, taking an explicit snapshot STOPS the VM.
+   *  For graceful shutdown prefer stop() — persistent-by-default auto-snapshots on
+   *  stop and the VM resumes via Sandbox.get({ name }) without an explicit id. */
   async snapshot(): Promise<string> {
     const snap = await this.sandbox.snapshot();
     const id = snap.snapshotId ?? snap.id;

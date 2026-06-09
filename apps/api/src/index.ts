@@ -2,33 +2,89 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Store } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
-import { type ExecutionHost, createVercelSandboxHost } from "@genesis/host";
+import {
+  type ExecutionHost,
+  type SandboxNetworkPolicy,
+  createVercelSandboxHost,
+} from "@genesis/host";
 import { build } from "./server";
 
 const defaultDataDir = () =>
   process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
 
+/** Parse GENESIS_NETWORK_POLICY: "deny-all" | "allow-all" | a JSON allow-list
+ *  object. Default (undefined) → the factory's deny-by-default agent allow-list
+ *  (api.anthropic.com + npm). A blanket "deny-all" would block the keyed agent
+ *  from the LLM API, so we warn loudly when it is set explicitly (P20 HIGH-3). */
+function parseNetworkPolicy(): SandboxNetworkPolicy | undefined {
+  const raw = process.env.GENESIS_NETWORK_POLICY;
+  if (!raw) return undefined;
+  if (raw === "deny-all") {
+    console.warn(
+      "[genesis] WARNING: networkPolicy=deny-all blocks egress to api.anthropic.com — " +
+        "the agent cannot reach the LLM. Use an allow-list (default) for working runs.",
+    );
+    return "deny-all";
+  }
+  if (raw === "allow-all") return "allow-all";
+  try {
+    return JSON.parse(raw) as SandboxNetworkPolicy;
+  } catch {
+    console.warn(`[genesis] WARNING: invalid GENESIS_NETWORK_POLICY (${raw}); using default`);
+    return undefined;
+  }
+}
+
+/** Parse GENESIS_SANDBOX_BOOTSTRAP: a JSON array of argv arrays
+ *  (e.g. [["npm","i","-g","@anthropic-ai/claude-code"]]) — handles multi-word
+ *  args and multiple commands. Falls back to whitespace-split for a single
+ *  simple command (P20 LOW-1). */
+function parseBootstrap(): string[][] | undefined {
+  const raw = process.env.GENESIS_SANDBOX_BOOTSTRAP;
+  if (!raw) return undefined;
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v) && v.every((c) => Array.isArray(c))) return v as string[][];
+  } catch {
+    // not JSON — treat as one simple, space-delimited command
+  }
+  return [raw.split(" ").filter(Boolean)];
+}
+
 /** Pick the execution host. GENESIS_HOST=vercel → microVM tier (Vercel Sandbox,
- *  Phase 4): Firecracker VM, deny-all egress, keyed creds (ANTHROPIC_API_KEY).
- *  Requires Vercel auth in env (VERCEL_OIDC_TOKEN, or VERCEL_TOKEN + team/project).
- *  Default → LocalHost. NOTE: this is one shared sandbox; per-session sandboxes
- *  (name = sessionId) land with the HostProvider seam in the Chat SDK channel. */
+ *  Phase 4): Firecracker VM, deny-by-default allow-list egress, keyed creds
+ *  (ANTHROPIC_API_KEY). Requires Vercel auth (VERCEL_OIDC_TOKEN, or VERCEL_TOKEN
+ *  + team/project). Default → LocalHost. NOTE: this is ONE shared sandbox;
+ *  per-session sandboxes (name = sessionId) land with the HostProvider seam in
+ *  the Chat SDK channel (BRO-1445). The handle's stop() is registered for
+ *  graceful shutdown so the persistent-by-default VM snapshots on exit (HIGH-2). */
 async function selectHost(): Promise<{ host?: ExecutionHost; label: string }> {
   if (process.env.GENESIS_HOST !== "vercel") return { host: undefined, label: "local" };
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  const { host } = await createVercelSandboxHost({
+  if (!apiKey) {
+    // credentialTier "keyed" REQUIRES a key — fail fast, not mid-run (HIGH/MED-2).
+    throw new Error(
+      "GENESIS_HOST=vercel requires ANTHROPIC_API_KEY (keyed credential injected into the sandbox).",
+    );
+  }
+  const handle = await createVercelSandboxHost({
     sessionName: process.env.GENESIS_SANDBOX_NAME ?? "genesis-default",
     reuse: true,
     gitUrl: process.env.GENESIS_GIT_URL,
     runtime: "node24",
-    networkPolicy: (process.env.GENESIS_NETWORK_POLICY as "deny-all" | "allow-all") ?? "deny-all",
+    networkPolicy: parseNetworkPolicy(),
     timeoutMs: Number(process.env.GENESIS_SANDBOX_TIMEOUT_MS ?? 45 * 60 * 1000),
-    env: apiKey ? { ANTHROPIC_API_KEY: apiKey } : undefined,
-    bootstrap: process.env.GENESIS_SANDBOX_BOOTSTRAP
-      ? [process.env.GENESIS_SANDBOX_BOOTSTRAP.split(" ")]
-      : undefined,
+    env: { ANTHROPIC_API_KEY: apiKey },
+    bootstrap: parseBootstrap(),
   });
-  return { host, label: "vercel-sandbox(microvm)" };
+  // Graceful shutdown → stop() (persistent-by-default auto-snapshots on stop),
+  // so the microVM tier actually persists across restarts (P20 HIGH-2).
+  const shutdown = () => {
+    void handle.stop().finally(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  return { host: handle.host, label: `vercel-sandbox(microvm:${handle.name})` };
 }
 
 /** Pick the durable store by deployment (Phase 2 — durable by default):
@@ -75,6 +131,7 @@ const { app, websocket } = build({
   token: process.env.GENESIS_TOKEN,
   store,
   host,
+  remoteCwd: process.env.GENESIS_REMOTE_CWD,
 });
 
 console.log(
