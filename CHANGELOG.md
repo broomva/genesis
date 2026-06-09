@@ -14,7 +14,9 @@
 - Egress: deny-by-default **allow-list** (`DEFAULT_AGENT_ALLOWLIST` —
   api.anthropic.com + npm registries) so the keyed agent can reach the LLM while
   everything else is denied. `networkPolicy` accepts `"deny-all"`/`"allow-all"`/an
-  allow-list object.
+  allow-list object. NOTE: the default is intentionally narrow — tasks that
+  git-push, clone other repos, pip-install, or call MCP servers need a wider
+  `GENESIS_NETWORK_POLICY` allow-list (see `.env.example`).
 - API host selection: `GENESIS_HOST=vercel` runs the agent in a Vercel Sandbox
   (see `.env.example`); graceful-shutdown handler calls `stop()` so the
   persistent-by-default VM snapshots on exit. Default stays `LocalHost`.
