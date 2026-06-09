@@ -1,5 +1,5 @@
 import { type Store, Supervisor } from "@genesis/core";
-import { type ExecutionHost, LocalHost } from "@genesis/host";
+import type { HostProvider } from "@genesis/host";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { Hub } from "./hub";
@@ -14,9 +14,9 @@ export interface BuildOpts {
   token?: string;
   /** Durable store (Phase 2). Omit → in-memory (Phase 1 dev behavior). */
   store?: Store;
-  /** Execution host. Omit → LocalHost (default). A VercelSandboxHost wires the
-   *  microVM tier (Phase 4). */
-  host?: ExecutionHost;
+  /** Resolves a per-session host (Phase 4 microVM). Omit → Supervisor defaults
+   *  to a LocalHost via StaticHostProvider. */
+  hostProvider?: HostProvider;
   /** Working dir inside a microVM host (default /vercel/sandbox). Ignored on local. */
   remoteCwd?: string;
 }
@@ -25,7 +25,7 @@ export function build(opts: BuildOpts) {
   const hub = new Hub();
   const supervisor = new Supervisor({
     defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
-    host: opts.host ?? new LocalHost(),
+    hostProvider: opts.hostProvider,
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
     store: opts.store,

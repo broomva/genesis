@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased] — Per-session microVMs + AI Gateway (BRO-1448)
+
+### Added
+- `@genesis/host` `HostProvider` seam (`resolveHost(session) → HostLease`) +
+  `StaticHostProvider` (default — wraps one host). The Supervisor now leases a
+  host per session and releases it after the turn.
+- `VercelSandboxHostProvider` — each chat thread gets its OWN persistent
+  Firecracker microVM (`Sandbox.getOrCreate({name: sessionId})`): warm-cached,
+  concurrent-create-deduped, retried on failure, `shutdown()` stops all.
+- `aiGatewayEnv()` — routes the sandboxed Claude Code CLI through **Vercel AI
+  Gateway** (`ANTHROPIC_BASE_URL=https://ai-gateway.vercel.sh`,
+  `ANTHROPIC_AUTH_TOKEN=<key>`, `ANTHROPIC_API_KEY=""`). Token = `AI_GATEWAY_API_KEY`
+  or `VERCEL_OIDC_TOKEN` (one token authenticates the gateway AND the sandbox).
+- API: `GENESIS_HOST=vercel` now wires the per-session provider; fails fast
+  without a gateway token. Graceful shutdown stops all warm sandboxes.
+
+### Changed
+- Default egress allow-list is now `ai-gateway.vercel.sh` (+ npm) — the agent
+  reaches the LLM via the gateway, not `api.anthropic.com` directly.
+- `Supervisor` takes `hostProvider?` (or `host?` shorthand, wrapped). Lease's
+  `remoteCwd` takes precedence over the Supervisor default.
+
+### Tests
+- +9 (58 total): `aiGatewayEnv`, `StaticHostProvider`, and
+  `VercelSandboxHostProvider` (per-session create, reuse, concurrent-dedup,
+  release/evict, failure-retry, shutdown) via an injected `SandboxCreator` fake.
+- **Live-verified against real Vercel Sandbox** (`sandbox-live.test.ts` run with
+  a pulled `VERCEL_OIDC_TOKEN`): a real Firecracker VM created, commands ran,
+  stdout streamed, VM stopped (8.5s).
+
 ## [Unreleased] — Phase 4: Host Abstraction · microVM tier = Vercel Sandbox (BRO-1360)
 
 ### Added

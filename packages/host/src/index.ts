@@ -176,3 +176,15 @@ export {
   applyBootstrap,
   createVercelSandboxHost,
 } from "./sandbox-factory";
+export {
+  type HostLease,
+  type HostProvider,
+  type HostSession,
+  StaticHostProvider,
+} from "./host-provider";
+export {
+  type SandboxCreator,
+  type VercelSandboxProviderOptions,
+  VercelSandboxHostProvider,
+  aiGatewayEnv,
+} from "./sandbox-provider";

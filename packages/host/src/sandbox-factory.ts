@@ -31,7 +31,7 @@ export interface VercelSandboxOptions {
    *  user's subscription OAuth (2026 ToS on non-owned compute). */
   env?: Record<string, string>;
   /** Egress policy. Default is an allow-list (deny-by-default) permitting only
-   *  api.anthropic.com — a pure "deny-all" would block the keyed agent from
+   *  ai-gateway.vercel.sh (the agent's LLM route) — a pure "deny-all" would block the keyed agent from
    *  reaching the LLM API (and npm during bootstrap), so it is NOT the default
    *  for this tier. Pass "deny-all" explicitly to fully isolate (no agent run). */
   networkPolicy?: SandboxNetworkPolicy;
@@ -74,7 +74,9 @@ function buildSource(o: VercelSandboxOptions) {
  *  npm registry is needed if bootstrap installs the coding-agent CLI. Everything
  *  else is denied (deny-by-default), satisfying BRO-1360 without bricking runs. */
 export const DEFAULT_AGENT_ALLOWLIST: SandboxNetworkPolicy = {
-  allow: ["api.anthropic.com", "registry.npmjs.org", "registry.yarnpkg.com"],
+  // the agent reaches the LLM via Vercel AI Gateway (not api.anthropic.com directly);
+  // npm registries are for the bootstrap install of the coding-agent CLI.
+  allow: ["ai-gateway.vercel.sh", "registry.npmjs.org", "registry.yarnpkg.com"],
 };
 
 /** Run one-time bootstrap commands; on failure STOP the sandbox before throwing
