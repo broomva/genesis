@@ -2,6 +2,8 @@ import { type Store, Supervisor } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
+import { eventStream } from "./channel/bridge";
+import { ChatSdkConnector } from "./channel/chat-sdk";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
 
@@ -80,6 +82,30 @@ export function build(opts: BuildOpts) {
       phase: result.phase,
       sessionId: result.session.agentSessionId,
     });
+  });
+
+  // Chat SDK channel — speaks the AI SDK UI message stream protocol, so any
+  // `useChat`/`DefaultChatTransport` client (or curl) drives Genesis directly.
+  // The Hono server IS the channel; no separate frontend.
+  const chat = new ChatSdkConnector(() => ({
+    messageId: crypto.randomUUID(),
+    newTextId: () => crypto.randomUUID(),
+  }));
+  app.post("/api/chat", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    let incoming: { threadId: string; text: string };
+    try {
+      incoming = chat.parseIncoming(await c.req.json().catch(() => null));
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : "bad request" }, 400);
+    }
+    const events = eventStream(async (emit) => {
+      const result = await supervisor.dispatch(incoming.threadId, incoming.text, (state) => {
+        emit({ kind: "phase", phase: state.phase, text: state.lastText });
+      });
+      emit({ kind: "reply", phase: result.phase, text: result.reply });
+    });
+    return chat.encodeStream(events);
   });
 
   app.get(
