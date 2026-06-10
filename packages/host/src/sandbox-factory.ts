@@ -8,13 +8,21 @@ import { type SandboxLike, VercelSandboxHost } from "./sandbox";
 
 export type SandboxRuntime = "node26" | "node24" | "node22" | "python3.13";
 
+/** A per-host request rule (e.g. header transforms / credential brokering). */
+export type SandboxNetworkRule = { transform?: unknown[] } & Record<string, unknown>;
+
 /** Egress firewall. Strings are coarse; the object form is deny-by-default with
  *  an allow-list (the BRO-1360 posture: deny all except what the agent needs —
- *  e.g. api.anthropic.com). Mirrors the @vercel/sandbox NetworkPolicy shape. */
+ *  e.g. ai-gateway.vercel.sh). Mirrors the @vercel/sandbox NetworkPolicy shape:
+ *  `allow` is EITHER a list of hosts OR a record of host → rules (the latter is
+ *  how credential-brokering transforms attach to a host). */
 export type SandboxNetworkPolicy =
   | "deny-all"
   | "allow-all"
-  | { allow?: string[]; subnets?: { allow?: string[]; deny?: string[] } };
+  | {
+      allow?: string[] | Record<string, SandboxNetworkRule[]>;
+      subnets?: { allow?: string[]; deny?: string[] };
+    };
 
 export interface VercelSandboxOptions {
   /** Sandbox name = continuity key. Same name → same persistent microVM
@@ -31,7 +39,7 @@ export interface VercelSandboxOptions {
    *  user's subscription OAuth (2026 ToS on non-owned compute). */
   env?: Record<string, string>;
   /** Egress policy. Default is an allow-list (deny-by-default) permitting only
-   *  api.anthropic.com — a pure "deny-all" would block the keyed agent from
+   *  ai-gateway.vercel.sh (the agent's LLM route) — a pure "deny-all" would block the keyed agent from
    *  reaching the LLM API (and npm during bootstrap), so it is NOT the default
    *  for this tier. Pass "deny-all" explicitly to fully isolate (no agent run). */
   networkPolicy?: SandboxNetworkPolicy;
@@ -70,11 +78,34 @@ function buildSource(o: VercelSandboxOptions) {
   return undefined;
 }
 
+/** The host the sandboxed agent uses to reach the LLM (Vercel AI Gateway). */
+export const AGENT_LLM_HOST = "ai-gateway.vercel.sh";
+
+/** True when a policy is a custom allow-list (array OR record-of-host→rules form)
+ *  that does NOT permit the AI Gateway host — i.e. the agent's LLM route would be
+ *  silently blocked. Returns false for "allow-all"/"deny-all"/subnet-only policies
+ *  (deny-all is flagged separately) and when `allow` is absent. */
+export function allowListOmitsGatewayHost(policy: SandboxNetworkPolicy | undefined): boolean {
+  if (!policy || typeof policy !== "string") {
+    const allow = policy && typeof policy === "object" ? policy.allow : undefined;
+    if (Array.isArray(allow)) {
+      return !allow.some((h) => h.includes(AGENT_LLM_HOST));
+    }
+    if (allow && typeof allow === "object") {
+      // record form: host → rules. Check the KEYS for the gateway host.
+      return !Object.keys(allow).some((h) => h.includes(AGENT_LLM_HOST));
+    }
+  }
+  return false;
+}
+
 /** Default egress allow-list: the agent must reach the Anthropic API, and the
  *  npm registry is needed if bootstrap installs the coding-agent CLI. Everything
  *  else is denied (deny-by-default), satisfying BRO-1360 without bricking runs. */
 export const DEFAULT_AGENT_ALLOWLIST: SandboxNetworkPolicy = {
-  allow: ["api.anthropic.com", "registry.npmjs.org", "registry.yarnpkg.com"],
+  // the agent reaches the LLM via Vercel AI Gateway (not api.anthropic.com directly);
+  // npm registries are for the bootstrap install of the coding-agent CLI.
+  allow: ["ai-gateway.vercel.sh", "registry.npmjs.org", "registry.yarnpkg.com"],
 };
 
 /** Run one-time bootstrap commands; on failure STOP the sandbox before throwing

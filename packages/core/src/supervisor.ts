@@ -8,7 +8,12 @@
 // The store is async (Phase 2) so a durable Drizzle/Postgres backend can be
 // swapped in behind the same Supervisor — sessions survive a restart.
 
-import type { ExecutionHost } from "@genesis/host";
+import {
+  type ExecutionHost,
+  type HostProvider,
+  LocalHost,
+  StaticHostProvider,
+} from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
 import { type RunOptions, type RunResult, removeWorktree, runAgent } from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
@@ -20,12 +25,17 @@ export interface SupervisorConfig {
   store?: Store;
   /** Default workspace every new thread binds to (Phase 1: one workspace). */
   defaultWorkspace: Workspace;
+  /** Resolves an ExecutionHost per session (e.g. a per-session microVM). When
+   *  omitted, a StaticHostProvider wraps `host` (or a LocalHost). */
+  hostProvider?: HostProvider;
+  /** Shorthand for a single shared host (wrapped in a StaticHostProvider). */
   host?: ExecutionHost;
   run?: RunnerFn;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
   /** Working dir inside a microVM host (forwarded to the runner; ignored on
-   *  local/VPS). Default: the sandbox default (/vercel/sandbox). */
+   *  local/VPS). Default: the sandbox default (/vercel/sandbox). A lease's own
+   *  remoteCwd (from the provider) takes precedence. */
   remoteCwd?: string;
 }
 
@@ -38,7 +48,7 @@ export interface DispatchResult {
 export class Supervisor {
   private readonly store: Store;
   private readonly run: RunnerFn;
-  private readonly host?: ExecutionHost;
+  private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
   private readonly remoteCwd?: string;
   private readonly defaultWorkspace: Workspace;
@@ -50,7 +60,8 @@ export class Supervisor {
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
     this.run = cfg.run ?? runAgent;
-    this.host = cfg.host;
+    this.hostProvider =
+      cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
     this.extraArgs = cfg.extraArgs;
     this.remoteCwd = cfg.remoteCwd;
     this.defaultWorkspace = cfg.defaultWorkspace;
@@ -113,34 +124,43 @@ export class Supervisor {
     session.phase = "running";
     await this.store.upsertSession(session);
 
-    const result = await this.run({
-      prompt: text,
-      cwd: workspace.rootPath,
-      resumeSessionId: session.agentSessionId,
-      host: this.host,
-      extraArgs: this.extraArgs,
-      remoteCwd: this.remoteCwd,
-      onState: (state, event) => {
-        session.phase = state.phase;
-        onState?.(state, event);
-      },
-    });
+    // Lease a host for THIS session (e.g. its own per-session microVM).
+    const lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+    try {
+      const result = await this.run({
+        prompt: text,
+        cwd: workspace.rootPath,
+        resumeSessionId: session.agentSessionId,
+        host: lease.host,
+        extraArgs: this.extraArgs,
+        remoteCwd: lease.remoteCwd ?? this.remoteCwd,
+        onState: (state, event) => {
+          session.phase = state.phase;
+          onState?.(state, event);
+        },
+      });
 
-    if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
-    session.phase = result.state.phase;
-    await this.store.upsertSession(session);
+      if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
+      session.phase = result.state.phase;
+      await this.store.upsertSession(session);
 
-    const reply = result.state.lastText ?? "(no output)";
-    await this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
+      const reply = result.state.lastText ?? "(no output)";
+      await this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
 
-    // Phase 1: discard the worktree AND its branch. Phase 2+ merges back instead.
-    if (result.worktreePath) {
-      await removeWorktree(workspace.rootPath, result.worktreePath, result.branch, this.host).catch(
-        (e) => console.error(`[genesis] worktree cleanup failed: ${e}`),
-      );
+      // Phase 1: discard the worktree AND its branch. Phase 2+ merges back instead.
+      if (result.worktreePath) {
+        await removeWorktree(
+          workspace.rootPath,
+          result.worktreePath,
+          result.branch,
+          lease.host,
+        ).catch((e) => console.error(`[genesis] worktree cleanup failed: ${e}`));
+      }
+
+      return { session, reply, phase: result.state.phase };
+    } finally {
+      await lease.release?.().catch((e) => console.error(`[genesis] host release failed: ${e}`));
     }
-
-    return { session, reply, phase: result.state.phase };
   }
 
   async history(threadId: string): Promise<Turn[]> {

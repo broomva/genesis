@@ -13,3 +13,4 @@ dist/
 **/src/**/*.d.ts
 **/src/**/*.d.ts.map
 **/src/**/*.js.map
+.vercel

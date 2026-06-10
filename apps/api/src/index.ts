@@ -3,9 +3,11 @@ import { join } from "node:path";
 import type { Store } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import {
-  type ExecutionHost,
+  type HostProvider,
   type SandboxNetworkPolicy,
-  createVercelSandboxHost,
+  VercelSandboxHostProvider,
+  aiGatewayEnv,
+  allowListOmitsGatewayHost,
 } from "@genesis/host";
 import { build } from "./server";
 
@@ -14,21 +16,31 @@ const defaultDataDir = () =>
 
 /** Parse GENESIS_NETWORK_POLICY: "deny-all" | "allow-all" | a JSON allow-list
  *  object. Default (undefined) → the factory's deny-by-default agent allow-list
- *  (api.anthropic.com + npm). A blanket "deny-all" would block the keyed agent
- *  from the LLM API, so we warn loudly when it is set explicitly (P20 HIGH-3). */
+ *  (ai-gateway.vercel.sh + npm). A blanket "deny-all" would block the agent from
+ *  the LLM via the gateway, so we warn loudly when it is set explicitly. */
 function parseNetworkPolicy(): SandboxNetworkPolicy | undefined {
   const raw = process.env.GENESIS_NETWORK_POLICY;
   if (!raw) return undefined;
   if (raw === "deny-all") {
     console.warn(
-      "[genesis] WARNING: networkPolicy=deny-all blocks egress to api.anthropic.com — " +
+      "[genesis] WARNING: networkPolicy=deny-all blocks egress to ai-gateway.vercel.sh — " +
         "the agent cannot reach the LLM. Use an allow-list (default) for working runs.",
     );
     return "deny-all";
   }
   if (raw === "allow-all") return "allow-all";
   try {
-    return JSON.parse(raw) as SandboxNetworkPolicy;
+    const policy = JSON.parse(raw) as SandboxNetworkPolicy;
+    // A custom allow-list (array OR record-of-host→rules form) that omits the
+    // gateway host silently breaks the agent's LLM route. Warn loudly (don't
+    // hard-fail — the user may proxy egress elsewhere).
+    if (allowListOmitsGatewayHost(policy)) {
+      console.warn(
+        "[genesis] WARNING: GENESIS_NETWORK_POLICY allow-list omits ai-gateway.vercel.sh — " +
+          "the agent may be unable to reach the LLM via the gateway.",
+      );
+    }
+    return policy;
   } catch {
     console.warn(`[genesis] WARNING: invalid GENESIS_NETWORK_POLICY (${raw}); using default`);
     return undefined;
@@ -51,40 +63,43 @@ function parseBootstrap(): string[][] | undefined {
   return [raw.split(" ").filter(Boolean)];
 }
 
-/** Pick the execution host. GENESIS_HOST=vercel → microVM tier (Vercel Sandbox,
- *  Phase 4): Firecracker VM, deny-by-default allow-list egress, keyed creds
- *  (ANTHROPIC_API_KEY). Requires Vercel auth (VERCEL_OIDC_TOKEN, or VERCEL_TOKEN
- *  + team/project). Default → LocalHost. NOTE: this is ONE shared sandbox;
- *  per-session sandboxes (name = sessionId) land with the HostProvider seam in
- *  the Chat SDK channel (BRO-1445). The handle's stop() is registered for
- *  graceful shutdown so the persistent-by-default VM snapshots on exit (HIGH-2). */
-async function selectHost(): Promise<{ host?: ExecutionHost; label: string }> {
-  if (process.env.GENESIS_HOST !== "vercel") return { host: undefined, label: "local" };
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // credentialTier "keyed" REQUIRES a key — fail fast, not mid-run (HIGH/MED-2).
+/** Pick the host provider. GENESIS_HOST=vercel → a per-session microVM provider
+ *  (Vercel Sandbox): each chat thread gets its OWN Firecracker VM
+ *  (Sandbox.getOrCreate({name: sessionId})), deny-by-default allow-list egress,
+ *  and the agent routed through Vercel AI Gateway (ANTHROPIC_BASE_URL +
+ *  ANTHROPIC_AUTH_TOKEN). The gateway token is AI_GATEWAY_API_KEY or, falling
+ *  back, VERCEL_OIDC_TOKEN (both authenticate the gateway AND the sandbox).
+ *  Default → undefined (Supervisor uses LocalHost). */
+function selectHostProvider(): { provider?: HostProvider; label: string } {
+  if (process.env.GENESIS_HOST !== "vercel") return { provider: undefined, label: "local" };
+  // Treat a BLANK env var as missing — `??` only falls back on undefined, so a
+  // set-but-empty AI_GATEWAY_API_KEY would otherwise shadow VERCEL_OIDC_TOKEN.
+  const token =
+    (process.env.AI_GATEWAY_API_KEY || "").trim() || (process.env.VERCEL_OIDC_TOKEN || "").trim();
+  if (!token) {
+    // The agent's LLM route is keyed — fail fast at boot, not mid-run.
     throw new Error(
-      "GENESIS_HOST=vercel requires ANTHROPIC_API_KEY (keyed credential injected into the sandbox).",
+      "GENESIS_HOST=vercel needs AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN " +
+        "(routes the sandboxed agent through Vercel AI Gateway). Run `vercel env pull`.",
     );
   }
-  const handle = await createVercelSandboxHost({
-    sessionName: process.env.GENESIS_SANDBOX_NAME ?? "genesis-default",
-    reuse: true,
+  const provider = new VercelSandboxHostProvider({
     gitUrl: process.env.GENESIS_GIT_URL,
     runtime: "node24",
     networkPolicy: parseNetworkPolicy(),
     timeoutMs: Number(process.env.GENESIS_SANDBOX_TIMEOUT_MS ?? 45 * 60 * 1000),
-    env: { ANTHROPIC_API_KEY: apiKey },
+    remoteCwd: process.env.GENESIS_REMOTE_CWD,
+    env: aiGatewayEnv(token, process.env.GENESIS_MODEL),
     bootstrap: parseBootstrap(),
   });
-  // Graceful shutdown → stop() (persistent-by-default auto-snapshots on stop),
-  // so the microVM tier actually persists across restarts (P20 HIGH-2).
+  // Graceful shutdown → stop all warm sandboxes (persistent-by-default → they
+  // auto-snapshot on stop, so each session resumes on the next message).
   const shutdown = () => {
-    void handle.stop().finally(() => process.exit(0));
+    void provider.shutdown().finally(() => process.exit(0));
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
-  return { host: handle.host, label: `vercel-sandbox(microvm:${handle.name})` };
+  return { provider, label: "vercel-sandbox(microvm:per-session)" };
 }
 
 /** Pick the durable store by deployment (Phase 2 — durable by default):
@@ -114,13 +129,13 @@ try {
   process.exit(1);
 }
 
-let host: ExecutionHost | undefined;
+let hostProvider: HostProvider | undefined;
 let hostLabel: string;
 try {
-  ({ host, label: hostLabel } = await selectHost());
+  ({ provider: hostProvider, label: hostLabel } = selectHostProvider());
 } catch (e) {
   console.error(
-    `[genesis] failed to start the execution host (check Vercel auth): ${e instanceof Error ? e.message : String(e)}`,
+    `[genesis] failed to start the host provider (check Vercel auth): ${e instanceof Error ? e.message : String(e)}`,
   );
   process.exit(1);
 }
@@ -130,7 +145,7 @@ const { app, websocket } = build({
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
   store,
-  host,
+  hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,
 });
 
