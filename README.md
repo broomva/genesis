@@ -47,6 +47,42 @@ PORT=8787 GENESIS_WORKSPACE=/path/to/a/git/repo bun apps/api/src/index.ts
 GENESIS_WORKSPACE=/path/to/repo bun apps/api/src/cli.ts "do the thing"
 ```
 
+## Chat SDK channel
+
+`POST /api/chat` speaks the **Vercel AI SDK UI message stream** protocol, so any
+`useChat`/`DefaultChatTransport` client (or curl) drives Genesis directly:
+
+```bash
+curl -N -X POST localhost:8787/api/chat -H 'content-type: application/json' \
+  -d '{"id":"t1","messages":[{"role":"user","parts":[{"type":"text","text":"hello"}]}]}'
+```
+
+## Execution host
+
+`GENESIS_HOST=vercel` runs each chat thread's agent in its own per-session
+**Vercel Sandbox** Firecracker microVM, routed through **Vercel AI Gateway** (no
+raw `ANTHROPIC_API_KEY`). Auth: `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`
+(`vercel env pull`). See `.env.example`. Default host is local (`claude` CLI).
+
+## Deploy (Railway)
+
+The engine is a long-running Bun/Hono server → deploys to Railway (always-on),
+not Vercel-as-a-site. `Dockerfile` + `railway.json` are included.
+
+```bash
+railway init -n genesis -w "<workspace>"
+railway add -s genesis
+railway variables -s genesis --set GENESIS_HOST=vercel \
+  --set 'GENESIS_SANDBOX_BOOTSTRAP=[["npm","i","-g","@anthropic-ai/claude-code"]]' \
+  --set GENESIS_MODEL=anthropic/claude-sonnet-4.5 \
+  --set VERCEL_OIDC_TOKEN=<token>      # or a stable AI_GATEWAY_API_KEY
+railway up -s genesis && railway domain -s genesis
+```
+
+`PORT` and `DATABASE_URL` (add the Postgres plugin) are injected by Railway;
+without `DATABASE_URL` the store is pglite on the container fs. `idleTimeout` is
+255s so microVM cold-starts don't sever the SSE stream.
+
 ## Stack
 
 Bun · Turborepo · Biome · TypeScript · Hono. Durable spine (Trigger.dev) and the

@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+dist
+**/dist
+.turbo
+**/.turbo
+.git
+.vercel
+.env
+.env.*
+*.log
+.genesis-runs
+.railway
