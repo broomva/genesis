@@ -15,12 +15,29 @@
 - `eventStream()` bridge — turns the Supervisor's onState callback into the
   `AsyncIterable<OutgoingEvent>` the connector streams.
 
+### Protocol correctness (P20 round-1 fixes — 4/10 → addressed)
+- **HIGH-1 multi-turn concatenation**: the reducer's `lastText` is the latest
+  text BLOCK, not a growing string; successive blocks are unrelated. Since the AI
+  SDK client APPENDS every `text-delta`, the old "emit whole on non-prefix" path
+  concatenated unrelated turns into garbled text. Now: prefix-extending text
+  streams as suffix deltas (one part); a NON-prefix block closes the current part
+  (`text-end`) and opens a new one (`text-start` + fresh id) — blocks render
+  separately, never concatenated.
+- **HIGH-2 dangling open part on error**: the error tail (`text-end` → `error` →
+  `finish`) now lives inside `toUiStreamParts` under a try/catch, so it ALWAYS
+  runs — including when the upstream `Supervisor.dispatch` REJECTS (the common
+  failure path) — leaving no perpetually-streaming open text part.
+
 ### Tests
-- +21 (99 total): `parseChatRequest` (UIMessage parts + plain content shapes),
-  the SSE encoder (exact wire bytes), `toUiStreamParts` (growing-text suffix
-  dedup, error part, empty-skip), and the callback→iterable bridge.
+- +23 (101 total): `parseChatRequest`, exact SSE wire bytes, **multi-block
+  separation with realistic non-prefix data (HIGH-1)**, prefix-extend suffix
+  streaming, **thrown-rejection closes text-end before error (HIGH-2)**,
+  no-text-emitted rejection, empty-skip, and the callback→iterable bridge.
 - **Live-verified by curl**: a real AI SDK request drove a live agent and streamed
-  back `start → text-delta → finish → [DONE]` with the correct protocol headers.
+  back a structurally-valid `start → text-delta → text-end → finish → [DONE]`
+  (started==ended ids, no dangling part). Multi-block separation is proven
+  deterministically by unit test (agents don't reliably emit preamble text on
+  demand, so the non-prefix path is covered with fixed fixtures).
 
 ## [Unreleased] — Per-session microVMs + AI Gateway (BRO-1448)
 

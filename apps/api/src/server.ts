@@ -89,7 +89,7 @@ export function build(opts: BuildOpts) {
   // The Hono server IS the channel; no separate frontend.
   const chat = new ChatSdkConnector(() => ({
     messageId: crypto.randomUUID(),
-    textId: crypto.randomUUID(),
+    newTextId: () => crypto.randomUUID(),
   }));
   app.post("/api/chat", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);

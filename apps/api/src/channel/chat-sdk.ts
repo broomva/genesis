@@ -69,40 +69,74 @@ export const UI_MESSAGE_STREAM_HEADERS = {
   "x-vercel-ai-ui-message-stream": "v1",
 } as const;
 
+export interface StreamIds {
+  messageId: string;
+  /** A fresh text-part id per distinct text block (multi-turn → multiple parts). */
+  newTextId: () => string;
+}
+
 /** Fold the canonical OutgoingEvent stream into ordered UI-stream parts.
- *  Genesis surfaces the assistant text as a growing string (the reducer's
- *  lastText); we emit the new suffix as each `text-delta`. */
+ *
+ *  Genesis's reducer surfaces `lastText` as the LATEST assistant text BLOCK, not
+ *  a monotonically growing string. The AI SDK client APPENDS every `text-delta`
+ *  (it has no replace), so a naive "emit the whole new text on a non-prefix
+ *  change" would concatenate unrelated turns into garbled output. Instead:
+ *    - text that PREFIX-extends the current part → emit the new suffix (true
+ *      incremental streaming within one block);
+ *    - a NON-prefix block → close the current text part (`text-end`) and open a
+ *      new one (`text-start` + fresh id), so blocks render separately.
+ *  The error tail (`text-end` → `error` → `finish`) is owned here in a try/catch
+ *  so it ALWAYS runs — including when the upstream producer (dispatch) rejects —
+ *  leaving no dangling open text part. */
 export async function* toUiStreamParts(
   events: AsyncIterable<OutgoingEvent>,
-  ids: { messageId: string; textId: string },
+  ids: StreamIds,
 ): AsyncGenerator<UiStreamPart> {
   yield { type: "start", messageId: ids.messageId };
-  yield { type: "text-start", id: ids.textId };
+  let currentId: string | null = null;
   let emitted = "";
   let errored: string | undefined;
-  for await (const ev of events) {
-    if (ev.kind === "error") {
-      errored = ev.message;
-      break;
+
+  try {
+    for await (const ev of events) {
+      if (ev.kind === "error") {
+        errored = ev.message;
+        break;
+      }
+      const text = ev.text;
+      if (typeof text !== "string" || text.length === 0) continue;
+
+      // A non-prefix block can't extend the open part → close it, start fresh.
+      if (currentId !== null && !text.startsWith(emitted)) {
+        yield { type: "text-end", id: currentId };
+        currentId = null;
+        emitted = "";
+      }
+      if (currentId === null) {
+        currentId = ids.newTextId();
+        yield { type: "text-start", id: currentId };
+      }
+      const delta = text.slice(emitted.length); // text now prefixes-extends `emitted`
+      if (delta.length > 0) {
+        yield { type: "text-delta", id: currentId, delta };
+        emitted = text;
+      }
     }
-    const text = ev.text;
-    if (typeof text !== "string" || text.length === 0) continue;
-    // growing string → send the new suffix; replacement → send the whole text.
-    const delta = text.startsWith(emitted) ? text.slice(emitted.length) : text;
-    if (delta.length > 0) {
-      yield { type: "text-delta", id: ids.textId, delta };
-      emitted = text;
-    }
+  } catch (e) {
+    errored = e instanceof Error ? e.message : String(e);
   }
-  yield { type: "text-end", id: ids.textId };
-  if (errored) yield { type: "error", errorText: errored };
+
+  if (currentId !== null) yield { type: "text-end", id: currentId };
+  if (errored !== undefined) yield { type: "error", errorText: errored };
   yield { type: "finish" };
 }
 
-/** Build the streaming Response for the AI SDK UI message stream protocol. */
+/** Build the streaming Response for the AI SDK UI message stream protocol.
+ *  `toUiStreamParts` owns the error tail (text-end → error → finish), so here we
+ *  only guard the transport itself and always terminate with `[DONE]`. */
 export function uiMessageStreamResponse(
   events: AsyncIterable<OutgoingEvent>,
-  ids: { messageId: string; textId: string },
+  ids: StreamIds,
 ): Response {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -112,6 +146,8 @@ export function uiMessageStreamResponse(
           controller.enqueue(enc.encode(encodePart(part)));
         }
       } catch (e) {
+        // Defensive: a transport-level failure (not a producer error, which the
+        // generator already folds into an `error` part). Surface + finish.
         controller.enqueue(
           enc.encode(
             encodePart({ type: "error", errorText: e instanceof Error ? e.message : String(e) }),
@@ -129,7 +165,7 @@ export function uiMessageStreamResponse(
 
 /** The Chat SDK connector — the only place that knows the AI SDK wire format. */
 export class ChatSdkConnector implements ChannelConnector {
-  constructor(private readonly ids: () => { messageId: string; textId: string }) {}
+  constructor(private readonly ids: () => StreamIds) {}
   parseIncoming(body: unknown): IncomingMessage {
     return parseChatRequest(body);
   }
