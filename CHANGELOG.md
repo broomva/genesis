@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased] — Chat SDK channel (AI SDK UI message stream) (BRO-1445)
+
+### Added
+- `apps/api/src/channel/` — the **ChannelConnector seam** (channel-connector-trait
+  KG pattern): canonical `IncomingMessage`/`OutgoingEvent`, a `ChannelConnector`
+  interface, and the `ChatSdkConnector` that speaks the **Vercel AI SDK UI message
+  stream protocol** (`start`/`text-start`/`text-delta`/`text-end`/`finish` SSE
+  parts, `data: [DONE]` terminator, `x-vercel-ai-ui-message-stream: v1` header).
+- `POST /api/chat` — any `useChat`/`DefaultChatTransport` client (or curl) drives
+  Genesis directly: parse AI SDK request → `Supervisor.dispatch` → stream run
+  phases + reply as UI message stream parts. **The Hono server IS the channel —
+  no separate frontend.**
+- `eventStream()` bridge — turns the Supervisor's onState callback into the
+  `AsyncIterable<OutgoingEvent>` the connector streams.
+
+### Tests
+- +21 (99 total): `parseChatRequest` (UIMessage parts + plain content shapes),
+  the SSE encoder (exact wire bytes), `toUiStreamParts` (growing-text suffix
+  dedup, error part, empty-skip), and the callback→iterable bridge.
+- **Live-verified by curl**: a real AI SDK request drove a live agent and streamed
+  back `start → text-delta → finish → [DONE]` with the correct protocol headers.
+
 ## [Unreleased] — Per-session microVMs + AI Gateway (BRO-1448)
 
 ### Added
