@@ -5,7 +5,7 @@ import {
   VercelSandboxHost,
   linesFromLogs,
 } from "./sandbox";
-import { applyBootstrap } from "./sandbox-factory";
+import { allowListOmitsGatewayHost, applyBootstrap } from "./sandbox-factory";
 
 type LogEntry = { stream: "stdout" | "stderr"; data: string };
 
@@ -196,5 +196,28 @@ describe("applyBootstrap — never leak a VM on failure (P20 HIGH-1)", () => {
     ]);
     expect(sb.runCalls.map((c) => c.cmd)).toEqual(["npm", "node"]);
     expect(sb.stopped).toBe(false);
+  });
+});
+
+describe("allowListOmitsGatewayHost — both allow shapes (P20 round-2 gap)", () => {
+  test("array form: present → false, absent → true", () => {
+    expect(
+      allowListOmitsGatewayHost({ allow: ["ai-gateway.vercel.sh", "registry.npmjs.org"] }),
+    ).toBe(false);
+    expect(allowListOmitsGatewayHost({ allow: ["registry.npmjs.org"] })).toBe(true);
+  });
+
+  test("record form (host→rules): present → false, absent → true (the real fix)", () => {
+    expect(
+      allowListOmitsGatewayHost({ allow: { "ai-gateway.vercel.sh": [{ transform: [] }] } }),
+    ).toBe(false);
+    expect(allowListOmitsGatewayHost({ allow: { "registry.npmjs.org": [] } })).toBe(true);
+  });
+
+  test("string policies and subnet-only / absent allow → not flagged here", () => {
+    expect(allowListOmitsGatewayHost("allow-all")).toBe(false);
+    expect(allowListOmitsGatewayHost("deny-all")).toBe(false); // flagged separately
+    expect(allowListOmitsGatewayHost({ subnets: { allow: ["10.0.0.0/8"] } })).toBe(false);
+    expect(allowListOmitsGatewayHost(undefined)).toBe(false);
   });
 });

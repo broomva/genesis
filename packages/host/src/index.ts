@@ -168,11 +168,14 @@ export {
   linesFromLogs,
 } from "./sandbox";
 export {
+  AGENT_LLM_HOST,
   DEFAULT_AGENT_ALLOWLIST,
   type SandboxNetworkPolicy,
+  type SandboxNetworkRule,
   type SandboxRuntime,
   type VercelSandboxHandle,
   type VercelSandboxOptions,
+  allowListOmitsGatewayHost,
   applyBootstrap,
   createVercelSandboxHost,
 } from "./sandbox-factory";

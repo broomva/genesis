@@ -7,6 +7,7 @@ import {
   type SandboxNetworkPolicy,
   VercelSandboxHostProvider,
   aiGatewayEnv,
+  allowListOmitsGatewayHost,
 } from "@genesis/host";
 import { build } from "./server";
 
@@ -30,13 +31,10 @@ function parseNetworkPolicy(): SandboxNetworkPolicy | undefined {
   if (raw === "allow-all") return "allow-all";
   try {
     const policy = JSON.parse(raw) as SandboxNetworkPolicy;
-    // A custom allow-list that omits the gateway host silently breaks the agent's
-    // LLM route. Warn loudly (don't hard-fail — the user may proxy egress elsewhere).
-    if (
-      typeof policy === "object" &&
-      Array.isArray((policy as { allow?: string[] }).allow) &&
-      !(policy as { allow: string[] }).allow.some((h) => h.includes("ai-gateway.vercel.sh"))
-    ) {
+    // A custom allow-list (array OR record-of-host→rules form) that omits the
+    // gateway host silently breaks the agent's LLM route. Warn loudly (don't
+    // hard-fail — the user may proxy egress elsewhere).
+    if (allowListOmitsGatewayHost(policy)) {
       console.warn(
         "[genesis] WARNING: GENESIS_NETWORK_POLICY allow-list omits ai-gateway.vercel.sh — " +
           "the agent may be unable to reach the LLM via the gateway.",
