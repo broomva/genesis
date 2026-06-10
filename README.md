@@ -75,13 +75,20 @@ railway add -s genesis
 railway variables -s genesis --set GENESIS_HOST=vercel \
   --set 'GENESIS_SANDBOX_BOOTSTRAP=[["npm","i","-g","@anthropic-ai/claude-code"]]' \
   --set GENESIS_MODEL=anthropic/claude-sonnet-4.5 \
-  --set VERCEL_OIDC_TOKEN=<token>      # or a stable AI_GATEWAY_API_KEY
+  --set VERCEL_OIDC_TOKEN=<token>      # smoke-test only — see note below
 railway up -s genesis && railway domain -s genesis
 ```
 
+> **Credential note.** `VERCEL_OIDC_TOKEN` (from `vercel env pull`) is
+> **short-lived (~12h)** and will fail mid-run once it expires — use it only for a
+> quick smoke. For an **always-on** deploy, set a **stable `AI_GATEWAY_API_KEY`**
+> instead (mint at vercel.com → AI Gateway → API Keys). Auth is checked at boot
+> only for *presence*; an expired token still boots but fails on the first agent run.
+
 `PORT` and `DATABASE_URL` (add the Postgres plugin) are injected by Railway;
 without `DATABASE_URL` the store is pglite on the container fs. `idleTimeout` is
-255s so microVM cold-starts don't sever the SSE stream.
+255s so microVM cold-starts don't sever the SSE stream (`GENESIS_IDLE_TIMEOUT`
+overrides; a non-numeric value falls back to 255).
 
 ## Stack
 
