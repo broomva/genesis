@@ -29,7 +29,20 @@ function parseNetworkPolicy(): SandboxNetworkPolicy | undefined {
   }
   if (raw === "allow-all") return "allow-all";
   try {
-    return JSON.parse(raw) as SandboxNetworkPolicy;
+    const policy = JSON.parse(raw) as SandboxNetworkPolicy;
+    // A custom allow-list that omits the gateway host silently breaks the agent's
+    // LLM route. Warn loudly (don't hard-fail — the user may proxy egress elsewhere).
+    if (
+      typeof policy === "object" &&
+      Array.isArray((policy as { allow?: string[] }).allow) &&
+      !(policy as { allow: string[] }).allow.some((h) => h.includes("ai-gateway.vercel.sh"))
+    ) {
+      console.warn(
+        "[genesis] WARNING: GENESIS_NETWORK_POLICY allow-list omits ai-gateway.vercel.sh — " +
+          "the agent may be unable to reach the LLM via the gateway.",
+      );
+    }
+    return policy;
   } catch {
     console.warn(`[genesis] WARNING: invalid GENESIS_NETWORK_POLICY (${raw}); using default`);
     return undefined;
@@ -61,7 +74,10 @@ function parseBootstrap(): string[][] | undefined {
  *  Default → undefined (Supervisor uses LocalHost). */
 function selectHostProvider(): { provider?: HostProvider; label: string } {
   if (process.env.GENESIS_HOST !== "vercel") return { provider: undefined, label: "local" };
-  const token = process.env.AI_GATEWAY_API_KEY ?? process.env.VERCEL_OIDC_TOKEN;
+  // Treat a BLANK env var as missing — `??` only falls back on undefined, so a
+  // set-but-empty AI_GATEWAY_API_KEY would otherwise shadow VERCEL_OIDC_TOKEN.
+  const token =
+    (process.env.AI_GATEWAY_API_KEY || "").trim() || (process.env.VERCEL_OIDC_TOKEN || "").trim();
   if (!token) {
     // The agent's LLM route is keyed — fail fast at boot, not mid-run.
     throw new Error(
