@@ -149,7 +149,19 @@ const { app, websocket } = build({
   remoteCwd: process.env.GENESIS_REMOTE_CWD,
 });
 
+// Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
+// it. The default is 10s — far too short for `/api/chat`, where a microVM tier
+// spends seconds-to-minutes creating/bootstrapping a sandbox before the agent
+// emits its first phase event. Use Bun's max (255s) so those gaps don't sever the
+// SSE stream. (A periodic heartbeat would lift this ceiling for very-long quiet
+// runs — tracked as a follow-up; agent phase events provide liveness meanwhile.)
+// Guard against a non-numeric env value: Number("abc")=NaN → Bun.serve THROWS at
+// boot (crash-loop). Fall back to the safe default, matching this file's other
+// defensive env parsing. (0 = disable timeout; negative → default.)
+const rawIdle = Number(process.env.GENESIS_IDLE_TIMEOUT);
+const idleTimeout = Number.isInteger(rawIdle) && rawIdle >= 0 ? Math.min(255, rawIdle) : 255;
+
 console.log(
-  `[genesis] local channel → http://localhost:${port}  (workspace: ${workspaceRoot}, store: ${label}, host: ${hostLabel})`,
+  `[genesis] local channel → http://localhost:${port}  (workspace: ${workspaceRoot}, store: ${label}, host: ${hostLabel}, idleTimeout: ${idleTimeout}s)`,
 );
-export default { port, fetch: app.fetch, websocket };
+export default { port, idleTimeout, fetch: app.fetch, websocket };
