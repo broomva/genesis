@@ -52,6 +52,17 @@ describe("parseSse", () => {
     expect(types).toEqual(["start", "text-delta"]);
   });
 
+  test("flushes a final frame NOT terminated by a blank line (truncated tail)", async () => {
+    // last frame has no trailing "\n\n" — must still be emitted, not dropped
+    const body = sseBody([
+      part({ type: "text-delta", id: "t", delta: "first" }),
+      'data: {"type":"text-delta","id":"t","delta":"last"}', // no trailing \n\n
+    ]);
+    const deltas = [];
+    for await (const p of parseSse(body)) if (p.type === "text-delta") deltas.push(p.delta);
+    expect(deltas).toEqual(["first", "last"]);
+  });
+
   test("reassembles a part split across chunk boundaries", async () => {
     const frame = part({ type: "text-delta", id: "t", delta: "hello world" });
     const mid = Math.floor(frame.length / 2);

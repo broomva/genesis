@@ -36,8 +36,25 @@ type UiPart =
   | { type: "error"; errorText: string }
   | { type: string; [k: string]: unknown };
 
+/** Parse one SSE frame's `data:` payload into a part, or null for
+ *  `[DONE]`/keepalive/non-JSON noise. */
+function parseFrame(frame: string): UiPart | null {
+  const line = frame.trim();
+  if (!line.startsWith("data: ")) return null;
+  const payload = line.slice(6);
+  if (payload === "[DONE]") return null;
+  try {
+    return JSON.parse(payload) as UiPart;
+  } catch {
+    return null; // non-JSON keepalive/comment frame
+  }
+}
+
 /** Parse the Genesis SSE body into ordered UI-stream parts. Handles chunk
- *  boundaries (a part may be split across reads) and skips `[DONE]`/non-data. */
+ *  boundaries (a part may be split across reads), flushes a final frame that
+ *  lacks a trailing blank line (truncated tail), and cancels the body on early
+ *  stop so an abandoned read propagates back-pressure to Genesis (a billed
+ *  microVM stops generating instead of running on with no listener). */
 export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<UiPart> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -49,24 +66,20 @@ export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerato
       buf += decoder.decode(value, { stream: true });
       let nl = buf.indexOf("\n\n");
       while (nl >= 0) {
-        const frame = buf.slice(0, nl);
+        const part = parseFrame(buf.slice(0, nl));
         buf = buf.slice(nl + 2);
-        const line = frame.trim();
-        if (line.startsWith("data: ")) {
-          const payload = line.slice(6);
-          if (payload !== "[DONE]") {
-            try {
-              yield JSON.parse(payload) as UiPart;
-            } catch {
-              /* ignore non-JSON keepalive/comment frames */
-            }
-          }
-        }
+        if (part) yield part;
         nl = buf.indexOf("\n\n");
       }
     }
+    // Flush any trailing frame not terminated by a blank line (truncated tail).
+    buf += decoder.decode();
+    const tail = parseFrame(buf);
+    if (tail) yield tail;
   } finally {
-    reader.releaseLock();
+    // cancel() (not just releaseLock) aborts the underlying response on early
+    // stop — no-op if the stream already completed.
+    await reader.cancel().catch(() => {});
   }
 }
 

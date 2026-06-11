@@ -42,6 +42,9 @@ export async function handleAgentMessage(
       }),
     );
   } catch (e) {
-    await thread.post(`⚠️ ${e instanceof Error ? e.message : String(e)}`).catch(() => {});
+    // Log the real cause; show the user a generic message rather than leaking
+    // SDK-internal error strings into the chat.
+    console.error("[genesis-bot] dispatch failed", e);
+    await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
   }
 }

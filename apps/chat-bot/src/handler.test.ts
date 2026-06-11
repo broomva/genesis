@@ -78,8 +78,7 @@ describe("handleAgentMessage", () => {
     const fetchImpl = (async () => new Response(null, { status: 500 })) as unknown as typeof fetch;
     await handleAgentMessage(thread, "go", { baseUrl: "https://x", fetchImpl });
     expect(thread.posts.length).toBe(1);
-    expect(thread.posts[0]).toContain("⚠️");
-    expect(thread.posts[0]).toContain("HTTP 500");
+    expect(thread.posts[0]).toContain("⚠️"); // generic user-facing message; detail is logged, not posted
   });
 
   test("uses the thread id as the continuity key", async () => {
