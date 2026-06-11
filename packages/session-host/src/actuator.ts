@@ -7,6 +7,8 @@
 // text + Enter (send a turn), Escape (interrupt). The screen is NEVER parsed;
 // `pipe-pane` streams raw bytes for the render-only fallback view.
 
+import { shellQuote } from "./hookshim";
+
 export interface SpawnSpec {
   /** tmux session name (unique per Claude session). */
   name: string;
@@ -65,8 +67,19 @@ export class TmuxActuator implements InputActuator {
       throw new Error(`tmux new-session failed (${result.code}): ${result.stderr.trim()}`);
     }
     if (spec.rawSinkPath !== undefined) {
-      // Render-only fallback stream — never parsed by the host.
-      await run(["tmux", "pipe-pane", "-t", spec.name, "-o", `cat >> ${spec.rawSinkPath}`]);
+      // Render-only fallback stream — never parsed by the host. The path is
+      // shell-quoted: tmux hands the pipe-pane command to `sh -c` (P20 B1).
+      const piped = await run([
+        "tmux",
+        "pipe-pane",
+        "-t",
+        spec.name,
+        "-o",
+        `cat >> ${shellQuote(spec.rawSinkPath)}`,
+      ]);
+      if (piped.code !== 0) {
+        throw new Error(`tmux pipe-pane failed (${piped.code}): ${piped.stderr.trim()}`);
+      }
     }
   }
 
@@ -76,7 +89,10 @@ export class TmuxActuator implements InputActuator {
     if (typed.code !== 0) {
       throw new Error(`tmux send-keys failed (${typed.code}): ${typed.stderr.trim()}`);
     }
-    await run(["tmux", "send-keys", "-t", name, "Enter"]);
+    const entered = await run(["tmux", "send-keys", "-t", name, "Enter"]);
+    if (entered.code !== 0) {
+      throw new Error(`tmux send-keys Enter failed (${entered.code}): ${entered.stderr.trim()}`);
+    }
   }
 
   async interrupt(name: string): Promise<void> {

@@ -42,8 +42,10 @@ export interface CreateSessionOptions {
   initialPrompt?: string;
   /** Claude session UUID (default: random). */
   sessionId?: string;
-  /** Resume this session id instead of starting fresh. */
-  resume?: string;
+  // NOTE: `resume` was removed (P20 review B2): Claude Code assigns a NEW
+  // session_id to resumed sessions, which would silently break per-session
+  // routing (hub keys events by session_id). Resume support requires a
+  // SessionStart re-keying handshake — tracked as a follow-up.
   /** Extra CLI args appended verbatim. */
   extraArgs?: string[];
   /** Per-session permission policy (overrides hub default). */
@@ -116,7 +118,7 @@ export class SessionHub {
   }
 
   async createSession(opts: CreateSessionOptions): Promise<SessionHost> {
-    const sessionId = opts.sessionId ?? opts.resume ?? randomUUID();
+    const sessionId = opts.sessionId ?? randomUUID();
     const host = new SessionHost(this, sessionId, opts);
     this.sessions.set(sessionId, host);
     await host.spawn(this.control.socketPath);
@@ -158,13 +160,7 @@ export class SessionHost {
   async spawn(socketPath: string): Promise<void> {
     const bin = resolveClaudeBinary(this.opts.pin, this.opts.bin);
     const settings = JSON.stringify(buildSessionSettings({ socketPath }));
-    const argv: string[] = [];
-    if (this.opts.resume !== undefined) {
-      argv.push("--resume", this.opts.resume);
-    } else {
-      argv.push("--session-id", this.sessionId);
-    }
-    argv.push("--settings", settings);
+    const argv: string[] = ["--session-id", this.sessionId, "--settings", settings];
     if (this.opts.extraArgs) argv.push(...this.opts.extraArgs);
     // Positional prompt LAST; never `-p` (interactive mode is the product).
     if (this.opts.initialPrompt !== undefined) argv.push(this.opts.initialPrompt);

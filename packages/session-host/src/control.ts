@@ -8,6 +8,7 @@
 // `hookSpecificOutput.permissionDecision` JSON is returned and Claude Code
 // proceeds — no TUI dialog, no screen-scraping (probed 2026-06-11, v2.1.173).
 
+import { unlinkSync } from "node:fs";
 import type { IREvent, PermissionDecision, PermissionRequestEvent } from "./ir";
 
 export interface PendingPermission {
@@ -71,13 +72,33 @@ export class ControlServer {
   }
 
   start(): void {
-    this.server = Bun.serve({
+    // Stale-socket recovery (P20 review B3): after a crash/SIGKILL the socket
+    // file persists and a fresh bind throws EADDRINUSE — which would defeat
+    // the daemon-restart story. If binding fails, unlink and retry once.
+    try {
+      this.server = this.bind();
+    } catch {
+      try {
+        unlinkSync(this.opts.socketPath);
+      } catch {
+        // missing file / permission issue — let the rebind throw for real
+      }
+      this.server = this.bind();
+    }
+  }
+
+  private bind(): ReturnType<typeof Bun.serve> {
+    return Bun.serve({
       unix: this.opts.socketPath,
       fetch: (req) => this.route(req),
     });
   }
 
   stop(): void {
+    // Best-effort: resolve held permissions so the IR stream records them.
+    // In-flight curl connections may still see a reset when the server stops
+    // in the same tick — that degrades to Claude Code's native permission
+    // flow (curl -f non-zero → hook ignored), which is the intended posture.
     for (const p of this.pending.values()) {
       p.resolve("ask", "control server shutting down", "timeout");
     }

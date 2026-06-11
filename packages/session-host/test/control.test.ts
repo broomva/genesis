@@ -225,6 +225,22 @@ describe("ControlServer", () => {
     expect(events.some((e) => e.kind === "unknown")).toBe(true);
   });
 
+  test("start() recovers from a stale socket file (daemon crash → restart)", async () => {
+    const { mkdtempSync, writeFileSync } = require("node:fs");
+    const sockDir = mkdtempSync(join(tmpdir(), "gen-stale-"));
+    const sock = join(sockDir, "c.sock");
+    // Simulate crash leftovers: a path the bind cannot take (what a SIGKILLed
+    // daemon leaves behind). start() must unlink and rebind, not throw.
+    writeFileSync(sock, "");
+    const events: IREvent[] = [];
+    const server = new ControlServer({ socketPath: sock, onEvent: (e) => events.push(e) });
+    server.start(); // must not throw
+    servers.push(server);
+    const reply = await post(sock, "/hook", STOP_PAYLOAD);
+    expect(reply).toEqual({});
+    expect(events.some((e) => e.kind === "turn.complete")).toBe(true);
+  });
+
   test("statusline payload becomes a status event and prints a stable line", async () => {
     const events: IREvent[] = [];
     const { sock } = makeServer(events);
