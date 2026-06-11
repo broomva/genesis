@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] — Fix: LocalHost multi-turn resume (per-session worktree) (BRO-1473)
+
+### Fixed
+- **Multi-turn conversations on LocalHost returned `"(no output)"` after the first
+  turn.** `runAgent` cut a fresh git worktree per run and removed it, but
+  `claude --resume` is cwd-scoped — resumed turns ran in a new worktree where the
+  session didn't exist, so the agent produced no text. Now a **per-session worktree**
+  (`.genesis-runs/session-<id>`) is reused across turns (`sessionKey` option;
+  `worktreePersistent` kept across turns, not removed per-turn). The microVM path
+  was already immune (persistent VM per session). Found by the live Telegram test.
+
+### Tests
+- +3 runner tests: sessionKey → stable persistent worktree; reuse-if-exists (no
+  second `worktree add`); one-shot runs stay per-run. Multi-turn verified live —
+  resumed turns reply and the agent recalls prior turns.
+
+
 ## [Unreleased] — Chat SDK (vercel/chat) Telegram channel (BRO-1472)
 
 ### Added
