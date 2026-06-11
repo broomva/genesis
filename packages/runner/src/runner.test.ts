@@ -41,8 +41,8 @@ class FakeLocalHost implements ExecutionHost {
   spawnCwd?: string;
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
-    // make isGitRepo() answer "yes"
-    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" };
+    if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
+    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" }; // isGitRepo → yes
     return { code: 0, stdout: "", stderr: "" };
   }
   spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
@@ -85,5 +85,72 @@ describe("runAgent — local host worktree", () => {
     const host = new FakeLocalHost();
     await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
     expect(host.spawnCwd).toBe("/repo");
+  });
+});
+
+// A local host whose `git worktree list` output is configurable, and that counts
+// `git worktree add` invocations — to exercise the per-session reuse path (BRO-1473).
+class ConfigurableLocalHost implements ExecutionHost {
+  readonly kind = "local" as const;
+  readonly credentialTier = "subscription" as const;
+  addCalls = 0;
+  spawnCwd?: string;
+  constructor(private worktreeListOut = "") {}
+  async exec(cmd: string[]): Promise<ExecResult> {
+    if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
+    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" };
+    if (cmd[1] === "worktree" && cmd[2] === "list") {
+      return { code: 0, stdout: this.worktreeListOut, stderr: "" };
+    }
+    if (cmd[1] === "worktree" && cmd[2] === "add") {
+      this.addCalls++;
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  }
+  spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
+    this.spawnCwd = opts?.cwd;
+    return streamOf(NDJSON);
+  }
+  async readFile() {
+    return "";
+  }
+  async writeFile() {}
+}
+
+describe("runAgent — per-session worktree (BRO-1473)", () => {
+  test("sessionKey → stable `session-<key>` worktree, marked persistent", async () => {
+    const host = new ConfigurableLocalHost("");
+    const r = await runAgent({ prompt: "go", cwd: "/repo", host, sessionKey: "sess-9" });
+    expect(r.worktreePath).toBe("/repo/.genesis-runs/session-sess-9");
+    expect(r.worktreePersistent).toBe(true);
+    expect(host.spawnCwd).toBe("/repo/.genesis-runs/session-sess-9");
+    expect(host.addCalls).toBe(1); // created (didn't exist)
+  });
+
+  test("REUSES an existing session worktree — no second `worktree add` (resume continuity)", async () => {
+    // git worktree list reports the session worktree already exists
+    const existing = "worktree /repo/.genesis-runs/session-sess-9\nHEAD abc\n";
+    const host = new ConfigurableLocalHost(existing);
+    const r = await runAgent({ prompt: "second turn", cwd: "/repo", host, sessionKey: "sess-9" });
+    expect(host.addCalls).toBe(0); // reused, not re-added
+    expect(host.spawnCwd).toBe("/repo/.genesis-runs/session-sess-9"); // same cwd → claude --resume works
+    expect(r.worktreePersistent).toBe(true);
+  });
+
+  test("existence check is line-exact — session-9 does NOT false-match an existing session-90", async () => {
+    // only session-sess-90 exists; asking for session-sess-9 must still CREATE
+    const host = new ConfigurableLocalHost(
+      "worktree /repo/.genesis-runs/session-sess-90\nHEAD a\n",
+    );
+    await runAgent({ prompt: "go", cwd: "/repo", host, sessionKey: "sess-9" });
+    expect(host.addCalls).toBe(1); // not fooled by the substring
+  });
+
+  test("without sessionKey, a one-shot run uses a per-run worktree (not persistent)", async () => {
+    const host = new ConfigurableLocalHost("");
+    const r = await runAgent({ prompt: "go", cwd: "/repo", host });
+    expect(r.worktreePersistent).toBeFalsy();
+    expect(r.worktreePath).toContain("/repo/.genesis-runs/run-");
   });
 });

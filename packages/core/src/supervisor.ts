@@ -134,6 +134,9 @@ export class Supervisor {
         host: lease.host,
         extraArgs: this.extraArgs,
         remoteCwd: lease.remoteCwd ?? this.remoteCwd,
+        // Stable per-session worktree → reused across turns so claude --resume
+        // finds its cwd-scoped session (multi-turn continuity on LocalHost).
+        sessionKey: session.id,
         onState: (state, event) => {
           session.phase = state.phase;
           onState?.(state, event);
@@ -147,8 +150,9 @@ export class Supervisor {
       const reply = result.state.lastText ?? "(no output)";
       await this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
 
-      // Phase 1: discard the worktree AND its branch. Phase 2+ merges back instead.
-      if (result.worktreePath) {
+      // Keep a per-session worktree across turns (resume continuity); only
+      // discard a one-shot per-run worktree.
+      if (result.worktreePath && !result.worktreePersistent) {
         await removeWorktree(
           workspace.rootPath,
           result.worktreePath,
