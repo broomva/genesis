@@ -1,5 +1,31 @@
 # Changelog
 
+## [Unreleased] — Chat SDK (vercel/chat) Telegram channel (BRO-1472)
+
+### Added
+- `apps/chat-bot` — a **Chat SDK** (`vercel/chat`) Telegram bot that fronts the
+  Genesis engine. Polling mode (no webhook/public URL); each Telegram thread maps
+  to a Genesis session (`thread.id`), so the agent keeps per-conversation context
+  and (with `GENESIS_HOST=vercel`) runs in its own Firecracker microVM.
+- `genesisStream()` — bridges Genesis's `/api/chat` (AI SDK UI message stream)
+  into an `AsyncIterable<string>` for `thread.post()`; multi-block narration
+  separated by blank lines; chunk-boundary-safe SSE parsing; errors surfaced.
+- `handleAgentMessage()` — the channel handler (typing indicator, stream, failure
+  → posted `⚠️` message). Decoupled via a minimal thread interface (unit-testable).
+
+### Grounding
+- Built against the **real** `chat@4.30.0` + `@chat-adapter/telegram@4.30.0` +
+  `@chat-adapter/state-memory@4.30.0` API (read from `github.com/vercel/chat`
+  SKILL.md + the `telegram-chat` example, not training data).
+
+### Tests
+- +12 (92 total): `parseSse` (frames, chunk splits, `[DONE]`/keepalive skip),
+  `genesisStream` (single + multi-block, continuity id, error + non-2xx),
+  `handleAgentMessage` (stream, empty-skip, failure-as-message, continuity).
+  Typecheck passes against the real Chat SDK types. The bridge was live-verified
+  against the deployed Genesis (it streamed + correctly surfaced an engine error).
+
+
 ## [Unreleased] — Chat SDK channel (AI SDK UI message stream) (BRO-1445)
 
 ### Added
