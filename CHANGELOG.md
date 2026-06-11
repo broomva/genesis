@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased] — Path B session-host: contract-first wrap of interactive Claude Code (BRO-1484)
+
+### Added
+- **`packages/session-host`** — `@genesis/session-host`: persistent **interactive**
+  Claude Code sessions (exempt mode — never `-p`) wrapped on documented contract
+  surfaces only (the BRO-1475 stability ladder). `SessionHub` (one unix socket,
+  N sessions) + `SessionHost` (tmux-spawned pinned binary + per-session
+  `--settings` hook/statusline injection) + typed event IR.
+- **Hook control plane**: PreToolUse **hold-open permission flow** (policy
+  auto-resolve or UI card via `respondPermission`; timeout falls back to `ask`,
+  never wedges), Stop → `turn.complete` (deterministic, no quiescence
+  heuristics), Notification → `awaiting`, SessionStart → transcript-path
+  delivery (never reconstructed from cwd).
+- **Hook content plane**: `UserPromptSubmit` → user turns, `PreToolUse`/
+  `PostToolUse` → tool flow with structured `tool_response`, **`MessageDisplay`
+  → streaming assistant deltas** (`turn_id`/`message_id`/`index`/`final`).
+- **Tolerant transcript adapter** (history/recovery surface): unknown entry
+  types → passthrough `unknown` IR events with drift telemetry; uuid-only
+  dedupe (`message.id` is NOT a valid key — one message spans multiple block
+  lines); never stalls on new CLI versions.
+- **Contract test harness**: 19 unit tests over real captured v2.1.173 payloads
+  (transcript fixture + verbatim hook payloads) + `bun run smoke` golden live
+  smoke (the canary lane that gates version-pin bumps; `--latest` for the
+  candidate run). Version pinning via `~/.local/share/claude/versions/<pin>` +
+  `DISABLE_AUTOUPDATER=1`.
+
+### Discovered (architecture-correcting)
+- **Transcript persistence is entrypoint-dependent on v2.1.173**: plain
+  TTY-interactive `cli` sessions do NOT write conversation content to the
+  session JSONL live (only `ai-title`); `cli` no-TTY flushes at exit; `sdk-ts`
+  sessions write live. The Path B content plane therefore moved from
+  transcript-tailing to the documented hooks surface — found by the live smoke
+  on its first run.
+
 ## [Unreleased] — Fix: LocalHost multi-turn resume (per-session worktree) (BRO-1473)
 
 ### Fixed
