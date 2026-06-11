@@ -37,9 +37,17 @@ const logger: Logger = {
 const telegram = createTelegramAdapter({ botToken, mode: "polling", userName, logger });
 const chat = new Chat({ userName, adapters: { telegram }, state: createMemoryState(), logger });
 
-// A Telegram DM routes every message as a mention (the bot is the only other
-// participant), so this catches all incoming user text.
+// Idiomatic multi-turn (per the Chat SDK docs): subscribe the thread on first
+// contact, then handle every subsequent message. `onNewMention` fires only for
+// UNSUBSCRIBED threads (a DM's first message, or an @-mention in a group); once
+// subscribed, follow-ups route to `onSubscribedMessage`. Both forward to the same
+// handler, so conversations continue in DMs AND group chats. Genesis keeps the
+// per-conversation agent context, keyed to the stable thread.id.
 chat.onNewMention(async (thread, message) => {
+  await thread.subscribe();
+  await handleAgentMessage(thread, message.text, { baseUrl, token });
+});
+chat.onSubscribedMessage(async (thread, message) => {
   await handleAgentMessage(thread, message.text, { baseUrl, token });
 });
 
