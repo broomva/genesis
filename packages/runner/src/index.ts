@@ -78,14 +78,23 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   let worktreePath: string | undefined;
   let branch: string | undefined;
   // A sessionKey makes the worktree stable + reused across turns (resume needs a
-  // consistent cwd); without it, a fresh per-run worktree (one-shot).
-  const worktreePersistent = !!opts.sessionKey;
+  // consistent cwd); without it, a fresh per-run worktree (one-shot). microVM
+  // skips worktrees entirely, so it is never persistent in that sense.
+  const worktreePersistent = !!opts.sessionKey && !isMicroVM;
 
   const wantWorktree = opts.worktree !== false && !isMicroVM && (await isGitRepo(host, opts.cwd));
   if (wantWorktree) {
     const key = opts.sessionKey ? `session-${opts.sessionKey}` : id;
     branch = `genesis/${key}`;
-    worktreePath = `${opts.cwd.replace(/\/$/, "")}/.genesis-runs/${key}`;
+    // Build the path from git's CANONICAL repo root, not opts.cwd verbatim:
+    // `git worktree list --porcelain` reports symlink-resolved paths, so a cwd
+    // like /tmp (→ /private/tmp on macOS) or a bind-mounted root would otherwise
+    // never exact-match an existing worktree → every resumed turn would re-add
+    // and throw. Canonicalizing both sides fixes it.
+    const top = await host.exec(["git", "rev-parse", "--show-toplevel"], { cwd: opts.cwd });
+    const root =
+      top.code === 0 && top.stdout.trim() ? top.stdout.trim() : opts.cwd.replace(/\/$/, "");
+    worktreePath = `${root}/.genesis-runs/${key}`;
     // Reuse an existing session worktree (so claude --resume finds its cwd-scoped
     // session); otherwise create it. Attach a stale branch if the dir is gone.
     const list = await host.exec(["git", "worktree", "list", "--porcelain"], { cwd: opts.cwd });

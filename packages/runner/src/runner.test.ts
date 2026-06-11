@@ -41,8 +41,8 @@ class FakeLocalHost implements ExecutionHost {
   spawnCwd?: string;
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
-    // make isGitRepo() answer "yes"
-    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" };
+    if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
+    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" }; // isGitRepo → yes
     return { code: 0, stdout: "", stderr: "" };
   }
   spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
@@ -97,6 +97,7 @@ class ConfigurableLocalHost implements ExecutionHost {
   spawnCwd?: string;
   constructor(private worktreeListOut = "") {}
   async exec(cmd: string[]): Promise<ExecResult> {
+    if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
     if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" };
     if (cmd[1] === "worktree" && cmd[2] === "list") {
       return { code: 0, stdout: this.worktreeListOut, stderr: "" };
