@@ -137,6 +137,15 @@ describe("runAgent — per-session worktree (BRO-1473)", () => {
     expect(r.worktreePersistent).toBe(true);
   });
 
+  test("existence check is line-exact — session-9 does NOT false-match an existing session-90", async () => {
+    // only session-sess-90 exists; asking for session-sess-9 must still CREATE
+    const host = new ConfigurableLocalHost(
+      "worktree /repo/.genesis-runs/session-sess-90\nHEAD a\n",
+    );
+    await runAgent({ prompt: "go", cwd: "/repo", host, sessionKey: "sess-9" });
+    expect(host.addCalls).toBe(1); // not fooled by the substring
+  });
+
   test("without sessionKey, a one-shot run uses a per-run worktree (not persistent)", async () => {
     const host = new ConfigurableLocalHost("");
     const r = await runAgent({ prompt: "go", cwd: "/repo", host });

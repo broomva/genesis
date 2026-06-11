@@ -89,7 +89,10 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     // Reuse an existing session worktree (so claude --resume finds its cwd-scoped
     // session); otherwise create it. Attach a stale branch if the dir is gone.
     const list = await host.exec(["git", "worktree", "list", "--porcelain"], { cwd: opts.cwd });
-    if (!list.stdout.includes(worktreePath)) {
+    // Exact porcelain-line match (each block starts `worktree <abs-path>`), NOT a
+    // substring — else session-1 would false-match an existing session-10.
+    const exists = list.stdout.split("\n").some((l) => l === `worktree ${worktreePath}`);
+    if (!exists) {
       let add = await host.exec(["git", "worktree", "add", "-b", branch, worktreePath, "HEAD"], {
         cwd: opts.cwd,
       });
