@@ -44,6 +44,8 @@ export interface EngineHub {
 export interface EngineSession {
   sessionId: string;
   send(text: string): Promise<void>;
+  /** Interrupt the in-flight turn (Escape). */
+  interrupt(): Promise<void>;
   alive(): Promise<boolean>;
   kill(): Promise<void>;
 }
@@ -70,12 +72,31 @@ interface LiveSession {
   session: EngineSession;
   /** Set once any hook event has been observed (trust dialog passed). */
   hookSeen: boolean;
+  /** Abort the in-flight turn (set during a turn, cleared on completion). Lets
+   *  reset() resolve a parked run() deterministically instead of leaving it to
+   *  hang on turnDone until the turn timeout (P20 BRO-1493 B1). */
+  abort?: () => void;
+}
+
+/** Live session state for a thread (BRO-1493 /control surface). */
+export interface SessionControlStatus {
+  /** A live interactive session exists for this key. */
+  alive: boolean;
+  /** Claude session id, when live. */
+  sessionId?: string;
 }
 
 export interface InteractiveEngine {
   run: (opts: RunOptions) => Promise<RunResult>;
   /** Kill every live agent session and the hub (SIGTERM path). */
   shutdown: () => Promise<void>;
+  /** Reset a thread's session: kill + evict so the NEXT turn spawns fresh
+   *  (clears the agent's working context). Returns true if a session existed. */
+  reset: (sessionKey: string) => Promise<boolean>;
+  /** Interrupt the in-flight turn for a thread (Escape). Returns true if live. */
+  interrupt: (sessionKey: string) => Promise<boolean>;
+  /** Inspect a thread's live session state. */
+  status: (sessionKey: string) => Promise<SessionControlStatus>;
 }
 
 export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): InteractiveEngine {
@@ -198,6 +219,17 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     const entry: LiveSession = reuse
       ? (prior as LiveSession)
       : { session: undefined as unknown as EngineSession, hookSeen: false };
+
+    // Let reset() abort THIS turn deterministically (B1): push a terminal
+    // result so the reducer goes blocked, then resolve turnDone. session.kill()
+    // emits no IR, so without this the run would hang to the turn timeout.
+    let aborted = false;
+    entry.abort = () => {
+      if (aborted) return;
+      aborted = true;
+      push({ type: "result", subtype: "reset-aborted", is_error: true, session_id: sessionId });
+      finish();
+    };
 
     const unsubscribe = engineHub.onEvent((ir) => {
       if (ir.sessionId !== sessionId) return;
@@ -322,6 +354,7 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       clearTimeout(timeout);
       if (nudge !== undefined) clearTimeout(nudge);
       unsubscribe();
+      entry.abort = undefined; // turn over — no longer abortable
     }
 
     return {
@@ -344,5 +377,33 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     if (hub && started) await hub.stop();
   };
 
-  return { run, shutdown };
+  // --- /control surface (BRO-1493) — thread session lifecycle ------------
+
+  const reset = async (sessionKey: string): Promise<boolean> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined) return false;
+    // Abort any in-flight turn FIRST (resolves its parked run() as blocked),
+    // then evict + kill — so /new during an active turn doesn't dangle the
+    // streaming reply until the turn timeout (P20 BRO-1493 B1).
+    entry.abort?.();
+    live.delete(sessionKey);
+    await entry.session.kill().catch(() => {});
+    return true;
+  };
+
+  const interrupt = async (sessionKey: string): Promise<boolean> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined || !(await entry.session.alive())) return false;
+    await entry.session.interrupt();
+    return true;
+  };
+
+  const status = async (sessionKey: string): Promise<SessionControlStatus> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined) return { alive: false };
+    const alive = await entry.session.alive();
+    return { alive, sessionId: alive ? entry.session.sessionId : undefined };
+  };
+
+  return { run, shutdown, reset, interrupt, status };
 }

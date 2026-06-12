@@ -12,6 +12,7 @@ type Listener = (e: IREvent) => void;
 class FakeSession implements EngineSession {
   sent: string[] = [];
   killed = false;
+  interrupted = 0;
   constructor(
     public sessionId: string,
     private deliver: (sessionId: string) => void,
@@ -19,6 +20,9 @@ class FakeSession implements EngineSession {
   async send(text: string): Promise<void> {
     this.sent.push(text);
     this.deliver(this.sessionId);
+  }
+  async interrupt(): Promise<void> {
+    this.interrupted += 1;
   }
   async alive(): Promise<boolean> {
     return !this.killed;
@@ -267,6 +271,67 @@ describe("createInteractiveEngine", () => {
       { type: "result", subtype: "success", session_id: "x", result: "⚠️ /model …" },
     ]);
     expect(replayed.phase).toBe("done");
+  });
+
+  test("control: reset kills + evicts a live session (fresh context next turn)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl1"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c1" };
+    await engine.run({ ...opts, prompt: "hello" });
+    expect(await engine.reset("c1")).toBe(true);
+    expect(hub.sessions[0]?.killed).toBe(true);
+    // gone → reset again is a no-op
+    expect(await engine.reset("c1")).toBe(false);
+    // next turn respawns fresh
+    await engine.run({ ...opts, prompt: "again" });
+    expect(hub.createCalls).toBe(2);
+    await engine.shutdown();
+  });
+
+  test("control: reset DURING an active turn resolves it blocked (not a 10-min hang, B1)", async () => {
+    // A turn that never completes on its own (no terminal IR).
+    const hub = new FakeHub(() => []);
+    const engine = createInteractiveEngine({ hub, turnTimeoutMs: 600_000 });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "cb1" };
+    let resolved: { phase: string } | undefined;
+    const runP = engine.run({ ...opts, prompt: "long-running" }).then((r) => {
+      resolved = { phase: r.state.phase };
+      return r;
+    });
+    // Let the turn get in-flight (session created, parked on turnDone).
+    await Bun.sleep(20);
+    expect(resolved).toBeUndefined(); // still running
+    // Reset mid-turn must abort it promptly — NOT wait for the 600s timeout.
+    const start = Date.now();
+    expect(await engine.reset("cb1")).toBe(true);
+    const r = await runP;
+    expect(Date.now() - start).toBeLessThan(2_000); // resolved fast, not on timeout
+    expect(r.state.phase).toBe("blocked");
+    expect(hub.sessions[0]?.killed).toBe(true);
+    await engine.shutdown();
+  });
+
+  test("control: interrupt sends Escape to the live session", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl2"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c2" };
+    expect(await engine.interrupt("c2")).toBe(false); // no session yet
+    await engine.run({ ...opts, prompt: "work" });
+    expect(await engine.interrupt("c2")).toBe(true);
+    expect(hub.sessions[0]?.interrupted).toBe(1);
+    await engine.shutdown();
+  });
+
+  test("control: status reports liveness + sessionId", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl3"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c3" };
+    expect(await engine.status("c3")).toEqual({ alive: false });
+    const r = await engine.run({ ...opts, prompt: "x" });
+    const st = await engine.status("c3");
+    expect(st.alive).toBe(true);
+    expect(st.sessionId).toBe(r.state.sessionId);
+    await engine.shutdown();
   });
 
   test("error IR kind marks the run blocked", async () => {

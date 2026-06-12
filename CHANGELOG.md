@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased] — Native slash-command framework (BRO-1493)
+
+### Added
+- **Telegram slash commands mapped to real engine actions** — never typed into
+  the TUI. Control set (in the native `/` menu via `setMyCommands`): `/new`
+  (reset → fresh agent context), `/stop` (interrupt), `/status` (session state),
+  `/commands` (full palette), `/help`. Aliases: `/reset` `/clear`→new,
+  `/cancel`→stop, `/skills`→commands, `/start`→help.
+- **`/commands` enumerates the session's FULL palette** — built-ins + every
+  installed skill (parsed from `SKILL.md` frontmatter) — the "show all commands
+  active on the session". Any `/<skill>` typed forwards to the session and runs
+  (all skills "inherited"); built-in overlays still decline via the PR#11 floor.
+- **Genesis `/control` surface** (`POST /control {threadId, action}`) →
+  Supervisor resolves thread→session and delegates to the interactive engine's
+  new `reset`/`interrupt`/`status` methods. Print engine → "unsupported".
+- Routing lives in the message handler (Telegram delivers commands as normal
+  messages, not SlashCommandEvents) — channel-agnostic, central.
+
+### Live-verified
+- `/control reset` killed the live session → the agent FORGOT a planted codeword
+  (`NO-MEMORY`) on the next turn (fresh context); `status` flipped live→idle;
+  unknown action → 400; native menu registered on @Broomvatechbot (5 commands).
+- +25 tests (engine control, command parsing/routing, palette enumeration, render).
+
+
 ## [Unreleased] — Telegram bot: durable subscriptions + DM robustness (BRO-1492)
 
 ### Fixed

@@ -21,6 +21,25 @@ import type { Session, Turn, Workspace } from "./types";
 
 export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
 
+/** Live-session control surface (BRO-1493). The interactive engine implements
+ *  it; the print engine has none (control ops return not-supported). Keyed by
+ *  the Supervisor's per-session worktree key (`session.id`). */
+export interface EngineControl {
+  reset(sessionKey: string): Promise<boolean>;
+  interrupt(sessionKey: string): Promise<boolean>;
+  status(sessionKey: string): Promise<{ alive: boolean; sessionId?: string }>;
+}
+
+/** Result of a /control action. */
+export interface ControlResult {
+  ok: boolean;
+  /** Why ok=false: no engine control surface, or no session for the thread. */
+  reason?: "unsupported" | "no-session";
+  phase?: RunState["phase"];
+  alive?: boolean;
+  sessionId?: string;
+}
+
 export interface SupervisorConfig {
   store?: Store;
   /** Default workspace every new thread binds to (Phase 1: one workspace). */
@@ -31,6 +50,9 @@ export interface SupervisorConfig {
   /** Shorthand for a single shared host (wrapped in a StaticHostProvider). */
   host?: ExecutionHost;
   run?: RunnerFn;
+  /** Live-session control surface (interactive engine). Enables /control
+   *  (reset/interrupt/status). Omit → those ops report "unsupported". */
+  control?: EngineControl;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
   /** Working dir inside a microVM host (forwarded to the runner; ignored on
@@ -48,6 +70,7 @@ export interface DispatchResult {
 export class Supervisor {
   private readonly store: Store;
   private readonly run: RunnerFn;
+  private readonly control?: EngineControl;
   private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
   private readonly remoteCwd?: string;
@@ -60,6 +83,7 @@ export class Supervisor {
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
     this.run = cfg.run ?? runAgent;
+    this.control = cfg.control;
     this.hostProvider =
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
     this.extraArgs = cfg.extraArgs;
@@ -170,5 +194,44 @@ export class Supervisor {
   async history(threadId: string): Promise<Turn[]> {
     const s = await this.store.findSessionByThread(threadId);
     return s ? this.store.turnsForSession(s.id) : [];
+  }
+
+  // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
+
+  /** Reset a thread's agent session: drop the live process (next turn spawns
+   *  fresh = new conversation, same workspace) and clear stored continuity. */
+  async reset(threadId: string): Promise<ControlResult> {
+    if (this.control === undefined) return { ok: false, reason: "unsupported" };
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    // Abort + kill the live session (engine resolves any in-flight turn as
+    // blocked immediately — B1).
+    const had = await this.control.reset(s.id);
+    // Then wait for any in-flight dispatch on this thread to settle, so its
+    // phase/agentSessionId write-back can't clobber our reset (B2 — the racing
+    // runTurn finally-writes blocked + the OLD agentSessionId). Re-read after.
+    await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
+    const fresh = (await this.store.findSessionByThread(threadId)) ?? s;
+    fresh.agentSessionId = undefined;
+    fresh.phase = "idle";
+    await this.store.upsertSession(fresh);
+    return { ok: true, phase: "idle", alive: had };
+  }
+
+  /** Interrupt the in-flight turn for a thread. */
+  async interrupt(threadId: string): Promise<ControlResult> {
+    if (this.control === undefined) return { ok: false, reason: "unsupported" };
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    const live = await this.control.interrupt(s.id);
+    return { ok: live, reason: live ? undefined : "no-session" };
+  }
+
+  /** Live state for a thread (phase from the store, liveness from the engine). */
+  async status(threadId: string): Promise<ControlResult> {
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    const st = this.control ? await this.control.status(s.id) : { alive: false };
+    return { ok: true, phase: s.phase, alive: st.alive, sessionId: st.sessionId };
   }
 }

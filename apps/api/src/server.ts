@@ -1,4 +1,4 @@
-import { type Store, Supervisor } from "@genesis/core";
+import { type EngineControl, type Store, Supervisor } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { Hono } from "hono";
@@ -25,6 +25,9 @@ export interface BuildOpts {
   /** Alternate runner (e.g. the exempt interactive engine, BRO-1488). Omit →
    *  the default print engine (`runAgent`, `claude -p`). */
   run?: (opts: RunOptions) => Promise<RunResult>;
+  /** Live-session control surface (interactive engine) → enables POST /control
+   *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
+  control?: EngineControl;
 }
 
 export function build(opts: BuildOpts) {
@@ -36,6 +39,7 @@ export function build(opts: BuildOpts) {
     remoteCwd: opts.remoteCwd,
     store: opts.store,
     run: opts.run,
+    control: opts.control,
   });
 
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {
@@ -60,6 +64,29 @@ export function build(opts: BuildOpts) {
 
   app.get("/", (c) => c.html(PAGE));
   app.get("/health", (c) => c.json({ ok: true, workspace: opts.workspaceRoot }));
+
+  // Thread session control (BRO-1493): reset (fresh context) / interrupt /
+  // status. Slash commands map here, never into the agent TUI.
+  app.post("/control", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      threadId?: string;
+      action?: string;
+    };
+    const threadId = body.threadId;
+    if (!threadId) return c.json({ error: "threadId required" }, 400);
+    switch (body.action) {
+      case "reset":
+        return c.json(await supervisor.reset(threadId));
+      case "interrupt":
+        return c.json(await supervisor.interrupt(threadId));
+      case "status":
+        return c.json(await supervisor.status(threadId));
+      default:
+        return c.json({ error: `unknown action: ${body.action ?? "(none)"}` }, 400);
+    }
+  });
+
   app.get("/threads/:id", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     return c.json({ turns: await supervisor.history(c.req.param("id")) });
