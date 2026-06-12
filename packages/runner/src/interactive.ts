@@ -103,9 +103,12 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
 
   const run = async (opts: RunOptions): Promise<RunResult> => {
     const host = opts.host ?? new LocalHost();
-    if (host.kind === "microvm") {
+    // Allow-list, not deny-list (CodeRabbit #9-1): a `vps` (or any future
+    // remote) host would run worktree git commands remotely while the hub
+    // spawns claude LOCALLY — a split-brain cwd. Only "local" is coherent.
+    if (host.kind !== "local") {
       throw new Error(
-        "interactive engine is local-host only (tmux + local claude); use the print engine for microVM hosts",
+        `interactive engine is local-host only (tmux + local claude); got host kind "${host.kind}" — use the print engine`,
       );
     }
     const engineHub = ensureHub();
@@ -146,17 +149,24 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     const assistantAccum = new Map<string, string>();
     let lastAssistant: string | undefined;
 
-    const push = (event: AgentEvent): void => {
-      events.push(event);
-      state = reduce(state, event);
-      opts.onState?.(state, event);
-    };
-    push({ type: "system", subtype: "init", session_id: sessionId });
-
     let finish: () => void = () => {};
     const turnDone = new Promise<void>((resolve) => {
       finish = resolve;
     });
+
+    const push = (event: AgentEvent): void => {
+      events.push(event);
+      state = reduce(state, event);
+      opts.onState?.(state, event);
+      // HITL (CodeRabbit #9-2): when the reducer gates on a human
+      // (AskUserQuestion → "awaiting"), the interactive TUI is showing the
+      // question dialog and no Stop hook will fire — the turn must return
+      // `awaiting` NOW (print-engine parity), with the session left ALIVE for
+      // the answer. Without this, the run hangs to the timeout, which kills
+      // the awaiting session.
+      if (state.phase === "awaiting") finish();
+    };
+    push({ type: "system", subtype: "init", session_id: sessionId });
 
     const entry: LiveSession = reuse
       ? (prior as LiveSession)

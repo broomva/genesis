@@ -212,18 +212,21 @@ describe("createInteractiveEngine", () => {
         name: "AskUserQuestion",
         input: { questions: [{ question: "Which option?" }] },
       },
-      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "asked" },
-    ]);
-    const engine = createInteractiveEngine({ hub });
+    ]); // NO turn.complete — interactive TUI is showing the dialog (no Stop fires)
+    const engine = createInteractiveEngine({ hub, turnTimeoutMs: 5_000 });
+    const start = Date.now();
     const result = await engine.run({
       prompt: "do a thing",
       cwd: "/x",
       worktree: false,
       sessionKey: "s5",
     });
-    // result-while-awaiting keeps the gate (reducer F4) — same as print engine.
+    // Returns awaiting PROMPTLY (not via the timeout) with the session ALIVE
+    // for the answer turn (CodeRabbit #9-2).
+    expect(Date.now() - start).toBeLessThan(4_000);
     expect(result.state.phase).toBe("awaiting");
     expect(result.state.pendingQuestion).toBe("Which option?");
+    expect(hub.sessions[0]?.killed).toBe(false);
     await engine.shutdown();
   });
 
@@ -244,7 +247,7 @@ describe("createInteractiveEngine", () => {
         sessionKey: "s6",
         host: microHost as unknown as import("@genesis/host").ExecutionHost,
       }),
-    ).rejects.toThrow(/local-host only/);
+    ).rejects.toThrow(/local-host only.*microvm/);
     await engine.shutdown();
   });
 
