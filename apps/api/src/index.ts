@@ -163,9 +163,21 @@ if (process.env.GENESIS_ENGINE === "interactive") {
       Number.isFinite(rawTurnTimeout) && rawTurnTimeout > 0 ? rawTurnTimeout : undefined,
   });
   engineLabel = `interactive(exempt${pin ? `, pin ${pin}` : ", PATH claude"})`;
+  // P20 (BRO-1488 round-2 B2): the interactive engine's default permission
+  // policy is allow-all — the same posture as --dangerously-skip-permissions,
+  // but selected by GENESIS_ENGINE alone, so the extraArgs-based warning in
+  // server.ts never fires. Mirror it here.
+  if (!process.env.GENESIS_TOKEN) {
+    console.warn(
+      "[genesis] WARNING: the interactive engine auto-allows agent tool permissions and /message is " +
+        "unauthenticated. Bind to localhost only, or set GENESIS_TOKEN.",
+    );
+  }
   // Kill live agent tmux sessions + the control socket on shutdown. (Mutually
-  // exclusive with the vercel provider's handlers — guarded above.)
+  // exclusive with the vercel provider's handlers — guarded above.) A hung
+  // kill/stop must not wedge SIGTERM — 5s watchdog forces the exit.
   const engineShutdown = () => {
+    setTimeout(() => process.exit(1), 5_000).unref();
     void engine?.shutdown().finally(() => process.exit(0));
   };
   process.once("SIGTERM", engineShutdown);

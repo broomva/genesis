@@ -108,11 +108,6 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
         "interactive engine is local-host only (tmux + local claude); use the print engine for microVM hosts",
       );
     }
-    if (opts.resumeSessionId) {
-      console.warn(
-        "[genesis] interactive engine: resumeSessionId ignored — continuity is the live session (resume re-keying: BRO-1485)",
-      );
-    }
     const engineHub = ensureHub();
     const key = opts.sessionKey ?? `oneshot-${randomUUID().slice(0, 8)}`;
 
@@ -135,6 +130,15 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     const prior = live.get(key);
     const reuse = prior !== undefined && (await prior.session.alive());
     const sessionId = reuse ? prior.session.sessionId : randomUUID();
+
+    // P20 round-2 #2: only warn on a GENUINE resume attempt (the Supervisor
+    // echoes agentSessionId back on every turn ≥2; matching the live session
+    // is normal operation, not a resume).
+    if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== sessionId) {
+      console.warn(
+        "[genesis] interactive engine: resumeSessionId ignored — continuity is the live session (resume re-keying: BRO-1485)",
+      );
+    }
 
     // Per-turn translation state (events + reducer, exactly like runAgent).
     const events: AgentEvent[] = [];
@@ -198,6 +202,7 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           return;
         }
         case "turn.complete":
+          if (ir.surface !== "hook") return; // terminal kinds are hook-only too
           push({
             type: "result",
             subtype: "success",
@@ -207,6 +212,7 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           finish();
           return;
         case "error":
+          if (ir.surface !== "hook") return;
           push({
             type: "result",
             subtype: "error",
@@ -220,20 +226,32 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       }
     });
 
+    // P20 round-2 B1: a timed-out turn leaves the underlying claude process
+    // BUSY mid-turn. Reusing it would interleave keystrokes into a live
+    // composer and let the stale turn's events (and its eventual Stop) bleed
+    // into the NEXT turn's window — silent cross-turn attribution corruption.
+    // The deterministic fix: kill + evict, so the next dispatch respawns fresh
+    // (with a fresh sessionId, which also makes the stale event filter exact).
     const timeoutMs = cfg.turnTimeoutMs ?? 600_000;
     const timeout = setTimeout(() => {
       push({ type: "result", subtype: "turn-timeout", is_error: true, session_id: sessionId });
+      live.delete(key);
+      void entry.session?.kill().catch(() => {});
       finish();
     }, timeoutMs);
 
     // Trust-dialog nudge: a fresh worktree cwd shows the folder-trust prompt
     // before ANY hook fires (no hook surface exists for it). One Enter accepts
-    // the default. Ported from the session-host live smoke.
-    const nudge = setTimeout(() => {
-      if (!entry.hookSeen && entry.session) {
-        void entry.session.send("").catch(() => {});
-      }
-    }, cfg.trustNudgeMs ?? 12_000);
+    // the default. Armed AFTER the session exists (P20 round-2 #4 — arming at
+    // turn start could no-op while a slow spawn is still pending).
+    let nudge: ReturnType<typeof setTimeout> | undefined;
+    const armNudge = () => {
+      nudge = setTimeout(() => {
+        if (!entry.hookSeen && entry.session) {
+          void entry.session.send("").catch(() => {});
+        }
+      }, cfg.trustNudgeMs ?? 12_000);
+    };
 
     try {
       if (reuse) {
@@ -248,11 +266,12 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           extraArgs: opts.extraArgs,
         });
         live.set(key, entry);
+        armNudge();
       }
       await turnDone;
     } finally {
       clearTimeout(timeout);
-      clearTimeout(nudge);
+      if (nudge !== undefined) clearTimeout(nudge);
       unsubscribe();
     }
 

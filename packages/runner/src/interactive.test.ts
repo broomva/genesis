@@ -160,6 +160,50 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
+  test("a timed-out turn kills + evicts the session; next turn respawns fresh (B1)", async () => {
+    let plays = 0;
+    const hub = new FakeHub((sid) => {
+      plays += 1;
+      // First play (the turn that times out): never completes.
+      // Second play (after respawn): a normal happy turn.
+      return plays === 1 ? [] : happyTurn(sid, "delta");
+    });
+    const engine = createInteractiveEngine({ hub, turnTimeoutMs: 60 });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "s8" };
+
+    const r1 = await engine.run({ ...opts, prompt: "hangs" });
+    expect(r1.state.phase).toBe("blocked");
+    // The busy session was killed and evicted — NOT left for reuse.
+    expect(hub.sessions[0]?.killed).toBe(true);
+
+    const r2 = await engine.run({ ...opts, prompt: "works" });
+    expect(hub.createCalls).toBe(2); // respawned, not reused
+    expect(r2.state.sessionId).not.toBe(r1.state.sessionId); // stale-event filter exact
+    expect(r2.state.phase).toBe("done");
+    expect(r2.state.lastText).toContain("delta");
+    await engine.shutdown();
+  });
+
+  test("error IR kind marks the run blocked", async () => {
+    const hub = new FakeHub((sid) => [{ ...base(sid), kind: "error", message: "boom" }]);
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({ prompt: "x", cwd: "/x", worktree: false, sessionKey: "s9" });
+    expect(result.state.phase).toBe("blocked");
+    expect(result.exitCode).toBe(1);
+    await engine.shutdown();
+  });
+
+  test("shutdown kills live sessions and leaves no subscriptions behind", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "epsilon"));
+    const engine = createInteractiveEngine({ hub });
+    await engine.run({ prompt: "x", cwd: "/x", worktree: false, sessionKey: "s10" });
+    expect(hub.listeners.size).toBe(0); // per-turn subscription reclaimed
+    expect(hub.sessions[0]?.killed).toBe(false); // persistent between turns
+    await engine.shutdown();
+    expect(hub.sessions[0]?.killed).toBe(true); // reaped at shutdown
+    expect(hub.stopped).toBe(true);
+  });
+
   test("AskUserQuestion gates the run awaiting (HITL preserved through translation)", async () => {
     const hub = new FakeHub((sid) => [
       {
