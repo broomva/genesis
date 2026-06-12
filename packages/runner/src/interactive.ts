@@ -265,7 +265,19 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
 
     try {
       if (reuse) {
-        await entry.session.send(opts.prompt);
+        try {
+          await entry.session.send(opts.prompt);
+        } catch (sendError) {
+          // P20 (closed-loop send) B1: an unacknowledged send leaves the
+          // composer state UNKNOWN — reusing the session would submit a
+          // corrupted concatenation next turn. Kill + evict (mirror of the
+          // timeout path); the next dispatch respawns fresh.
+          live.delete(key);
+          void entry.session.kill().catch(() => {});
+          push({ type: "result", subtype: "send-failed", is_error: true, session_id: sessionId });
+          finish();
+          console.error(`[genesis] interactive send failed (session evicted): ${sendError}`);
+        }
       } else {
         entry.session = await engineHub.createSession({
           cwd: runCwd,
