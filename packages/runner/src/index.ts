@@ -67,6 +67,45 @@ function agentArgs(opts: RunOptions): string[] {
   return args;
 }
 
+/**
+ * Ensure the keyed session worktree exists (reused across turns) and return
+ * its path + branch. Shared by the print (`runAgent`) and interactive
+ * (`createInteractiveEngine`) engines — extracted verbatim from `runAgent`.
+ */
+export async function ensureSessionWorktree(
+  host: ExecutionHost,
+  cwd: string,
+  key: string,
+): Promise<{ worktreePath: string; branch: string }> {
+  const branch = `genesis/${key}`;
+  // Build the path from git's CANONICAL repo root, not cwd verbatim:
+  // `git worktree list --porcelain` reports symlink-resolved paths, so a cwd
+  // like /tmp (→ /private/tmp on macOS) or a bind-mounted root would otherwise
+  // never exact-match an existing worktree → every resumed turn would re-add
+  // and throw. Canonicalizing both sides fixes it.
+  const top = await host.exec(["git", "rev-parse", "--show-toplevel"], { cwd });
+  const root = top.code === 0 && top.stdout.trim() ? top.stdout.trim() : cwd.replace(/\/$/, "");
+  const worktreePath = `${root}/.genesis-runs/${key}`;
+  // Reuse an existing session worktree (so the agent's cwd-scoped session
+  // continuity holds); otherwise create it. Attach a stale branch if the dir
+  // is gone.
+  const list = await host.exec(["git", "worktree", "list", "--porcelain"], { cwd });
+  // Exact porcelain-line match (each block starts `worktree <abs-path>`), NOT a
+  // substring — else session-1 would false-match an existing session-10.
+  const exists = list.stdout.split("\n").some((l) => l === `worktree ${worktreePath}`);
+  if (!exists) {
+    let add = await host.exec(["git", "worktree", "add", "-b", branch, worktreePath, "HEAD"], {
+      cwd,
+    });
+    if (add.code !== 0) {
+      // branch may already exist (prior session) → attach it instead of -b
+      add = await host.exec(["git", "worktree", "add", worktreePath, branch], { cwd });
+      if (add.code !== 0) throw new Error(`worktree add failed: ${add.stderr}`);
+    }
+  }
+  return { worktreePath, branch };
+}
+
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const host = opts.host ?? new LocalHost();
   const id = runId();
@@ -85,32 +124,7 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const wantWorktree = opts.worktree !== false && !isMicroVM && (await isGitRepo(host, opts.cwd));
   if (wantWorktree) {
     const key = opts.sessionKey ? `session-${opts.sessionKey}` : id;
-    branch = `genesis/${key}`;
-    // Build the path from git's CANONICAL repo root, not opts.cwd verbatim:
-    // `git worktree list --porcelain` reports symlink-resolved paths, so a cwd
-    // like /tmp (→ /private/tmp on macOS) or a bind-mounted root would otherwise
-    // never exact-match an existing worktree → every resumed turn would re-add
-    // and throw. Canonicalizing both sides fixes it.
-    const top = await host.exec(["git", "rev-parse", "--show-toplevel"], { cwd: opts.cwd });
-    const root =
-      top.code === 0 && top.stdout.trim() ? top.stdout.trim() : opts.cwd.replace(/\/$/, "");
-    worktreePath = `${root}/.genesis-runs/${key}`;
-    // Reuse an existing session worktree (so claude --resume finds its cwd-scoped
-    // session); otherwise create it. Attach a stale branch if the dir is gone.
-    const list = await host.exec(["git", "worktree", "list", "--porcelain"], { cwd: opts.cwd });
-    // Exact porcelain-line match (each block starts `worktree <abs-path>`), NOT a
-    // substring — else session-1 would false-match an existing session-10.
-    const exists = list.stdout.split("\n").some((l) => l === `worktree ${worktreePath}`);
-    if (!exists) {
-      let add = await host.exec(["git", "worktree", "add", "-b", branch, worktreePath, "HEAD"], {
-        cwd: opts.cwd,
-      });
-      if (add.code !== 0) {
-        // branch may already exist (prior session) → attach it instead of -b
-        add = await host.exec(["git", "worktree", "add", worktreePath, branch], { cwd: opts.cwd });
-        if (add.code !== 0) throw new Error(`worktree add failed: ${add.stderr}`);
-      }
-    }
+    ({ worktreePath, branch } = await ensureSessionWorktree(host, opts.cwd, key));
     runCwd = worktreePath; // run IN the worktree (was incorrectly opts.cwd in Phase 1)
   }
 
@@ -166,3 +180,13 @@ export async function removeWorktree(
 
 /** @deprecated use removeWorktree (which also deletes the leaked branch). */
 export const cleanupWorktree = removeWorktree;
+
+// Interactive (exempt) engine — persistent interactive sessions via
+// @genesis/session-host. See ./interactive.ts (BRO-1488).
+export {
+  createInteractiveEngine,
+  type EngineHub,
+  type EngineSession,
+  type InteractiveEngine,
+  type InteractiveEngineConfig,
+} from "./interactive";

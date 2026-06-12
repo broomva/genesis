@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@genesis/host": "workspace:*",
-    "@genesis/projection": "workspace:*"
+    "@genesis/projection": "workspace:*",
+    "@genesis/session-host": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",

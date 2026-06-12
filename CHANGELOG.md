@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased] — Exempt interactive engine: GENESIS_ENGINE=interactive (BRO-1488)
+
+### Added
+- **`createInteractiveEngine`** (`@genesis/runner`): an alternate `RunnerFn`
+  backed by `@genesis/session-host` — ONE persistent **interactive** Claude
+  Code session per Genesis sessionKey (positional prompt, never `-p` — the
+  exempt subscription class). First turn spawns; later turns `send()` into the
+  live process. IR events are translated into the print engine's `AgentEvent`
+  shapes, so the projection reducer, Supervisor, and `/api/chat` are untouched.
+  AskUserQuestion still gates `awaiting` (HITL preserved); turn timeout →
+  `blocked`; dead sessions respawn with a fresh sessionId; trust-dialog Enter
+  nudge after 12s of hook silence.
+- **`GENESIS_ENGINE=interactive`** in `apps/api` (opt-in; default `print`
+  unchanged). Local-host only — boot-errors under `GENESIS_HOST=vercel`.
+  `GENESIS_CLAUDE_PIN` pins the CLI version; `GENESIS_TURN_TIMEOUT_MS`
+  overrides the 10-min turn ceiling. SIGTERM/SIGINT kill live agent tmux
+  sessions.
+- `ensureSessionWorktree()` extracted from `runAgent` (shared by both engines).
+
+### Live validation (2026-06-11)
+- Two-turn `/message` round-trip: codeword planted turn 1 (15s incl. spawn),
+  recalled turn 2 in **2.4s** (~6× faster than spawn-per-turn) through the SAME
+  live session — multi-turn continuity WITHOUT `--resume`. Clean SIGINT reaped
+  the tmux session.
+- `resumeSessionId` is ignored with a notice (resume re-keying: BRO-1485);
+  daemon restart starts a fresh agent session in the same persistent worktree.
+
 ## [Unreleased] — Path B session-host: contract-first wrap of interactive Claude Code (BRO-1484)
 
 ### Added
