@@ -55,7 +55,7 @@ export interface CreateSessionOptions {
   /** Extra environment variables for the session process. */
   env?: Record<string, string>;
   actuator?: InputActuator;
-  /** Closed-loop send: ms to wait for the UserPromptSubmit ack (default 3000). */
+  /** Closed-loop send: ms to wait for the UserPromptSubmit ack (default 5000). */
   submitAckMs?: number;
   /** Closed-loop send: bare-Enter retries after a missed ack (default 2). */
   submitRetries?: number;
@@ -146,7 +146,10 @@ export class SessionHost {
   private tailer: TranscriptTailer | undefined;
   private tmuxName: string;
   transcriptPath: string | undefined;
-  private readonly submitWaiters = new Set<() => void>();
+  private readonly submitWaiters = new Set<{
+    match: (text: string) => void;
+    cancel: () => void;
+  }>();
   private readonly submitAckMs: number;
   private readonly submitRetries: number;
 
@@ -158,7 +161,7 @@ export class SessionHost {
     this.actuator = opts.actuator ?? new TmuxActuator();
     this.adapter = new ClaudeCodeAdapter({ sessionId });
     this.tmuxName = `gen-${sessionId.slice(0, 8)}`;
-    this.submitAckMs = opts.submitAckMs ?? 3_000;
+    this.submitAckMs = opts.submitAckMs ?? 5_000;
     this.submitRetries = opts.submitRetries ?? 2;
   }
 
@@ -217,7 +220,7 @@ export class SessionHost {
     }
     const attempts = this.submitRetries + 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const ack = this.nextSubmit(this.submitAckMs);
+      const ack = this.nextSubmit(this.submitAckMs, text);
       if (attempt === 0) {
         await this.actuator.send(this.tmuxName, text);
       } else {
@@ -231,19 +234,27 @@ export class SessionHost {
     );
   }
 
-  /** One-shot waiter for the next hook-surface user-prompt submit. */
-  private nextSubmit(timeoutMs: number): Promise<boolean> {
+  /** One-shot waiter for the next hook-surface submit of EXACTLY this text.
+   *  Text-matching prevents false acks (concurrent sends, late acks from a
+   *  prior exhausted send, truncated-text submits) — P20 c.1. */
+  private nextSubmit(timeoutMs: number, expected: string): Promise<boolean> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.submitWaiters.delete(waiter);
-        resolve(false);
-      }, timeoutMs);
-      const waiter = () => {
-        clearTimeout(timer);
-        this.submitWaiters.delete(waiter);
-        resolve(true);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const entry = {
+        match: (text: string) => {
+          if (text !== expected) return; // not our submission — keep waiting
+          if (timer !== undefined) clearTimeout(timer);
+          this.submitWaiters.delete(entry);
+          resolve(true);
+        },
+        cancel: () => {
+          if (timer !== undefined) clearTimeout(timer);
+          this.submitWaiters.delete(entry);
+          resolve(false);
+        },
       };
-      this.submitWaiters.add(waiter);
+      timer = setTimeout(() => entry.cancel(), timeoutMs);
+      this.submitWaiters.add(entry);
     });
   }
 
@@ -257,6 +268,7 @@ export class SessionHost {
   }
 
   async kill(): Promise<void> {
+    for (const waiter of [...this.submitWaiters]) waiter.cancel();
     this.tailer?.stop();
     if (await this.actuator.alive(this.tmuxName)) {
       await this.actuator.kill(this.tmuxName);
@@ -289,7 +301,7 @@ export class SessionHost {
     // Submit ack (closed-loop send): a hook-surface user message means the
     // composer actually submitted (UserPromptSubmit contract).
     if (event.kind === "message.user" && event.surface === "hook") {
-      for (const waiter of [...this.submitWaiters]) waiter();
+      for (const waiter of [...this.submitWaiters]) waiter.match(event.text);
     }
   }
 }

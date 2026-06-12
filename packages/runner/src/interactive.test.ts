@@ -184,6 +184,29 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
+  test("a throwing send() kills + evicts the session (closed-loop B1)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "zeta"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "s11" };
+    const r1 = await engine.run({ ...opts, prompt: "one" });
+    expect(r1.state.phase).toBe("done");
+
+    // Simulate an unacknowledged send (closed-loop send exhausted retries).
+    const session = hub.sessions[0];
+    if (!session) throw new Error("no session");
+    session.send = async () => {
+      throw new Error("send() not acknowledged by UserPromptSubmit after 3 attempts");
+    };
+    const r2 = await engine.run({ ...opts, prompt: "two" });
+    expect(r2.state.phase).toBe("blocked");
+    expect(session.killed).toBe(true); // poisoned session reaped, not reused
+
+    const r3 = await engine.run({ ...opts, prompt: "three" });
+    expect(hub.createCalls).toBe(2); // respawned fresh
+    expect(r3.state.phase).toBe("done");
+    await engine.shutdown();
+  });
+
   test("error IR kind marks the run blocked", async () => {
     const hub = new FakeHub((sid) => [{ ...base(sid), kind: "error", message: "boom" }]);
     const engine = createInteractiveEngine({ hub });
