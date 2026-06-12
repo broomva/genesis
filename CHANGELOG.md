@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] — Telegram bot: durable subscriptions + DM robustness (BRO-1492)
+
+### Fixed
+- **Bot restart silently dropped all active conversations.** `index.ts` used
+  `createMemoryState()`, so subscriptions lived in process memory; after a
+  restart an ongoing DM was neither a *new mention* nor *subscribed*, so neither
+  handler fired and the message was consumed-then-dropped (Telegram
+  `pending_update_count`→0, no handler log, no `/api/chat` hit). Two fixes:
+  - **`onDirectMessage`** now handles every DM regardless of subscription — the
+    idiomatic, restart-proof path for direct messages.
+  - **`FileStateAdapter`** (new) persists group subscriptions to JSON under
+    `GENESIS_BOT_STATE_DIR` (ephemeral locks/queues delegate to memory — a dead
+    process's lock must not survive it). Redis stays the multi-replica prod
+    option; file-state fits the single-instance owned-compute tier.
+- `seed()` supports pre-subscribing a known thread for immediate recovery.
+- +6 FileStateAdapter tests (survive-restart, unsubscribe, seed, corrupt-file,
+  ephemeral-not-persisted, path).
+
+
 ## [Unreleased] — Slash-command interception in the interactive engine (BRO-1485 #10)
 
 ### Fixed

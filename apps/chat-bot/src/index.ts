@@ -14,7 +14,8 @@
 
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
-import { Chat, type Logger } from "chat";
+import { Chat, type Logger, type StateAdapter } from "chat";
+import { botStateFile, createFileState } from "./file-state";
 import { handleAgentMessage } from "./handler";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -35,14 +36,29 @@ const logger: Logger = {
 };
 
 const telegram = createTelegramAdapter({ botToken, mode: "polling", userName, logger });
-const chat = new Chat({ userName, adapters: { telegram }, state: createMemoryState(), logger });
 
-// Idiomatic multi-turn (per the Chat SDK docs): subscribe the thread on first
-// contact, then handle every subsequent message. `onNewMention` fires only for
-// UNSUBSCRIBED threads (a DM's first message, or an @-mention in a group); once
-// subscribed, follow-ups route to `onSubscribedMessage`. Both forward to the same
-// handler, so conversations continue in DMs AND group chats. Genesis keeps the
-// per-conversation agent context, keyed to the stable thread.id.
+// State backend (BRO-1492): GENESIS_BOT_STATE_DIR → restart-durable file state
+// (subscriptions survive a bot restart, so ongoing DMs aren't dropped). Unset →
+// in-memory (ephemeral; fine for throwaway runs). Redis stays the prod option.
+const stateDir = process.env.GENESIS_BOT_STATE_DIR;
+const state: StateAdapter = stateDir
+  ? createFileState(botStateFile(stateDir))
+  : createMemoryState();
+if (stateDir) console.log(`[genesis-bot] durable subscription state: ${botStateFile(stateDir)}`);
+const chat = new Chat({ userName, adapters: { telegram }, state, logger });
+
+// DMs: `onDirectMessage` fires for EVERY direct message regardless of
+// subscription state (BRO-1492). This is the robust fix for the restart
+// black-hole — without it, a bot restart loses the in-memory subscription and a
+// plain DM is neither a "new mention" (so onNewMention skips) nor "subscribed"
+// (so onSubscribedMessage skips), and the message is silently dropped. With it,
+// every DM is handled, so a restart never strands a conversation.
+chat.onDirectMessage(async (thread, message) => {
+  await handleAgentMessage(thread, message.text, { baseUrl, token });
+});
+
+// Groups: subscribe on first @-mention, then handle every follow-up. Group
+// subscriptions survive a restart via the durable FileState (GENESIS_BOT_STATE_DIR).
 chat.onNewMention(async (thread, message) => {
   await thread.subscribe();
   await handleAgentMessage(thread, message.text, { baseUrl, token });
