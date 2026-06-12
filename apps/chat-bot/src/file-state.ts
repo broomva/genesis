@@ -15,7 +15,7 @@
 // Redis stays the multi-replica production option (`RedisStateAdapter`); this
 // file adapter fits the single-instance owned-compute / local tier.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import type { Lock, QueueEntry, StateAdapter } from "chat";
@@ -74,7 +74,14 @@ export class FileStateAdapter implements StateAdapter {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true });
       const payload: Persisted = { subscriptions: [...this.subscriptions] };
-      writeFileSync(this.filePath, JSON.stringify(payload));
+      // Atomic write (P20 review): write to a temp file then rename, so a crash
+      // mid-write can never leave a truncated file that load() would treat as
+      // corrupt and DISCARD — which would silently wipe every group
+      // subscription (the exact black-hole class this fix exists to kill).
+      // rename(2) is atomic on POSIX; a reader sees either the old or new file.
+      const tmp = `${this.filePath}.tmp`;
+      writeFileSync(tmp, JSON.stringify(payload));
+      renameSync(tmp, this.filePath);
     } catch (e) {
       // Persisting must never crash the bot — a dropped write just means this
       // thread re-subscribes on its next inbound after a restart.

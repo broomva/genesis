@@ -49,6 +49,37 @@ describe("FileStateAdapter", () => {
     await b.disconnect();
   });
 
+  test("atomic write: a good file is never left truncated; survives + no .tmp lingers", async () => {
+    const { existsSync, readFileSync } = require("node:fs");
+    const file = tmpFile();
+    const a = createFileState(file);
+    await a.connect();
+    await a.subscribe("g1");
+    await a.subscribe("g2");
+    await a.disconnect();
+    // The persisted file is complete, parseable JSON (not a partial write).
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    expect(parsed.subscriptions.sort()).toEqual(["g1", "g2"]);
+    // No leftover temp file.
+    expect(existsSync(`${file}.tmp`)).toBe(false);
+  });
+
+  test("a corrupt/truncated file starts empty without throwing (documents the floor)", async () => {
+    const { writeFileSync } = require("node:fs");
+    const file = tmpFile();
+    writeFileSync(file, '{"subscriptions":["t1",'); // truncated mid-write
+    const a = createFileState(file);
+    await a.connect(); // must not throw
+    expect(await a.isSubscribed("t1")).toBe(false);
+    // and a subsequent good write repairs it
+    await a.subscribe("t2");
+    await a.disconnect();
+    const b = createFileState(file);
+    await b.connect();
+    expect(await b.isSubscribed("t2")).toBe(true);
+    await b.disconnect();
+  });
+
   test("missing / corrupt state file → starts empty, never throws", async () => {
     const a = createFileState("/nonexistent-dir/does-not-exist.json");
     await a.connect();
