@@ -147,9 +147,15 @@ export class SessionHost {
   private tmuxName: string;
   transcriptPath: string | undefined;
   private readonly submitWaiters = new Set<{
-    match: (text: string) => void;
-    cancel: () => void;
+    expected: string;
+    timer: ReturnType<typeof setTimeout>;
+    resolve: (acked: boolean) => void;
   }>();
+  /** Serializes send() per session — a keystroke session has ONE composer, so
+   *  two concurrent sends would interleave text + cross-resolve acks. The
+   *  engine already serializes per thread, but SessionHost is a public surface
+   *  (dev-client, future callers) with no such guarantee (P20 review). */
+  private sendChain: Promise<void> = Promise.resolve();
   private readonly submitAckMs: number;
   private readonly submitRetries: number;
 
@@ -214,6 +220,17 @@ export class SessionHost {
    * on an empty composer never fires UserPromptSubmit.
    */
   async send(text: string): Promise<void> {
+    // Serialize against any in-flight send on this session (one composer).
+    const run = this.sendChain.then(() => this.sendOnce(text));
+    // Keep the chain alive regardless of this send's outcome.
+    this.sendChain = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
+
+  private async sendOnce(text: string): Promise<void> {
     if (text.length === 0) {
       await this.actuator.send(this.tmuxName, "");
       return;
@@ -239,23 +256,27 @@ export class SessionHost {
    *  prior exhausted send, truncated-text submits) — P20 c.1. */
   private nextSubmit(timeoutMs: number, expected: string): Promise<boolean> {
     return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
       const entry = {
-        match: (text: string) => {
-          if (text !== expected) return; // not our submission — keep waiting
-          if (timer !== undefined) clearTimeout(timer);
-          this.submitWaiters.delete(entry);
-          resolve(true);
-        },
-        cancel: () => {
-          if (timer !== undefined) clearTimeout(timer);
+        expected,
+        resolve,
+        // The arrow runs later — `entry` is fully defined by then.
+        timer: setTimeout(() => {
           this.submitWaiters.delete(entry);
           resolve(false);
-        },
+        }, timeoutMs),
       };
-      timer = setTimeout(() => entry.cancel(), timeoutMs);
       this.submitWaiters.add(entry);
     });
+  }
+
+  /** Resolve any waiter whose expected text matches this submitted prompt. */
+  private ackSubmit(text: string): void {
+    for (const w of [...this.submitWaiters]) {
+      if (w.expected !== text) continue; // not our submission — keep waiting
+      clearTimeout(w.timer);
+      this.submitWaiters.delete(w);
+      w.resolve(true);
+    }
   }
 
   /** Interrupt the in-flight turn (Escape). */
@@ -268,7 +289,11 @@ export class SessionHost {
   }
 
   async kill(): Promise<void> {
-    for (const waiter of [...this.submitWaiters]) waiter.cancel();
+    for (const w of [...this.submitWaiters]) {
+      clearTimeout(w.timer);
+      this.submitWaiters.delete(w);
+      w.resolve(false);
+    }
     this.tailer?.stop();
     if (await this.actuator.alive(this.tmuxName)) {
       await this.actuator.kill(this.tmuxName);
@@ -301,7 +326,7 @@ export class SessionHost {
     // Submit ack (closed-loop send): a hook-surface user message means the
     // composer actually submitted (UserPromptSubmit contract).
     if (event.kind === "message.user" && event.surface === "hook") {
-      for (const waiter of [...this.submitWaiters]) waiter.match(event.text);
+      this.ackSubmit(event.text);
     }
   }
 }

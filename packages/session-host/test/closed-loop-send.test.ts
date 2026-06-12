@@ -60,28 +60,30 @@ function fireSubmitAck(hub: SessionHub, sessionId: string, text: string): void {
 describe("closed-loop send (UserPromptSubmit ack)", () => {
   test("happy path: one send, ack arrives, no retries", async () => {
     const hub = makeHub();
-    let actuator!: FlakyActuator;
-    actuator = new FlakyActuator(0, (text) => fireSubmitAck(hub, session.sessionId, text));
+    let sessionId = "";
+    const actuator = new FlakyActuator(0, (text) => fireSubmitAck(hub, sessionId, text));
     const session = await hub.createSession({
       cwd: "/x",
       actuator,
       bin: "claude",
       submitAckMs: 500,
     });
+    sessionId = session.sessionId;
     await session.send("hello");
     expect(actuator.sends).toEqual(["hello"]);
   });
 
   test("eaten Enter (the live Telegram bug): bare-Enter retry recovers", async () => {
     const hub = makeHub();
-    let actuator!: FlakyActuator;
-    actuator = new FlakyActuator(1, (text) => fireSubmitAck(hub, session.sessionId, text));
+    let sessionId = "";
+    const actuator = new FlakyActuator(1, (text) => fireSubmitAck(hub, sessionId, text));
     const session = await hub.createSession({
       cwd: "/x",
       actuator,
       bin: "claude",
       submitAckMs: 100,
     });
+    sessionId = session.sessionId;
     await session.send("stranded prompt");
     // attempt 0: text+Enter (eaten) → ack miss → attempt 1: bare Enter → ack.
     expect(actuator.sends).toEqual(["stranded prompt", ""]);
@@ -166,6 +168,24 @@ describe("closed-loop send (UserPromptSubmit ack)", () => {
     await Bun.sleep(10);
     await session.kill();
     await expect(pending).rejects.toThrow(/not acknowledged/);
+  });
+
+  test("concurrent sends serialize — no interleave, each gets its own ack (P20)", async () => {
+    const hub = makeHub();
+    let sessionId = "";
+    // Honor every send; ack the actual submitted composer text.
+    const actuator = new FlakyActuator(0, (text) => fireSubmitAck(hub, sessionId, text));
+    const session = await hub.createSession({
+      cwd: "/x",
+      actuator,
+      bin: "claude",
+      submitAckMs: 500,
+    });
+    sessionId = session.sessionId;
+    // Fire two sends "concurrently" — the mutex must run them one at a time.
+    await Promise.all([session.send("first"), session.send("second")]);
+    // Both submitted, in order, with no bare-Enter interleaving between them.
+    expect(actuator.sends).toEqual(["first", "second"]);
   });
 
   test("empty text (trust nudge) stays fire-and-forget — no ack wait", async () => {
