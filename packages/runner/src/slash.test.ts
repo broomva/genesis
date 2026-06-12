@@ -43,6 +43,27 @@ describe("interceptSlashCommand", () => {
     expect(interceptSlashCommand("/Clear")).toBeDefined();
   });
 
+  test("hyphenated tokens that merely START with a command are NOT intercepted", () => {
+    // greedy [a-z0-9-]* makes the token "cost-benefit", not "cost".
+    expect(interceptSlashCommand("/cost-benefit analysis")).toBeUndefined();
+    expect(interceptSlashCommand("/clear-the-cache please")).toBeUndefined();
+    expect(interceptSlashCommand("/model-railway hobby")).toBeUndefined();
+  });
+
+  test("a command on the first line of a multi-line message is intercepted", () => {
+    // First-token match still fires; the rest is irrelevant (we refuse anyway).
+    expect(interceptSlashCommand("/model\nand also summarize the repo")).toBeDefined();
+  });
+
+  test("init and review are NOT intercepted (they double as workspace skills)", () => {
+    expect(interceptSlashCommand("/init")).toBeUndefined();
+    expect(interceptSlashCommand("/review the diff")).toBeUndefined();
+  });
+
+  test("compact is NOT intercepted (it triggers a summarization turn)", () => {
+    expect(interceptSlashCommand("/compact")).toBeUndefined();
+  });
+
   test("empty / bare slash is not a command", () => {
     expect(interceptSlashCommand("")).toBeUndefined();
     expect(interceptSlashCommand("/")).toBeUndefined();

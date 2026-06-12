@@ -16,6 +16,10 @@
 // (`/model X` → relaunch with --model, `/clear` → fresh session) is a follow-up.
 // Skill-style slash commands (`/autonomous`, `/checkit`, …) are NOT intercepted
 // — they inject a prompt and DO produce a turn the engine observes normally.
+// Caveat: matching is by NAME only, so a skill whose name equals a built-in
+// here is shadowed (intercepted). The set is therefore kept to built-ins that
+// open an overlay AND have no useful chat meaning; ambiguous names that double
+// as skills (`init`, `review`) are deliberately excluded so the skill wins.
 
 /** Built-in Claude Code commands that open a TUI overlay or print without a
  *  turn. Curated (the skill registry is open-ended, so an allow/deny by prefix
@@ -23,7 +27,6 @@
 export const TUI_BUILTIN_COMMANDS: ReadonlySet<string> = new Set([
   "model",
   "clear",
-  "compact",
   "resume",
   "config",
   "agents",
@@ -36,7 +39,6 @@ export const TUI_BUILTIN_COMMANDS: ReadonlySet<string> = new Set([
   "terminal-setup",
   "doctor",
   "bug",
-  "init",
   "memory",
   "status",
   "cost",
@@ -47,7 +49,6 @@ export const TUI_BUILTIN_COMMANDS: ReadonlySet<string> = new Set([
   "add-dir",
   "ide",
   "pr-comments",
-  "review",
   "upgrade",
   "privacy-settings",
   "theme",

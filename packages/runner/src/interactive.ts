@@ -119,9 +119,12 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     if (slashReply !== undefined) {
       const sessionId = live.get(opts.sessionKey ?? "")?.session.sessionId ?? randomUUID();
       const state: RunState = { phase: "done", sessionId, lastText: slashReply, turns: 1 };
+      // subtype MUST be "success" — the projection reducer treats any other
+      // result subtype as errored→blocked (reducer.ts), so a future replay of
+      // this synthetic event would silently invert the phase (P20 #2).
       opts.onState?.(state, {
         type: "result",
-        subtype: "slash-intercepted",
+        subtype: "success",
         session_id: sessionId,
         result: slashReply,
       });
