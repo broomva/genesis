@@ -3,6 +3,7 @@
 // produces (the Supervisor cannot tell the engines apart).
 
 import { describe, expect, test } from "bun:test";
+import { reduceAll } from "@genesis/projection";
 import type { IREvent } from "@genesis/session-host";
 import { type EngineHub, type EngineSession, createInteractiveEngine } from "./interactive";
 
@@ -205,6 +206,67 @@ describe("createInteractiveEngine", () => {
     expect(hub.createCalls).toBe(2); // respawned fresh
     expect(r3.state.phase).toBe("done");
     await engine.shutdown();
+  });
+
+  test("slash command short-circuits with a reply, never spawning a session (BRO-1485 #10)", async () => {
+    const hub = new FakeHub(() => []); // would hang if a session were created
+    const engine = createInteractiveEngine({ hub });
+    const states: string[] = [];
+    const result = await engine.run({
+      prompt: "/model",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "s12",
+      onState: (st) => states.push(st.phase),
+    });
+    expect(result.state.phase).toBe("done");
+    expect(result.state.lastText).toContain("model");
+    expect(result.exitCode).toBe(0);
+    expect(hub.createCalls).toBe(0); // session NEVER touched
+    expect(states).toEqual(["done"]);
+    await engine.shutdown();
+  });
+
+  test("a normal prompt after a slash command still spawns and runs", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "eta"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "s13" };
+    const r1 = await engine.run({ ...opts, prompt: "/clear" });
+    expect(r1.state.phase).toBe("done");
+    expect(hub.createCalls).toBe(0);
+    const r2 = await engine.run({ ...opts, prompt: "do real work" });
+    expect(r2.state.phase).toBe("done");
+    expect(hub.createCalls).toBe(1); // the real prompt spawns
+    expect(r2.state.lastText).toContain("eta");
+    await engine.shutdown();
+  });
+
+  test("slash intercept reuses an EXISTING live session id without touching it (P20 #4)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "theta"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "s14" };
+    // Turn 1: real prompt → spawns a live session.
+    const r1 = await engine.run({ ...opts, prompt: "real work" });
+    expect(hub.createCalls).toBe(1);
+    const liveId = r1.state.sessionId;
+    // Turn 2: a slash command must reuse that session's id, not mint a phantom,
+    // and must NOT spawn or send.
+    const sentBefore = hub.sessions[0]?.sent.length ?? 0;
+    const r2 = await engine.run({ ...opts, prompt: "/model" });
+    expect(r2.state.phase).toBe("done");
+    expect(r2.state.sessionId).toBe(liveId); // reused, not random
+    expect(hub.createCalls).toBe(1); // no new spawn
+    expect(hub.sessions[0]?.sent.length).toBe(sentBefore); // no send
+    await engine.shutdown();
+  });
+
+  test("the synthetic slash result survives a reducer replay as done, not blocked (P20 #2)", () => {
+    // The engine hand-builds state, but pin the contract: replaying the event
+    // through the reducer must NOT invert to blocked (subtype must be success).
+    const replayed = reduceAll([
+      { type: "result", subtype: "success", session_id: "x", result: "⚠️ /model …" },
+    ]);
+    expect(replayed.phase).toBe("done");
   });
 
   test("error IR kind marks the run blocked", async () => {

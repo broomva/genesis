@@ -23,6 +23,7 @@ import { type AgentEvent, type RunState, initialState, reduce } from "@genesis/p
 import type { IREvent, PermissionPolicy } from "@genesis/session-host";
 import { SessionHub } from "@genesis/session-host";
 import { type RunOptions, type RunResult, ensureSessionWorktree } from "./index";
+import { interceptSlashCommand } from "./slash";
 
 /** Minimal hub surface the engine needs — SessionHub satisfies it
  *  structurally; tests inject a scripted fake. */
@@ -111,6 +112,32 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
         `interactive engine is local-host only (tmux + local claude); got host kind "${host.kind}" — use the print engine`,
       );
     }
+    // Slash-command interception (BRO-1485 #10): built-in TUI commands open an
+    // overlay (not an agent turn) and would wedge / corrupt the session if
+    // typed. Short-circuit with a chat reply BEFORE touching any session.
+    const slashReply = interceptSlashCommand(opts.prompt);
+    if (slashReply !== undefined) {
+      const sessionId = live.get(opts.sessionKey ?? "")?.session.sessionId ?? randomUUID();
+      const state: RunState = { phase: "done", sessionId, lastText: slashReply, turns: 1 };
+      // subtype MUST be "success" — the projection reducer treats any other
+      // result subtype as errored→blocked (reducer.ts), so a future replay of
+      // this synthetic event would silently invert the phase (P20 #2).
+      opts.onState?.(state, {
+        type: "result",
+        subtype: "success",
+        session_id: sessionId,
+        result: slashReply,
+      });
+      return {
+        state,
+        events: [],
+        worktreePath: undefined,
+        branch: undefined,
+        worktreePersistent: !!opts.sessionKey,
+        exitCode: 0,
+      };
+    }
+
     const engineHub = ensureHub();
     const key = opts.sessionKey ?? `oneshot-${randomUUID().slice(0, 8)}`;
 

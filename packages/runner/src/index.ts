@@ -190,3 +190,6 @@ export {
   type InteractiveEngine,
   type InteractiveEngineConfig,
 } from "./interactive";
+
+// Slash-command interception for the interactive engine (BRO-1485 #10).
+export { interceptSlashCommand, TUI_BUILTIN_COMMANDS } from "./slash";
