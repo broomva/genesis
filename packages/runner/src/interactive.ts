@@ -44,6 +44,8 @@ export interface EngineHub {
 export interface EngineSession {
   sessionId: string;
   send(text: string): Promise<void>;
+  /** Interrupt the in-flight turn (Escape). */
+  interrupt(): Promise<void>;
   alive(): Promise<boolean>;
   kill(): Promise<void>;
 }
@@ -72,10 +74,25 @@ interface LiveSession {
   hookSeen: boolean;
 }
 
+/** Live session state for a thread (BRO-1493 /control surface). */
+export interface SessionControlStatus {
+  /** A live interactive session exists for this key. */
+  alive: boolean;
+  /** Claude session id, when live. */
+  sessionId?: string;
+}
+
 export interface InteractiveEngine {
   run: (opts: RunOptions) => Promise<RunResult>;
   /** Kill every live agent session and the hub (SIGTERM path). */
   shutdown: () => Promise<void>;
+  /** Reset a thread's session: kill + evict so the NEXT turn spawns fresh
+   *  (clears the agent's working context). Returns true if a session existed. */
+  reset: (sessionKey: string) => Promise<boolean>;
+  /** Interrupt the in-flight turn for a thread (Escape). Returns true if live. */
+  interrupt: (sessionKey: string) => Promise<boolean>;
+  /** Inspect a thread's live session state. */
+  status: (sessionKey: string) => Promise<SessionControlStatus>;
 }
 
 export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): InteractiveEngine {
@@ -344,5 +361,29 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     if (hub && started) await hub.stop();
   };
 
-  return { run, shutdown };
+  // --- /control surface (BRO-1493) — thread session lifecycle ------------
+
+  const reset = async (sessionKey: string): Promise<boolean> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined) return false;
+    live.delete(sessionKey);
+    await entry.session.kill().catch(() => {});
+    return true;
+  };
+
+  const interrupt = async (sessionKey: string): Promise<boolean> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined || !(await entry.session.alive())) return false;
+    await entry.session.interrupt();
+    return true;
+  };
+
+  const status = async (sessionKey: string): Promise<SessionControlStatus> => {
+    const entry = live.get(sessionKey);
+    if (entry === undefined) return { alive: false };
+    const alive = await entry.session.alive();
+    return { alive, sessionId: alive ? entry.session.sessionId : undefined };
+  };
+
+  return { run, shutdown, reset, interrupt, status };
 }

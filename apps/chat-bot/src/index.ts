@@ -16,7 +16,7 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { Chat, type Logger, type StateAdapter } from "chat";
 import { botStateFile, createFileState } from "./file-state";
-import { handleAgentMessage } from "./handler";
+import { handleAgentMessage, nativeCommandMenu } from "./handler";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -67,8 +67,27 @@ chat.onSubscribedMessage(async (thread, message) => {
   await handleAgentMessage(thread, message.text, { baseUrl, token });
 });
 
+// Register the native Telegram `/` menu (control commands only — the full
+// skill palette is discoverable via /commands; BRO-1493). Best-effort: a failed
+// registration must never block the bot from polling.
+async function registerTelegramCommands(): Promise<void> {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands: nativeCommandMenu() }),
+    });
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+    if (body.ok) console.log(`[genesis-bot] registered ${nativeCommandMenu().length} / commands`);
+    else console.warn(`[genesis-bot] setMyCommands failed: ${body.description ?? res.status}`);
+  } catch (e) {
+    console.warn("[genesis-bot] setMyCommands error (non-fatal)", e);
+  }
+}
+
 console.log(`[genesis-bot] polling Telegram as @${userName} → Genesis at ${baseUrl}`);
 await chat.initialize();
+await registerTelegramCommands();
 
 process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));

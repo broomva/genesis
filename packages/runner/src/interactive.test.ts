@@ -12,6 +12,7 @@ type Listener = (e: IREvent) => void;
 class FakeSession implements EngineSession {
   sent: string[] = [];
   killed = false;
+  interrupted = 0;
   constructor(
     public sessionId: string,
     private deliver: (sessionId: string) => void,
@@ -19,6 +20,9 @@ class FakeSession implements EngineSession {
   async send(text: string): Promise<void> {
     this.sent.push(text);
     this.deliver(this.sessionId);
+  }
+  async interrupt(): Promise<void> {
+    this.interrupted += 1;
   }
   async alive(): Promise<boolean> {
     return !this.killed;
@@ -267,6 +271,44 @@ describe("createInteractiveEngine", () => {
       { type: "result", subtype: "success", session_id: "x", result: "⚠️ /model …" },
     ]);
     expect(replayed.phase).toBe("done");
+  });
+
+  test("control: reset kills + evicts a live session (fresh context next turn)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl1"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c1" };
+    await engine.run({ ...opts, prompt: "hello" });
+    expect(await engine.reset("c1")).toBe(true);
+    expect(hub.sessions[0]?.killed).toBe(true);
+    // gone → reset again is a no-op
+    expect(await engine.reset("c1")).toBe(false);
+    // next turn respawns fresh
+    await engine.run({ ...opts, prompt: "again" });
+    expect(hub.createCalls).toBe(2);
+    await engine.shutdown();
+  });
+
+  test("control: interrupt sends Escape to the live session", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl2"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c2" };
+    expect(await engine.interrupt("c2")).toBe(false); // no session yet
+    await engine.run({ ...opts, prompt: "work" });
+    expect(await engine.interrupt("c2")).toBe(true);
+    expect(hub.sessions[0]?.interrupted).toBe(1);
+    await engine.shutdown();
+  });
+
+  test("control: status reports liveness + sessionId", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "ctl3"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "c3" };
+    expect(await engine.status("c3")).toEqual({ alive: false });
+    const r = await engine.run({ ...opts, prompt: "x" });
+    const st = await engine.status("c3");
+    expect(st.alive).toBe(true);
+    expect(st.sessionId).toBe(r.state.sessionId);
+    await engine.shutdown();
   });
 
   test("error IR kind marks the run blocked", async () => {

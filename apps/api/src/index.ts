@@ -192,6 +192,7 @@ const { app, websocket } = build({
   hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,
   run: engine?.run,
+  control: engine, // InteractiveEngine satisfies EngineControl (reset/interrupt/status)
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
