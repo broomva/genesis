@@ -207,6 +207,39 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
+  test("slash command short-circuits with a reply, never spawning a session (BRO-1485 #10)", async () => {
+    const hub = new FakeHub(() => []); // would hang if a session were created
+    const engine = createInteractiveEngine({ hub });
+    const states: string[] = [];
+    const result = await engine.run({
+      prompt: "/model",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "s12",
+      onState: (st) => states.push(st.phase),
+    });
+    expect(result.state.phase).toBe("done");
+    expect(result.state.lastText).toContain("model");
+    expect(result.exitCode).toBe(0);
+    expect(hub.createCalls).toBe(0); // session NEVER touched
+    expect(states).toEqual(["done"]);
+    await engine.shutdown();
+  });
+
+  test("a normal prompt after a slash command still spawns and runs", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "eta"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "s13" };
+    const r1 = await engine.run({ ...opts, prompt: "/clear" });
+    expect(r1.state.phase).toBe("done");
+    expect(hub.createCalls).toBe(0);
+    const r2 = await engine.run({ ...opts, prompt: "do real work" });
+    expect(r2.state.phase).toBe("done");
+    expect(hub.createCalls).toBe(1); // the real prompt spawns
+    expect(r2.state.lastText).toContain("eta");
+    await engine.shutdown();
+  });
+
   test("error IR kind marks the run blocked", async () => {
     const hub = new FakeHub((sid) => [{ ...base(sid), kind: "error", message: "boom" }]);
     const engine = createInteractiveEngine({ hub });

@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased] — Slash-command interception in the interactive engine (BRO-1485 #10)
+
+### Fixed
+- **`/model` (and other built-in Claude Code TUI commands) wedged the chat
+  session** (caught live via Telegram, 2026-06-12). Typed into the interactive
+  TUI they open an overlay/menu — not an agent turn — so no Stop hook fires;
+  the engine hung (pre-#9) or killed the session on a no-ack timeout after
+  typing stray menu keystrokes (post-#9). The interactive engine now
+  **intercepts built-in slash commands before touching any session** and
+  replies with a helpful message; the keystrokes are never injected. Normal
+  prompts and turn-producing skill commands (`/autonomous`, …) are unaffected.
+  Live-verified: `/model` → reply in 49ms, zero session spawned; a normal
+  prompt still spawns and replies. +17 tests (`slash.ts` matcher incl.
+  file-path/skill-command false-positive guards, +2 engine short-circuit tests).
+
+
 ## [Unreleased] — Closed-loop send: UserPromptSubmit as the actuator ack (BRO-1485 #9)
 
 ### Fixed
