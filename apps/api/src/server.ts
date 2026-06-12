@@ -1,5 +1,6 @@
 import { type Store, Supervisor } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
+import type { RunOptions, RunResult } from "@genesis/runner";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { eventStream } from "./channel/bridge";
@@ -21,6 +22,9 @@ export interface BuildOpts {
   hostProvider?: HostProvider;
   /** Working dir inside a microVM host (default /vercel/sandbox). Ignored on local. */
   remoteCwd?: string;
+  /** Alternate runner (e.g. the exempt interactive engine, BRO-1488). Omit →
+   *  the default print engine (`runAgent`, `claude -p`). */
+  run?: (opts: RunOptions) => Promise<RunResult>;
 }
 
 export function build(opts: BuildOpts) {
@@ -31,6 +35,7 @@ export function build(opts: BuildOpts) {
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
     store: opts.store,
+    run: opts.run,
   });
 
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {

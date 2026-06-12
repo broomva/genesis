@@ -9,6 +9,7 @@ import {
   aiGatewayEnv,
   allowListOmitsGatewayHost,
 } from "@genesis/host";
+import { type InteractiveEngine, createInteractiveEngine } from "@genesis/runner";
 import { build } from "./server";
 
 const defaultDataDir = () =>
@@ -140,6 +141,37 @@ try {
   process.exit(1);
 }
 
+// Engine selection (BRO-1488): GENESIS_ENGINE=interactive → one persistent
+// INTERACTIVE Claude Code session per thread (exempt subscription class) via
+// @genesis/session-host. Default → the print engine (`claude -p`, metered).
+// Local-host only — the interactive engine drives tmux + the local binary.
+let engine: InteractiveEngine | undefined;
+let engineLabel = "print(claude -p)";
+if (process.env.GENESIS_ENGINE === "interactive") {
+  if (process.env.GENESIS_HOST === "vercel") {
+    console.error(
+      "[genesis] GENESIS_ENGINE=interactive is local-host only (tmux + local claude); " +
+        "unset GENESIS_HOST or drop GENESIS_ENGINE.",
+    );
+    process.exit(1);
+  }
+  const pin = process.env.GENESIS_CLAUDE_PIN;
+  const rawTurnTimeout = Number(process.env.GENESIS_TURN_TIMEOUT_MS);
+  engine = createInteractiveEngine({
+    pin,
+    turnTimeoutMs:
+      Number.isFinite(rawTurnTimeout) && rawTurnTimeout > 0 ? rawTurnTimeout : undefined,
+  });
+  engineLabel = `interactive(exempt${pin ? `, pin ${pin}` : ", PATH claude"})`;
+  // Kill live agent tmux sessions + the control socket on shutdown. (Mutually
+  // exclusive with the vercel provider's handlers — guarded above.)
+  const engineShutdown = () => {
+    void engine?.shutdown().finally(() => process.exit(0));
+  };
+  process.once("SIGTERM", engineShutdown);
+  process.once("SIGINT", engineShutdown);
+}
+
 const { app, websocket } = build({
   workspaceRoot,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
@@ -147,6 +179,7 @@ const { app, websocket } = build({
   store,
   hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,
+  run: engine?.run,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
@@ -162,6 +195,6 @@ const rawIdle = Number(process.env.GENESIS_IDLE_TIMEOUT);
 const idleTimeout = Number.isInteger(rawIdle) && rawIdle >= 0 ? Math.min(255, rawIdle) : 255;
 
 console.log(
-  `[genesis] local channel → http://localhost:${port}  (workspace: ${workspaceRoot}, store: ${label}, host: ${hostLabel}, idleTimeout: ${idleTimeout}s)`,
+  `[genesis] local channel → http://localhost:${port}  (workspace: ${workspaceRoot}, store: ${label}, host: ${hostLabel}, engine: ${engineLabel}, idleTimeout: ${idleTimeout}s)`,
 );
 export default { port, idleTimeout, fetch: app.fetch, websocket };
