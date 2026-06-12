@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased] — Closed-loop send: UserPromptSubmit as the actuator ack (BRO-1485 #9)
+
+### Fixed
+- **Eaten-Enter race in `SessionHost.send()`** (caught live via Telegram,
+  2026-06-12): typing a turn too close to the previous turn's TUI tail could
+  eat the trailing Enter — the prompt sat unsubmitted in the composer while
+  the dispatch held its per-thread lock to the turn timeout (which kills the
+  session post-B1). `send()` is now **closed-loop**: type + Enter → await the
+  `UserPromptSubmit` hook ack (fires iff the prompt actually submits) → on
+  miss, re-send a bare Enter (text already in the composer) → bounded retries
+  (default 2) → throw. Empty-text sends (trust nudge) stay fire-and-forget.
+  Tunables: `submitAckMs` (3000), `submitRetries` (2). +4 tests incl. the
+  live-bug repro.
+
+
 ## [Unreleased] — Exempt interactive engine: GENESIS_ENGINE=interactive (BRO-1488)
 
 ### Added

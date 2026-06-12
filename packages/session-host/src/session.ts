@@ -55,6 +55,10 @@ export interface CreateSessionOptions {
   /** Extra environment variables for the session process. */
   env?: Record<string, string>;
   actuator?: InputActuator;
+  /** Closed-loop send: ms to wait for the UserPromptSubmit ack (default 3000). */
+  submitAckMs?: number;
+  /** Closed-loop send: bare-Enter retries after a missed ack (default 2). */
+  submitRetries?: number;
 }
 
 /** Resolve a pinned Claude Code binary; throws when the pin is absent. */
@@ -142,6 +146,9 @@ export class SessionHost {
   private tailer: TranscriptTailer | undefined;
   private tmuxName: string;
   transcriptPath: string | undefined;
+  private readonly submitWaiters = new Set<() => void>();
+  private readonly submitAckMs: number;
+  private readonly submitRetries: number;
 
   constructor(hub: SessionHub, sessionId: string, opts: CreateSessionOptions) {
     this.hub = hub;
@@ -151,6 +158,8 @@ export class SessionHost {
     this.actuator = opts.actuator ?? new TmuxActuator();
     this.adapter = new ClaudeCodeAdapter({ sessionId });
     this.tmuxName = `gen-${sessionId.slice(0, 8)}`;
+    this.submitAckMs = opts.submitAckMs ?? 3_000;
+    this.submitRetries = opts.submitRetries ?? 2;
   }
 
   get drift() {
@@ -185,9 +194,57 @@ export class SessionHost {
     });
   }
 
-  /** Type a user turn into the session. */
+  /**
+   * Type a user turn into the session — CLOSED-LOOP (BRO-1485 #9).
+   *
+   * Pure keystroke actuation is the one open-loop edge in the stack: typing
+   * too close to the previous turn's TUI tail can eat the trailing Enter,
+   * leaving the prompt unsubmitted in the composer (observed live via
+   * Telegram, 2026-06-12 — the dispatch then hangs to the turn timeout,
+   * which kills the session). The fix uses the contract surface we already
+   * have: the UserPromptSubmit hook fires iff a prompt ACTUALLY submits, so
+   * it is the actuator's ack. Type + Enter → await the ack → on miss,
+   * re-send a bare Enter (the text is already in the composer) → bounded
+   * retries → throw.
+   *
+   * Empty text (the trust-dialog nudge) stays fire-and-forget: a bare Enter
+   * on an empty composer never fires UserPromptSubmit.
+   */
   async send(text: string): Promise<void> {
-    await this.actuator.send(this.tmuxName, text);
+    if (text.length === 0) {
+      await this.actuator.send(this.tmuxName, "");
+      return;
+    }
+    const attempts = this.submitRetries + 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const ack = this.nextSubmit(this.submitAckMs);
+      if (attempt === 0) {
+        await this.actuator.send(this.tmuxName, text);
+      } else {
+        // Text already sits in the composer — only the Enter was eaten.
+        await this.actuator.send(this.tmuxName, "");
+      }
+      if (await ack) return;
+    }
+    throw new Error(
+      `send() not acknowledged by UserPromptSubmit after ${attempts} attempts (session ${this.sessionId})`,
+    );
+  }
+
+  /** One-shot waiter for the next hook-surface user-prompt submit. */
+  private nextSubmit(timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.submitWaiters.delete(waiter);
+        resolve(false);
+      }, timeoutMs);
+      const waiter = () => {
+        clearTimeout(timer);
+        this.submitWaiters.delete(waiter);
+        resolve(true);
+      };
+      this.submitWaiters.add(waiter);
+    });
   }
 
   /** Interrupt the in-flight turn (Escape). */
@@ -228,6 +285,11 @@ export class SessionHost {
     if (event.kind === "session.lifecycle" && event.transcriptPath !== undefined) {
       // Contract surface: transcript path from hook input, never reconstructed.
       void this.attachTranscript(event.transcriptPath);
+    }
+    // Submit ack (closed-loop send): a hook-surface user message means the
+    // composer actually submitted (UserPromptSubmit contract).
+    if (event.kind === "message.user" && event.surface === "hook") {
+      for (const waiter of [...this.submitWaiters]) waiter();
     }
   }
 }
