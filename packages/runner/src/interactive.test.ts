@@ -288,6 +288,29 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
+  test("control: reset DURING an active turn resolves it blocked (not a 10-min hang, B1)", async () => {
+    // A turn that never completes on its own (no terminal IR).
+    const hub = new FakeHub(() => []);
+    const engine = createInteractiveEngine({ hub, turnTimeoutMs: 600_000 });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "cb1" };
+    let resolved: { phase: string } | undefined;
+    const runP = engine.run({ ...opts, prompt: "long-running" }).then((r) => {
+      resolved = { phase: r.state.phase };
+      return r;
+    });
+    // Let the turn get in-flight (session created, parked on turnDone).
+    await Bun.sleep(20);
+    expect(resolved).toBeUndefined(); // still running
+    // Reset mid-turn must abort it promptly — NOT wait for the 600s timeout.
+    const start = Date.now();
+    expect(await engine.reset("cb1")).toBe(true);
+    const r = await runP;
+    expect(Date.now() - start).toBeLessThan(2_000); // resolved fast, not on timeout
+    expect(r.state.phase).toBe("blocked");
+    expect(hub.sessions[0]?.killed).toBe(true);
+    await engine.shutdown();
+  });
+
   test("control: interrupt sends Escape to the live session", async () => {
     const hub = new FakeHub((sid) => happyTurn(sid, "ctl2"));
     const engine = createInteractiveEngine({ hub });

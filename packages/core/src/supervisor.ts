@@ -204,10 +204,17 @@ export class Supervisor {
     if (this.control === undefined) return { ok: false, reason: "unsupported" };
     const s = await this.store.findSessionByThread(threadId);
     if (s === undefined) return { ok: false, reason: "no-session" };
+    // Abort + kill the live session (engine resolves any in-flight turn as
+    // blocked immediately — B1).
     const had = await this.control.reset(s.id);
-    s.agentSessionId = undefined;
-    s.phase = "idle";
-    await this.store.upsertSession(s);
+    // Then wait for any in-flight dispatch on this thread to settle, so its
+    // phase/agentSessionId write-back can't clobber our reset (B2 — the racing
+    // runTurn finally-writes blocked + the OLD agentSessionId). Re-read after.
+    await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
+    const fresh = (await this.store.findSessionByThread(threadId)) ?? s;
+    fresh.agentSessionId = undefined;
+    fresh.phase = "idle";
+    await this.store.upsertSession(fresh);
     return { ok: true, phase: "idle", alive: had };
   }
 
