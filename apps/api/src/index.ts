@@ -194,7 +194,7 @@ const { app, websocket } = build({
   run: engine?.run,
   control: engine, // InteractiveEngine satisfies EngineControl (reset/interrupt/status)
   // Run directly in the workspace (no worktree) — required for nested-repo
-  // workspaces like ~/broomva (BRO-1512). Interactive engine only.
+  // workspaces like ~/broomva (BRO-1512). Honored by both engines.
   noWorktree: process.env.GENESIS_NO_WORKTREE === "1",
 });
 
