@@ -56,6 +56,41 @@ describe("supervisor", () => {
     expect(seenResume).toBe("sid-persist"); // second turn resumes the captured session
   });
 
+  test("noWorktree → runner gets worktree:false (run-in-place, BRO-1512)", async () => {
+    let seenWorktree: boolean | undefined = true;
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      noWorktree: true,
+      run: async (o) => {
+        seenWorktree = o.worktree;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("tw", "hi");
+    expect(seenWorktree).toBe(false);
+  });
+
+  test("default (no noWorktree) leaves worktree unset (engine default applies)", async () => {
+    let seenWorktree: boolean | undefined = false;
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: async (o) => {
+        seenWorktree = o.worktree;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("tw2", "hi");
+    expect(seenWorktree).toBeUndefined();
+  });
+
   test("blocked phase propagates to the dispatch result", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("boom", "s", "blocked") });
     const r = await sup.dispatch("t3", "break it");

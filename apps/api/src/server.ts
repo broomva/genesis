@@ -28,6 +28,9 @@ export interface BuildOpts {
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
+  /** Run the agent directly in the workspace (no per-session worktree) —
+   *  required for workspaces with nested git repos (BRO-1512). */
+  noWorktree?: boolean;
 }
 
 export function build(opts: BuildOpts) {
@@ -37,6 +40,7 @@ export function build(opts: BuildOpts) {
     hostProvider: opts.hostProvider,
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
+    noWorktree: opts.noWorktree,
     store: opts.store,
     run: opts.run,
     control: opts.control,
