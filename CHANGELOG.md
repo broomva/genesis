@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased] — Harden keystroke actuator + pin-rot fallback (BRO-1494)
+
+### Fixed
+- **Wedged composer stranded messages** (3rd live "stuck" incident). The TUI
+  composer occasionally entered a state where a bare Enter would not submit
+  (diagnosed live: Escape + Ctrl-U + retype + C-m recovers it). The closed-loop
+  send's retry now **clears the composer and retypes the full text** instead of
+  re-sending a bare Enter, and submit uses **C-m** (the form that reliably
+  submitted). `actuator.send(name, text, {clearFirst})` exposes the recovery;
+  the trust-dialog nudge never clears (Escape would cancel it).
+- **Pin-rot**: Claude Code's auto-updater garbage-collects old versions, so a
+  pinned binary (e.g. 2.1.173) vanished out from under the running bot and
+  EVERY turn hard-failed. `resolveClaudeBinary` now **falls back to PATH
+  `claude` with a warning** when a pin is missing, instead of throwing.
+- +tests: clear+retype recovery, clearFirst-on-retries assertion, pin-fallback.
+  Live smoke 8/8 on PATH claude (2.1.177).
+
+
 ## [Unreleased] — Native slash-command framework (BRO-1493)
 
 ### Added

@@ -57,19 +57,25 @@ export interface CreateSessionOptions {
   actuator?: InputActuator;
   /** Closed-loop send: ms to wait for the UserPromptSubmit ack (default 5000). */
   submitAckMs?: number;
-  /** Closed-loop send: bare-Enter retries after a missed ack (default 2). */
+  /** Closed-loop send: clear+retype retries after a missed ack (default 2). */
   submitRetries?: number;
 }
 
-/** Resolve a pinned Claude Code binary; throws when the pin is absent. */
+/** Resolve a Claude Code binary: explicit > pinned-if-present > PATH `claude`.
+ *  A missing pin degrades to PATH (warns) rather than throwing (BRO-1494). */
 export function resolveClaudeBinary(pin?: string, explicit?: string): string {
   if (explicit !== undefined) return explicit;
   if (pin !== undefined) {
     const pinned = join(homedir(), ".local", "share", "claude", "versions", pin);
-    if (!existsSync(pinned)) {
-      throw new Error(`pinned claude ${pin} not found at ${pinned} — run: claude install ${pin}`);
-    }
-    return pinned;
+    if (existsSync(pinned)) return pinned;
+    // Graceful fallback (BRO-1494): Claude Code's auto-updater garbage-collects
+    // old versions, so a pin can vanish out from under a long-running daemon —
+    // which previously hard-failed EVERY turn. Degrade to PATH `claude` (latest)
+    // with a loud warning rather than wedging the whole bot.
+    console.warn(
+      `[genesis] pinned claude ${pin} not found at ${pinned} (auto-updater pruned it?) — falling back to PATH claude. Pin a still-installed version to silence this.`,
+    );
+    return "claude";
   }
   return "claude";
 }
@@ -212,11 +218,12 @@ export class SessionHost {
    * Telegram, 2026-06-12 — the dispatch then hangs to the turn timeout,
    * which kills the session). The fix uses the contract surface we already
    * have: the UserPromptSubmit hook fires iff a prompt ACTUALLY submits, so
-   * it is the actuator's ack. Type + Enter → await the ack → on miss,
-   * re-send a bare Enter (the text is already in the composer) → bounded
-   * retries → throw.
+   * it is the actuator's ack. Type + submit → await the ack → on miss, CLEAR
+   * the composer (Escape + Ctrl-U) and retype + submit → bounded retries →
+   * throw. (Bare-Enter retry was insufficient — a wedged composer needs the
+   * clear+retype, diagnosed live 2026-06-13, BRO-1494.)
    *
-   * Empty text (the trust-dialog nudge) stays fire-and-forget: a bare Enter
+   * Empty text (the trust-dialog nudge) stays fire-and-forget: a bare submit
    * on an empty composer never fires UserPromptSubmit.
    */
   async send(text: string): Promise<void> {
@@ -238,12 +245,10 @@ export class SessionHost {
     const attempts = this.submitRetries + 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const ack = this.nextSubmit(this.submitAckMs, text);
-      if (attempt === 0) {
-        await this.actuator.send(this.tmuxName, text);
-      } else {
-        // Text already sits in the composer — only the Enter was eaten.
-        await this.actuator.send(this.tmuxName, "");
-      }
+      // Attempt 0: type + submit. Retries: CLEAR the composer + retype + submit
+      // — a wedged composer (text present, un-submittable) doesn't recover from
+      // a bare Enter, but does from clear-then-retype (diagnosed live, BRO-1494).
+      await this.actuator.send(this.tmuxName, text, { clearFirst: attempt > 0 });
       if (await ack) return;
     }
     throw new Error(
