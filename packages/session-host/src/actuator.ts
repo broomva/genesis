@@ -23,10 +23,18 @@ export interface SpawnSpec {
   rows?: number;
 }
 
+export interface SendOptions {
+  /** Clear the composer (Escape + Ctrl-U) BEFORE typing. Used on retries: a
+   *  wedged composer (text present but un-submittable) doesn't recover from a
+   *  bare Enter, but DOES from clear-then-retype-then-submit (diagnosed live,
+   *  2026-06-13). NOT used on the trust-dialog nudge — Escape would cancel it. */
+  clearFirst?: boolean;
+}
+
 export interface InputActuator {
   spawn(spec: SpawnSpec): Promise<void>;
-  /** Type a user turn (literal text, then Enter). */
-  send(name: string, text: string): Promise<void>;
+  /** Type a user turn (literal text, then submit). */
+  send(name: string, text: string, opts?: SendOptions): Promise<void>;
   /** Send a single Escape (interrupt the current turn). */
   interrupt(name: string): Promise<void>;
   alive(name: string): Promise<boolean>;
@@ -83,15 +91,26 @@ export class TmuxActuator implements InputActuator {
     }
   }
 
-  async send(name: string, text: string): Promise<void> {
-    // -l = literal (no key-name interpretation); Enter sent separately.
-    const typed = await run(["tmux", "send-keys", "-t", name, "-l", "--", text]);
-    if (typed.code !== 0) {
-      throw new Error(`tmux send-keys failed (${typed.code}): ${typed.stderr.trim()}`);
+  async send(name: string, text: string, opts?: SendOptions): Promise<void> {
+    // Recovery for a wedged composer (retries): Escape dismisses any open
+    // overlay/autocomplete, Ctrl-U clears the line, so the retype lands in a
+    // clean composer. A bare Enter alone does NOT recover a wedge.
+    if (opts?.clearFirst) {
+      await run(["tmux", "send-keys", "-t", name, "Escape"]);
+      await run(["tmux", "send-keys", "-t", name, "C-u"]);
     }
-    const entered = await run(["tmux", "send-keys", "-t", name, "Enter"]);
+    if (text.length > 0) {
+      // -l = literal (no key-name interpretation); submit sent separately.
+      const typed = await run(["tmux", "send-keys", "-t", name, "-l", "--", text]);
+      if (typed.code !== 0) {
+        throw new Error(`tmux send-keys failed (${typed.code}): ${typed.stderr.trim()}`);
+      }
+    }
+    // C-m (carriage return) submits — the form that reliably submitted in the
+    // live wedge diagnostic.
+    const entered = await run(["tmux", "send-keys", "-t", name, "C-m"]);
     if (entered.code !== 0) {
-      throw new Error(`tmux send-keys Enter failed (${entered.code}): ${entered.stderr.trim()}`);
+      throw new Error(`tmux send-keys submit failed (${entered.code}): ${entered.stderr.trim()}`);
     }
   }
 

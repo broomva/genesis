@@ -9,13 +9,16 @@ import { join } from "node:path";
 import type { InputActuator, SpawnSpec } from "../src/actuator";
 import { SessionHub } from "../src/session";
 
-/** Actuator that "eats" the Enter for the first N sends (live bug repro).
- *  On an honored send it asks the harness to fire the UserPromptSubmit ack
- *  with the text that ACTUALLY submitted (composer contents). */
+/** Actuator that "eats" the submit for the first N sends (live bug repro).
+ *  Models a WEDGED composer: a plain submit fails until the composer is
+ *  cleared (clearFirst). On an honored send it fires the UserPromptSubmit ack
+ *  with the text that ACTUALLY submitted. */
 class FlakyActuator implements InputActuator {
   sends: string[] = [];
+  /** Per-send opts seen (to assert clearFirst was used on retries). */
+  clears: boolean[] = [];
   private eats: number;
-  private composer = ""; // text stranded by an eaten Enter
+  private composer = ""; // text stranded by an eaten submit
   constructor(
     eatFirstN: number,
     private onSubmitted: (text: string) => void,
@@ -23,14 +26,15 @@ class FlakyActuator implements InputActuator {
     this.eats = eatFirstN;
   }
   async spawn(_spec: SpawnSpec): Promise<void> {}
-  async send(_name: string, text: string): Promise<void> {
+  async send(_name: string, text: string, opts?: { clearFirst?: boolean }): Promise<void> {
     this.sends.push(text);
+    this.clears.push(opts?.clearFirst === true);
+    if (opts?.clearFirst) this.composer = ""; // Escape + Ctrl-U cleared it
     this.composer += text;
     if (this.eats > 0) {
-      this.eats -= 1; // Enter eaten — composer holds the text, no submit
+      this.eats -= 1; // submit eaten — composer holds the text, no ack
       return;
     }
-    // Submit lands → the hook fires shortly after (async, like real curl).
     const submitted = this.composer;
     this.composer = "";
     setTimeout(() => this.onSubmitted(submitted), 10);
@@ -73,7 +77,7 @@ describe("closed-loop send (UserPromptSubmit ack)", () => {
     expect(actuator.sends).toEqual(["hello"]);
   });
 
-  test("eaten Enter (the live Telegram bug): bare-Enter retry recovers", async () => {
+  test("wedged composer (the live bug): clear+retype retry recovers (BRO-1494)", async () => {
     const hub = makeHub();
     let sessionId = "";
     const actuator = new FlakyActuator(1, (text) => fireSubmitAck(hub, sessionId, text));
@@ -85,8 +89,9 @@ describe("closed-loop send (UserPromptSubmit ack)", () => {
     });
     sessionId = session.sessionId;
     await session.send("stranded prompt");
-    // attempt 0: text+Enter (eaten) → ack miss → attempt 1: bare Enter → ack.
-    expect(actuator.sends).toEqual(["stranded prompt", ""]);
+    // attempt 0: type+submit (wedged) → ack miss → attempt 1: clear+RETYPE → ack.
+    expect(actuator.sends).toEqual(["stranded prompt", "stranded prompt"]);
+    expect(actuator.clears).toEqual([false, true]); // retry cleared the composer
   });
 
   test("ack never arrives: bounded retries then throw (no silent hang)", async () => {
@@ -100,7 +105,9 @@ describe("closed-loop send (UserPromptSubmit ack)", () => {
       submitRetries: 2,
     });
     await expect(session.send("never lands")).rejects.toThrow(/not acknowledged/);
-    expect(actuator.sends).toEqual(["never lands", "", ""]); // 1 send + 2 bare-Enter retries
+    // 1 type + 2 clear+retype retries (full text each, clearFirst on retries).
+    expect(actuator.sends).toEqual(["never lands", "never lands", "never lands"]);
+    expect(actuator.clears).toEqual([false, true, true]);
   });
 
   test("transcript-surface message.user does NOT ack (replay safety, P20 c.3)", async () => {
