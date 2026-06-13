@@ -59,6 +59,11 @@ export interface SupervisorConfig {
    *  local/VPS). Default: the sandbox default (/vercel/sandbox). A lease's own
    *  remoteCwd (from the provider) takes precedence. */
   remoteCwd?: string;
+  /** Run the agent DIRECTLY in the workspace instead of a per-session worktree
+   *  (BRO-1512). Required when the workspace has nested git repos (a worktree
+   *  checks out only the outer repo's tracked files, missing the nested ones).
+   *  Continuity then relies on the persistent live session, not the worktree. */
+  noWorktree?: boolean;
 }
 
 export interface DispatchResult {
@@ -74,6 +79,7 @@ export class Supervisor {
   private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
   private readonly remoteCwd?: string;
+  private readonly noWorktree: boolean;
   private readonly defaultWorkspace: Workspace;
   /** Per-thread promise chain — serializes dispatches on the same session. */
   private readonly chains = new Map<string, Promise<unknown>>();
@@ -88,6 +94,7 @@ export class Supervisor {
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
     this.extraArgs = cfg.extraArgs;
     this.remoteCwd = cfg.remoteCwd;
+    this.noWorktree = cfg.noWorktree ?? false;
     this.defaultWorkspace = cfg.defaultWorkspace;
   }
 
@@ -160,7 +167,9 @@ export class Supervisor {
         remoteCwd: lease.remoteCwd ?? this.remoteCwd,
         // Stable per-session worktree → reused across turns so claude --resume
         // finds its cwd-scoped session (multi-turn continuity on LocalHost).
+        // noWorktree → run directly in the workspace (BRO-1512: nested-repo cwd).
         sessionKey: session.id,
+        worktree: this.noWorktree ? false : undefined,
         onState: (state, event) => {
           session.phase = state.phase;
           onState?.(state, event);

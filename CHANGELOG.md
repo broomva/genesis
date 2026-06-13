@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased] — Run the agent on ~/broomva: owner allowlist + worktree-disable (BRO-1512)
+
+### Added
+- **Owner-only Telegram allowlist** (`GENESIS_TELEGRAM_ALLOWED_USERS`, comma-sep
+  ids; matches full thread id or bare chat id). When set, the bot serves ONLY
+  those threads (others silently ignored + logged). REQUIRED before pointing the
+  auto-allow agent at a real workspace — otherwise any Telegram user who DMs the
+  bot gets RCE on the owner's machine. Unset → allow-all (sandbox posture).
+- **Worktree-disable** (`GENESIS_NO_WORKTREE=1` → Supervisor `noWorktree` →
+  runner `worktree:false`): the agent runs DIRECTLY in the workspace instead of
+  a per-session worktree. Required for workspaces with nested git repos like
+  `~/broomva` (apps/genesis, core/life are nested repos — a worktree checks out
+  only the outer repo's tracked files and misses them). Continuity stays via the
+  persistent live session.
+
+### Live-verified (~/broomva, allowlist enforced)
+- Agent lists the real monorepo top-level (AGENTS.md, apps, core, …), runs in
+  `/Users/broomva/broomva`, creates NO `.genesis-runs/` worktree. Bot boots with
+  `allowlist ENFORCED`. +14 tests (allowlist parse/match, supervisor worktree
+  pass-through).
+
+
 ## [Unreleased] — Harden keystroke actuator + pin-rot fallback (BRO-1494)
 
 ### Fixed
