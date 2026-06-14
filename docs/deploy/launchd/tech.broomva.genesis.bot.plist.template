@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tech.broomva.genesis.bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/.config/genesis-bot/start-bot.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__/broomva/apps/genesis</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/genesis-bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/genesis-bot.log</string>
+</dict>
+</plist>
