@@ -94,6 +94,20 @@ describe("RunLogger — structured console summary", () => {
     expect(joined).toContain("session ready");
   });
 
+  test("turn tally is reclaimed when a session ends/crashes mid-turn (P20 #1 leak)", () => {
+    const { logger } = setup();
+    // open a turn but never complete it (a session that dies mid-turn)
+    logger.observe(ev("s7", { kind: "message.user", text: "work" } as IREvent));
+    expect(logger.pendingTurns()).toBe(1);
+    // crash/end before turn.complete must reclaim the entry (was the leak)
+    logger.observe(ev("s7", { kind: "session.lifecycle", phase: "crashed" } as IREvent));
+    expect(logger.pendingTurns()).toBe(0);
+    // and a normal turn.complete also reclaims
+    logger.observe(ev("s8", { kind: "message.user", text: "x" } as IREvent));
+    logger.observe(ev("s8", { kind: "turn.complete" } as IREvent));
+    expect(logger.pendingTurns()).toBe(0);
+  });
+
   test("persist failure never throws (observability can't break the session)", () => {
     const logger = new RunLogger({ dir: "/proc/nonexistent/cannot-mkdir", log: () => {} });
     expect(() => logger.observe(ev("s6", { kind: "turn.complete" } as IREvent))).not.toThrow();

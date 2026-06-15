@@ -41,6 +41,11 @@ export class RunLogger {
     this.now = opts.now ?? (() => Date.now());
   }
 
+  /** Count of in-flight turn tallies (test/diagnostic — must not leak). */
+  pendingTurns(): number {
+    return this.turns.size;
+  }
+
   /** Observe one IR event: persist it + emit structured logs. Never throws. */
   observe(event: IREvent): void {
     const ts = this.now();
@@ -76,6 +81,11 @@ export class RunLogger {
         this.log(
           `[genesis] [${sid}] session ${event.phase}${event.transcriptPath ? ` · transcript=${event.transcriptPath}` : ""}`,
         );
+        // Reclaim a turn tally for a session that died mid-turn (P20 #1) — a
+        // crash/end before turn.complete would otherwise orphan the entry.
+        if (event.phase === "ended" || event.phase === "crashed") {
+          this.turns.delete(event.sessionId);
+        }
         return;
       case "message.user":
         // Start of a turn — open a tally.
