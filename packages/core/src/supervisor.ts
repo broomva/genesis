@@ -155,6 +155,11 @@ export class Supervisor {
     session.phase = "running";
     await this.store.upsertSession(session);
 
+    // Engine-agnostic turn logging (BRO-1519) — ties thread → session → outcome
+    // in the api log, for the print engine + /message too.
+    const startedAt = Date.now();
+    console.log(`[genesis] dispatch ▶ thread=${threadId} session=${session.id}`);
+
     // Lease a host for THIS session (e.g. its own per-session microVM).
     const lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
     try {
@@ -194,7 +199,22 @@ export class Supervisor {
         ).catch((e) => console.error(`[genesis] worktree cleanup failed: ${e}`));
       }
 
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const noOutput = result.state.lastText === undefined ? " NO-OUTPUT" : "";
+      console.log(
+        `[genesis] dispatch ✓ thread=${threadId} phase=${result.state.phase}${noOutput} ` +
+          `reply=${reply.length}c ${elapsed}s`,
+      );
       return { session, reply, phase: result.state.phase };
+    } catch (e) {
+      // Full server-side detail (BRO-1519) — previously the error was swallowed
+      // and only a generic "Something went wrong" reached the user.
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      console.error(
+        `[genesis] dispatch ✖ thread=${threadId} session=${session.id} ${elapsed}s — ` +
+          `${e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e)}`,
+      );
+      throw e;
     } finally {
       await lease.release?.().catch((e) => console.error(`[genesis] host release failed: ${e}`));
     }

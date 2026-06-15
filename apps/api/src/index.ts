@@ -9,7 +9,7 @@ import {
   aiGatewayEnv,
   allowListOmitsGatewayHost,
 } from "@genesis/host";
-import { type InteractiveEngine, createInteractiveEngine } from "@genesis/runner";
+import { type InteractiveEngine, RunLogger, createInteractiveEngine } from "@genesis/runner";
 import { build } from "./server";
 
 const defaultDataDir = () =>
@@ -157,12 +157,18 @@ if (process.env.GENESIS_ENGINE === "interactive") {
   }
   const pin = process.env.GENESIS_CLAUDE_PIN;
   const rawTurnTimeout = Number(process.env.GENESIS_TURN_TIMEOUT_MS);
+  // Full session observability (BRO-1519): every IR event + engine diagnostic
+  // → per-session JSONL trace + structured console lines (to the launchd log).
+  const runsDir = process.env.GENESIS_RUNS_DIR ?? join(defaultDataDir(), "runs");
+  const runLogger = new RunLogger({ dir: runsDir });
   engine = createInteractiveEngine({
     pin,
     turnTimeoutMs:
       Number.isFinite(rawTurnTimeout) && rawTurnTimeout > 0 ? rawTurnTimeout : undefined,
+    observer: (event) => runLogger.observe(event),
   });
   engineLabel = `interactive(exempt${pin ? `, pin ${pin}` : ", PATH claude"})`;
+  console.log(`[genesis] session traces → ${runsDir}`);
   // P20 (BRO-1488 round-2 B2): the interactive engine's default permission
   // policy is allow-all — the same posture as --dangerously-skip-permissions,
   // but selected by GENESIS_ENGINE alone, so the extraArgs-based warning in
