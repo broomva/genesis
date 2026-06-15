@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased] — Full end-to-end session observability (BRO-1519)
+
+### Added
+- **Per-session IR trace (JSONL)** — `RunLogger` (session-host) subscribes the
+  SessionHub firehose via the new `InteractiveEngineConfig.observer` and appends
+  EVERY event (`message.*`/`tool.*`/`permission.*`/`status`/`turn.complete`/
+  `awaiting`/`error`/`unknown`/`session.lifecycle`) with a timestamp to
+  `<GENESIS_RUNS_DIR>/<sessionId>.jsonl` — the complete record for retro-diagnosis.
+- **Structured server-side logging** (→ launchd api log): turn boundaries +
+  LOUD, detailed lines for every failure/stuck condition. Engine emits
+  diagnostics the hooks can't surface (send-not-acknowledged, turn-timeout with
+  elapsed/last-event context). Supervisor logs dispatch ▶/✓/✖ (thread→session→
+  phase→timing, engine-agnostic — covers print + /message) and now logs the
+  FULL error+stack on dispatch failure (was swallowed → generic "Something went
+  wrong" with no server trace).
+- **No-output detection**: a turn that completes with empty assistant text is
+  flagged loudly with the events that DID occur (the "(no output)" symptom).
+
+### Live-verified
+- Real turn → full JSONL trace (lifecycle→status→user→tool.use→permission→
+  tool.result→assistant→turn.complete) + structured log with per-turn timing.
+- +7 RunLogger tests (JSONL append, per-session files, no-output flag, error/
+  drift/lifecycle summaries, persist-never-throws).
+
+
 ## [Unreleased] — Run the agent on ~/broomva: owner allowlist + worktree-disable (BRO-1512)
 
 ### Added

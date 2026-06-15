@@ -193,3 +193,7 @@ export {
 
 // Slash-command interception for the interactive engine (BRO-1485 #10).
 export { interceptSlashCommand, TUI_BUILTIN_COMMANDS } from "./slash";
+
+// Session observability (BRO-1519) — re-exported so the api wires the logger
+// without a direct @genesis/session-host dependency.
+export { RunLogger, type RunLoggerOptions, type IREvent } from "@genesis/session-host";

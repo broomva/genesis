@@ -66,6 +66,10 @@ export interface InteractiveEngineConfig {
   turnTimeoutMs?: number;
   /** First-spawn grace before the trust-dialog Enter nudge (default 12s). */
   trustNudgeMs?: number;
+  /** Observability tap (BRO-1519): receives EVERY hub IR event PLUS engine
+   *  diagnostics for failures the hooks can't surface (send-not-acknowledged,
+   *  turn-timeout, reset/interrupt, eviction, spawn). Wire a RunLogger here. */
+  observer?: (event: IREvent) => void;
 }
 
 interface LiveSession {
@@ -104,18 +108,34 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
   let started = false;
   const live = new Map<string, LiveSession>();
 
+  // Emit an engine diagnostic to the observer (failures the hub can't surface).
+  const diag = (sessionId: string, message: string, detail?: unknown): void => {
+    cfg.observer?.({
+      kind: "error",
+      sessionId,
+      observedAt: Date.now(),
+      surface: "actuator",
+      message,
+      detail,
+    });
+  };
+
   const ensureHub = (): EngineHub => {
-    hub ??=
-      cfg.hub ??
-      new SessionHub({
-        socketPath: cfg.socketPath ?? join(tmpdir(), `genesis-engine-${process.pid}.sock`),
-        policy:
-          cfg.policy ??
-          (() => ({
-            decision: "allow" as const,
-            reason: "genesis interactive default (parity with skip-permissions print engine)",
-          })),
-      });
+    if (hub === undefined) {
+      hub =
+        cfg.hub ??
+        new SessionHub({
+          socketPath: cfg.socketPath ?? join(tmpdir(), `genesis-engine-${process.pid}.sock`),
+          policy:
+            cfg.policy ??
+            (() => ({
+              decision: "allow" as const,
+              reason: "genesis interactive default (parity with skip-permissions print engine)",
+            })),
+        });
+      // Observability tap: every IR event flows to the observer (BRO-1519).
+      if (cfg.observer) hub.onEvent(cfg.observer);
+    }
     if (!started) {
       hub.start();
       started = true;
@@ -302,7 +322,14 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     // The deterministic fix: kill + evict, so the next dispatch respawns fresh
     // (with a fresh sessionId, which also makes the stale event filter exact).
     const timeoutMs = cfg.turnTimeoutMs ?? 600_000;
+    const turnStart = Date.now();
     const timeout = setTimeout(() => {
+      // No hook fires for a hung turn — diagnose explicitly with context.
+      diag(sessionId, `turn timed out after ${(timeoutMs / 1000).toFixed(0)}s — killing+evicting`, {
+        sessionKey: key,
+        elapsedMs: Date.now() - turnStart,
+        lastAssistant: lastAssistant?.slice(0, 120),
+      });
       push({ type: "result", subtype: "turn-timeout", is_error: true, session_id: sessionId });
       live.delete(key);
       void entry.session?.kill().catch(() => {});
@@ -335,7 +362,9 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           void entry.session.kill().catch(() => {});
           push({ type: "result", subtype: "send-failed", is_error: true, session_id: sessionId });
           finish();
-          console.error(`[genesis] interactive send failed (session evicted): ${sendError}`);
+          diag(sessionId, `send not acknowledged — session evicted: ${String(sendError)}`, {
+            sessionKey: key,
+          });
         }
       } else {
         entry.session = await engineHub.createSession({

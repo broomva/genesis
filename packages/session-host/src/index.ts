@@ -22,3 +22,4 @@ export {
   type SessionHubOptions,
 } from "./session";
 export { TranscriptTailer, type TailerOptions } from "./tailer";
+export { RunLogger, type RunLoggerOptions } from "./runlog";
