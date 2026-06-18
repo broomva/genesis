@@ -57,24 +57,34 @@ describe("supervisor", () => {
   });
 
   test("reset works for the PRINT engine (no control) — clears agentSessionId (BRO-1524)", async () => {
+    // Wire the runner so we can assert the resume id actually threaded (CR #18).
+    let seenResume: string | undefined = "unset";
     const sup = new Supervisor({
       defaultWorkspace: ws,
       // no `control` → print engine
-      run: fakeRunner("ok", "sid-1"),
+      run: async (o) => {
+        seenResume = o.resumeSessionId;
+        return {
+          state: { phase: "done", sessionId: "sid-1", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
     });
-    await sup.dispatch("tr", "first"); // establishes agentSessionId sid-1
+    await sup.dispatch("tr", "first"); // turn 1: no resume, captures sid-1
+    expect(seenResume).toBeUndefined();
+    await sup.dispatch("tr", "second"); // turn 2: resumes sid-1
+    expect(seenResume).toBe("sid-1");
+
     const r = await sup.reset("tr");
     expect(r.ok).toBe(true);
     expect(r.reason).toBeUndefined(); // NOT "unsupported"
     expect(r.phase).toBe("idle");
     expect(r.alive).toBe(false); // no live process in print mode
-    // next turn must start fresh (no resume id carried)
-    const seenResume: string | undefined = "unset";
-    const sup2 = sup; // same supervisor/store
-    await sup2.dispatch("tr", "second"); // reuses; but verify via a fresh runner
-    // (continuity-cleared is asserted by the reset result; resume-threading is
-    //  covered by the existing resume test)
-    void seenResume;
+
+    // After reset, the NEXT turn must start fresh — no resume id carried.
+    await sup.dispatch("tr", "after-reset");
+    expect(seenResume).toBeUndefined();
   });
 
   test("reset on a thread with no session → no-session (not unsupported)", async () => {
@@ -104,6 +114,29 @@ describe("supervisor", () => {
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[0]?.type).toBe("assistant");
     expect(seen[0]?.sid).toMatch(/^sess-/); // tagged with the supervisor session id
+  });
+
+  test("a throwing trace hook does NOT fail the turn (CR #18 — side-channel)", async () => {
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      trace: () => {
+        throw new Error("trace sink exploded");
+      },
+      run: async (o) => {
+        o.onState?.(
+          { phase: "running", turns: 1, sessionId: "s" },
+          { type: "assistant", session_id: "s", message: { role: "assistant", content: [] } },
+        );
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    const r = await sup.dispatch("tg", "hi");
+    expect(r.phase).toBe("done"); // turn succeeds despite the trace throwing
+    expect(r.reply).toBe("ok");
   });
 
   test("noWorktree → runner gets worktree:false (run-in-place, BRO-1512)", async () => {
