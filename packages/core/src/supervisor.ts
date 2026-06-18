@@ -53,6 +53,10 @@ export interface SupervisorConfig {
   /** Live-session control surface (interactive engine). Enables /control
    *  (reset/interrupt/status). Omit → those ops report "unsupported". */
   control?: EngineControl;
+  /** Per-event observability tap (BRO-1524): every AgentEvent of every turn,
+   *  tagged with the session id. The interactive engine has its own IR-trace
+   *  observer, so wire this only for the print engine to get trace parity. */
+  trace?: (sessionId: string, event: AgentEvent) => void;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
   /** Working dir inside a microVM host (forwarded to the runner; ignored on
@@ -76,6 +80,7 @@ export class Supervisor {
   private readonly store: Store;
   private readonly run: RunnerFn;
   private readonly control?: EngineControl;
+  private readonly trace?: (sessionId: string, event: AgentEvent) => void;
   private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
   private readonly remoteCwd?: string;
@@ -90,6 +95,7 @@ export class Supervisor {
     this.store = cfg.store ?? new InMemoryStore();
     this.run = cfg.run ?? runAgent;
     this.control = cfg.control;
+    this.trace = cfg.trace;
     this.hostProvider =
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
     this.extraArgs = cfg.extraArgs;
@@ -177,6 +183,7 @@ export class Supervisor {
         worktree: this.noWorktree ? false : undefined,
         onState: (state, event) => {
           session.phase = state.phase;
+          this.trace?.(session.id, event);
           onState?.(state, event);
         },
       });
@@ -227,16 +234,17 @@ export class Supervisor {
 
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
 
-  /** Reset a thread's agent session: drop the live process (next turn spawns
-   *  fresh = new conversation, same workspace) and clear stored continuity. */
+  /** Reset a thread's agent session → next turn starts fresh (new
+   *  conversation, same workspace). Engine-agnostic (BRO-1524): clearing the
+   *  stored agentSessionId means the print engine drops `--resume`; the
+   *  interactive engine additionally kills its live process via control.reset. */
   async reset(threadId: string): Promise<ControlResult> {
-    if (this.control === undefined) return { ok: false, reason: "unsupported" };
     const s = await this.store.findSessionByThread(threadId);
     if (s === undefined) return { ok: false, reason: "no-session" };
-    // Abort + kill the live session (engine resolves any in-flight turn as
-    // blocked immediately — B1).
-    const had = await this.control.reset(s.id);
-    // Then wait for any in-flight dispatch on this thread to settle, so its
+    // Interactive engine: abort + kill the live session (resolves any in-flight
+    // turn as blocked immediately — B1). Print engine: no live process (had=false).
+    const had = this.control ? await this.control.reset(s.id) : false;
+    // Wait for any in-flight dispatch on this thread to settle, so its
     // phase/agentSessionId write-back can't clobber our reset (B2 — the racing
     // runTurn finally-writes blocked + the OLD agentSessionId). Re-read after.
     await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
