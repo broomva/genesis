@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] — Print engine as the bot default + control/observability parity (BRO-1524)
+
+### Changed
+- **Default the Telegram bot to the PRINT engine (`claude -p`).** Anthropic
+  PAUSED the June-15 Agent-SDK/`claude -p` metering (verified 2026-06-18 from
+  support.claude.com: "we're pausing the changes… nothing has changed"), so
+  `claude -p` draws the subscription at no penalty — and the print engine has
+  NONE of the interactive engine's tmux/keystroke fragility (source of every
+  "stuck"/"wedged" incident). The interactive engine stays as exempt-insurance
+  for if/when metering returns (flip `GENESIS_ENGINE=interactive`).
+
+### Fixed / Added
+- **`Supervisor.reset` is now engine-agnostic** — clears the stored
+  agentSessionId + phase regardless of an engine control surface, so `/new`
+  (fresh context) works on the print engine too (was "unsupported"). The
+  interactive engine additionally kills its live process.
+- **Per-event trace parity for the print engine** — a `trace` hook
+  (Supervisor `onState` → `<runsDir>/<sessionId>.jsonl`) gives the print engine
+  the same per-turn event record the interactive IR observer provides.
+- launchd env template documents the engine choice + billing-pause context.
+- +3 core tests (reset without control, no-session, trace hook).
+
+
 ## [Unreleased] — Full end-to-end session observability (BRO-1519)
 
 ### Added

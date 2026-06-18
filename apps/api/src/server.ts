@@ -1,4 +1,4 @@
-import { type EngineControl, type Store, Supervisor } from "@genesis/core";
+import { type AgentEvent, type EngineControl, type Store, Supervisor } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { Hono } from "hono";
@@ -31,6 +31,8 @@ export interface BuildOpts {
   /** Run the agent directly in the workspace (no per-session worktree) —
    *  required for workspaces with nested git repos (BRO-1512). */
   noWorktree?: boolean;
+  /** Per-event observability trace (print-engine parity, BRO-1524). */
+  trace?: (sessionId: string, event: AgentEvent) => void;
 }
 
 export function build(opts: BuildOpts) {
@@ -41,6 +43,7 @@ export function build(opts: BuildOpts) {
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
     noWorktree: opts.noWorktree,
+    trace: opts.trace,
     store: opts.store,
     run: opts.run,
     control: opts.control,

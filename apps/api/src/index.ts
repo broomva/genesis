@@ -1,6 +1,7 @@
+import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Store } from "@genesis/core";
+import type { AgentEvent, Store } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import {
   type HostProvider,
@@ -147,6 +148,12 @@ try {
 // Local-host only — the interactive engine drives tmux + the local binary.
 let engine: InteractiveEngine | undefined;
 let engineLabel = "print(claude -p)";
+// Per-session trace dir, shared by both engines (BRO-1519/1524).
+const runsDir = process.env.GENESIS_RUNS_DIR ?? join(defaultDataDir(), "runs");
+// Print-engine per-event trace (parity with the interactive IR observer): append
+// each AgentEvent to <runsDir>/<sessionId>.jsonl. Set only for the print engine
+// (the interactive engine has its own richer IR observer). Best-effort.
+let printTrace: ((sessionId: string, event: AgentEvent) => void) | undefined;
 if (process.env.GENESIS_ENGINE === "interactive") {
   if (process.env.GENESIS_HOST === "vercel") {
     console.error(
@@ -159,7 +166,6 @@ if (process.env.GENESIS_ENGINE === "interactive") {
   const rawTurnTimeout = Number(process.env.GENESIS_TURN_TIMEOUT_MS);
   // Full session observability (BRO-1519): every IR event + engine diagnostic
   // → per-session JSONL trace + structured console lines (to the launchd log).
-  const runsDir = process.env.GENESIS_RUNS_DIR ?? join(defaultDataDir(), "runs");
   const runLogger = new RunLogger({ dir: runsDir });
   engine = createInteractiveEngine({
     pin,
@@ -188,6 +194,19 @@ if (process.env.GENESIS_ENGINE === "interactive") {
   };
   process.once("SIGTERM", engineShutdown);
   process.once("SIGINT", engineShutdown);
+} else {
+  // Print engine (claude -p): no IR observer, so wire an AgentEvent → JSONL
+  // trace for observability parity (BRO-1524).
+  mkdirSync(runsDir, { recursive: true });
+  printTrace = (sessionId, event) => {
+    try {
+      const file = join(runsDir, `${sessionId.replace(/[^a-zA-Z0-9._-]/g, "_")}.jsonl`);
+      appendFileSync(file, `${JSON.stringify({ ts: Date.now(), ...event })}\n`);
+    } catch {
+      // observability must never break a turn
+    }
+  };
+  console.log(`[genesis] session traces → ${runsDir}`);
 }
 
 const { app, websocket } = build({
@@ -202,6 +221,7 @@ const { app, websocket } = build({
   // Run directly in the workspace (no worktree) — required for nested-repo
   // workspaces like ~/broomva (BRO-1512). Honored by both engines.
   noWorktree: process.env.GENESIS_NO_WORKTREE === "1",
+  trace: printTrace, // per-event JSONL trace for the print engine (BRO-1524)
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
