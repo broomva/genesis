@@ -183,7 +183,17 @@ export class Supervisor {
         worktree: this.noWorktree ? false : undefined,
         onState: (state, event) => {
           session.phase = state.phase;
-          this.trace?.(session.id, event);
+          // Tracing is side-channel — a throwing trace hook must NOT fail the
+          // turn (CodeRabbit #18). Guard at the call site, not just in the impl.
+          if (this.trace) {
+            try {
+              this.trace(session.id, event);
+            } catch (e) {
+              console.error(
+                `[genesis] trace hook failed (session=${session.id}): ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
           onState?.(state, event);
         },
       });
