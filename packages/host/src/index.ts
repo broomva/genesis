@@ -10,6 +10,11 @@
 export interface ExecOpts {
   cwd?: string;
   env?: Record<string, string>;
+  /** When true, `env` REPLACES the inherited process.env instead of extending
+   *  it. Used to spawn the agent with a scrubbed env so a prompt-injected agent
+   *  cannot read the host's operational secrets (BRO-1527 #1). Default false
+   *  (extend) keeps framework git/exec calls working with the full host env. */
+  replaceEnv?: boolean;
 }
 
 export interface ExecResult {
@@ -82,7 +87,7 @@ export class LocalHost implements ExecutionHost {
     // child once its stderr buffer fills, stalling stdout/the reducer (F15).
     const proc = Bun.spawn(cmd, {
       cwd: opts?.cwd,
-      env: { ...process.env, ...opts?.env },
+      env: opts?.replaceEnv ? (opts.env ?? {}) : { ...process.env, ...opts?.env },
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -92,7 +97,7 @@ export class LocalHost implements ExecutionHost {
   async exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult> {
     const proc = Bun.spawn(cmd, {
       cwd: opts?.cwd,
-      env: { ...process.env, ...opts?.env },
+      env: opts?.replaceEnv ? (opts.env ?? {}) : { ...process.env, ...opts?.env },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -134,11 +139,19 @@ export class VpsHost implements ExecutionHost {
     return ["ssh", this.target, "--", `${cd}${joined}`];
   }
 
+  // NOTE: `env`/`replaceEnv` here scope the LOCAL ssh-client process, not the
+  // remote agent — ssh does not forward arbitrary env. Remote-side secret
+  // scrubbing is a separate (VPS) concern (BRO-1527 #2/#3); the env-leak fixed
+  // here is LocalHost's inherited process.env. Passed through for interface
+  // parity so a scrubbed-env caller behaves consistently across hosts.
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
-    return this.local.spawnStream(this.wrap(cmd), { env: opts?.env });
+    return this.local.spawnStream(this.wrap(cmd), {
+      env: opts?.env,
+      replaceEnv: opts?.replaceEnv,
+    });
   }
   exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult> {
-    return this.local.exec(this.wrap(cmd), { env: opts?.env });
+    return this.local.exec(this.wrap(cmd), { env: opts?.env, replaceEnv: opts?.replaceEnv });
   }
   async readFile(path: string): Promise<string> {
     const r = await this.exec(["cat", path]);
