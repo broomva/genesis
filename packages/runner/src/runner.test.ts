@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExecOpts, ExecResult, ExecutionHost, SpawnHandle } from "@genesis/host";
-import { runAgent } from "./index";
+import { runAgent, scrubAgentEnv } from "./index";
 
 const NDJSON = [
   '{"type":"system","session_id":"s1"}',
@@ -39,6 +39,7 @@ class FakeLocalHost implements ExecutionHost {
   readonly credentialTier = "subscription" as const;
   execCalls: string[][] = [];
   spawnCwd?: string;
+  spawnOpts?: ExecOpts;
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
     if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
@@ -47,6 +48,7 @@ class FakeLocalHost implements ExecutionHost {
   }
   spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
     this.spawnCwd = opts?.cwd;
+    this.spawnOpts = opts;
     return streamOf(NDJSON);
   }
   async readFile() {
@@ -85,6 +87,58 @@ describe("runAgent — local host worktree", () => {
     const host = new FakeLocalHost();
     await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
     expect(host.spawnCwd).toBe("/repo");
+  });
+
+  test("spawns the agent with a scrubbed, replaced env (BRO-1527 #1)", async () => {
+    const host = new FakeLocalHost();
+    await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
+    // replaceEnv must be set so the agent gets EXACTLY this env (no process.env merge).
+    expect(host.spawnOpts?.replaceEnv).toBe(true);
+    const env = host.spawnOpts?.env ?? {};
+    // The host's own secret + internal config must NOT reach the agent.
+    expect("TELEGRAM_BOT_TOKEN" in env).toBe(false);
+    // PATH survives so claude + tasks still run.
+    expect(typeof env.PATH === "string" || !("PATH" in process.env)).toBe(true);
+  });
+});
+
+describe("scrubAgentEnv", () => {
+  test("strips the bot secret, GENESIS_* config, and credential-shaped keys", () => {
+    const env = scrubAgentEnv({
+      PATH: "/usr/bin",
+      HOME: "/home/me",
+      LANG: "en_US.UTF-8",
+      TELEGRAM_BOT_TOKEN: "123:ABC",
+      TELEGRAM_BOT_USERNAME: "BroomvaGenesisBot",
+      GENESIS_TELEGRAM_ALLOWED_USERS: "547052379",
+      GENESIS_WORKSPACE: "/Users/broomva/broomva",
+      ANTHROPIC_API_KEY: "sk-ant-xxx",
+      AWS_SECRET_ACCESS_KEY: "shh",
+      GITHUB_TOKEN: "ghp_xxx",
+      DB_PASSWORD: "pw",
+    });
+    // kept (agent + tasks need these)
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/home/me");
+    expect(env.LANG).toBe("en_US.UTF-8");
+    // stripped
+    for (const k of [
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_BOT_USERNAME",
+      "GENESIS_TELEGRAM_ALLOWED_USERS",
+      "GENESIS_WORKSPACE",
+      "ANTHROPIC_API_KEY",
+      "AWS_SECRET_ACCESS_KEY",
+      "GITHUB_TOKEN",
+      "DB_PASSWORD",
+    ]) {
+      expect(k in env).toBe(false);
+    }
+  });
+
+  test("drops undefined values", () => {
+    const env = scrubAgentEnv({ A: "1", B: undefined });
+    expect(env).toEqual({ A: "1" });
   });
 });
 

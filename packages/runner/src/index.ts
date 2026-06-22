@@ -58,6 +58,38 @@ async function isGitRepo(host: ExecutionHost, cwd: string): Promise<boolean> {
   return r.code === 0 && r.stdout.trim() === "true";
 }
 
+/**
+ * Build the env the spawned agent inherits — the host env MINUS Genesis's own
+ * operational secrets (BRO-1527 #1). The agent runs untrusted prompts on the
+ * real workspace; without this it inherits `process.env` wholesale and a
+ * prompt-injected turn could exfiltrate the bot token, the owner allowlist, and
+ * internal config. We strip:
+ *   - the exact bot secret (`TELEGRAM_BOT_TOKEN`) + genesis-internal handles;
+ *   - everything under `GENESIS_` (allowlist, data dirs, engine flags — config
+ *     read by the host, never by the agent);
+ *   - credential-shaped keys (`*_TOKEN|_KEY|_SECRET|_PASSWORD|_PASSWD|
+ *     _CREDENTIAL[S]`, e.g. `ANTHROPIC_API_KEY`).
+ * PATH / HOME / locale survive, so `claude` (subscription auth via ~/.claude)
+ * and ordinary tasks still work. Per-task credential brokering (giving the agent
+ * a specific secret on purpose, eve-style egress injection) is BRO-1527 #2/#3.
+ */
+export function scrubAgentEnv(
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const DENY_EXACT = new Set(["TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME"]);
+  const DENY_PREFIX = ["GENESIS_"];
+  const DENY_PATTERN = /(_TOKEN|_KEY|_SECRET|_PASSWORD|_PASSWD|_CREDENTIAL)S?$/i;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined) continue;
+    if (DENY_EXACT.has(k)) continue;
+    if (DENY_PREFIX.some((p) => k.startsWith(p))) continue;
+    if (DENY_PATTERN.test(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 /** Build the agent argv. `--verbose` is required to stream NDJSON under `-p`. */
 function agentArgs(opts: RunOptions): string[] {
   const bin = opts.agentBin ?? "claude";
@@ -128,7 +160,14 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     runCwd = worktreePath; // run IN the worktree (was incorrectly opts.cwd in Phase 1)
   }
 
-  const handle = host.spawnStream(agentArgs(opts), { cwd: runCwd });
+  // Scrub Genesis's own secrets from the agent's env (BRO-1527 #1): the agent
+  // runs untrusted prompts, so it must not inherit the bot token / allowlist /
+  // internal config. replaceEnv = the agent gets EXACTLY this env, not a merge.
+  const handle = host.spawnStream(agentArgs(opts), {
+    cwd: runCwd,
+    env: scrubAgentEnv(),
+    replaceEnv: true,
+  });
   const events: AgentEvent[] = [];
   let state = initialState;
   let exitCode = -1;
