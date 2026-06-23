@@ -67,6 +67,20 @@
         "typescript": "^5.7.2",
       },
     },
+    "packages/evals": {
+      "name": "@genesis/evals",
+      "version": "0.1.0",
+      "dependencies": {
+        "@genesis/core": "workspace:*",
+        "@genesis/host": "workspace:*",
+        "@genesis/projection": "workspace:*",
+        "@genesis/runner": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.7.2",
+      },
+    },
     "packages/host": {
       "name": "@genesis/host",
       "version": "0.1.0",
@@ -142,6 +156,8 @@
     "@genesis/core": ["@genesis/core@workspace:packages/core"],
 
     "@genesis/db": ["@genesis/db@workspace:packages/db"],
+
+    "@genesis/evals": ["@genesis/evals@workspace:packages/evals"],
 
     "@genesis/host": ["@genesis/host@workspace:packages/host"],
 
