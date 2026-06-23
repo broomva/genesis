@@ -172,7 +172,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash ${start}
+ExecStart=/bin/bash "${start}"
 WorkingDirectory=${i.repoDir}
 Restart=on-failure
 RestartSec=10

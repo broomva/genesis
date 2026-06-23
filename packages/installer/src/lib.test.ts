@@ -111,7 +111,7 @@ describe("renderSystemdUnit", () => {
     const u = renderSystemdUnit(li, lp, "api");
     expect(u).toContain("Restart=on-failure");
     expect(u).toContain("WantedBy=default.target");
-    expect(u).toContain("ExecStart=/bin/bash /home/me/.config/genesis-bot/start-api.sh");
+    expect(u).toContain('ExecStart=/bin/bash "/home/me/.config/genesis-bot/start-api.sh"');
   });
   test("bot unit is ordered after the api", () => {
     const u = renderSystemdUnit(li, lp, "bot");

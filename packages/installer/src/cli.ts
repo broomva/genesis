@@ -8,7 +8,7 @@
 //   bun run genesis status|start|stop|logs|uninstall
 
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -100,46 +100,52 @@ async function registerService(os: OS, home: string, svc: Svc, unitBody: string)
     if (r.code !== 0) die(`systemctl enable failed for ${svc}`);
     // `enable --now` starts a stopped unit but does NOT restart a running one, so
     // a RE-install would keep the stale env. Force a restart to pick up new config.
-    await sh(["systemctl", "--user", "restart", serviceId("linux", svc)]);
+    const rr = await sh(["systemctl", "--user", "restart", serviceId("linux", svc)]);
+    if (rr.code !== 0) die(`systemctl restart failed for ${svc} (config may be stale)`);
   }
 }
 
+/** Returns false when a control action's service-manager call failed (so the CLI
+ *  can exit non-zero — important for scripts). status/logs are informational →
+ *  always true. */
 async function serviceAction(
   os: OS,
   svc: Svc,
   action: "start" | "stop" | "status" | "logs",
-): Promise<void> {
+): Promise<boolean> {
   const home = homedir();
   if (os === "macos") {
     const uid = process.getuid?.() ?? 0;
     const target = `gui/${uid}/${serviceId("macos", svc)}`;
-    if (action === "start") await sh(["launchctl", "kickstart", "-k", target]);
-    else if (action === "stop") await sh(["launchctl", "bootout", target]);
-    else if (action === "status") {
+    if (action === "start") return (await sh(["launchctl", "kickstart", "-k", target])).code === 0;
+    if (action === "stop") return (await sh(["launchctl", "bootout", target])).code === 0;
+    if (action === "status") {
       const r = await sh(["launchctl", "print", target], { quiet: true });
       const line = r.stdout.split("\n").find((l) => l.includes("state =")) ?? "(not loaded)";
       console.log(`  ${svc}: ${line.trim()}`);
-    } else {
-      const log = `${paths(os, home).logDir}/genesis-${svc}.log`;
-      const r = await sh(["tail", "-n", "40", log], { quiet: true });
-      console.log(`── ${svc} (${log}) ──\n${r.stdout}`);
+      return true;
     }
-  } else {
-    const unit = serviceId("linux", svc);
-    if (action === "logs") {
-      const r = await sh(["journalctl", "--user", "-u", unit, "-n", "40", "--no-pager"], {
-        quiet: true,
-      });
-      console.log(`── ${svc} (${unit}) ──\n${r.stdout}`);
-    } else {
-      const verb = action === "status" ? "status" : action;
-      const r = await sh(["systemctl", "--user", verb, unit], { quiet: true });
-      if (action === "status") {
-        const line = r.stdout.split("\n").find((l) => l.includes("Active:")) ?? "(unknown)";
-        console.log(`  ${svc}: ${line.trim()}`);
-      }
-    }
+    const log = `${paths(os, home).logDir}/genesis-${svc}.log`;
+    const r = await sh(["tail", "-n", "40", log], { quiet: true });
+    console.log(`── ${svc} (${log}) ──\n${r.stdout}`);
+    return true;
   }
+  const unit = serviceId("linux", svc);
+  if (action === "logs") {
+    const r = await sh(["journalctl", "--user", "-u", unit, "-n", "40", "--no-pager"], {
+      quiet: true,
+    });
+    console.log(`── ${svc} (${unit}) ──\n${r.stdout}`);
+    return true;
+  }
+  if (action === "status") {
+    const r = await sh(["systemctl", "--user", "status", unit], { quiet: true });
+    const line = r.stdout.split("\n").find((l) => l.includes("Active:")) ?? "(unknown)";
+    console.log(`  ${svc}: ${line.trim()}`);
+    return true;
+  }
+  // start | stop — propagate the systemctl exit code.
+  return (await sh(["systemctl", "--user", action, unit])).code === 0;
 }
 
 // ─────────────────────────── commands ───────────────────────────
@@ -223,7 +229,15 @@ async function cmdInstall(flags: Record<string, string>): Promise<void> {
   // 6. Register + start the service.
   if (os === "linux") {
     mkdirSync(`${home}/.config/systemd/user`, { recursive: true });
-    await sh(["loginctl", "enable-linger", process.env.USER ?? ""], { quiet: true });
+    // userInfo() is reliable; process.env.USER can be unset/mismatched. Linger is
+    // best-effort (it may need polkit auth) — warn loudly rather than abort.
+    const user = userInfo().username;
+    const lr = await sh(["loginctl", "enable-linger", user], { quiet: true });
+    if (lr.code !== 0) {
+      console.warn(
+        `  ⚠ couldn't enable linger for ${user} — the service won't survive logout. Run: sudo loginctl enable-linger ${user}`,
+      );
+    }
   }
   for (const svc of SVCS) {
     const unit =
@@ -239,8 +253,7 @@ async function cmdInstall(flags: Record<string, string>): Promise<void> {
     // The service is registered but not answering — exit non-zero so a scripted
     // install detects the failure (the service keeps retrying in the background).
     die(
-      `:${port}/health didn't answer in 15s. The service is registered but unhealthy — ` +
-        "run `genesis logs` (a busy port or a logged-out `claude` are the usual causes).",
+      `:${port}/health didn't answer in 15s. The service is registered but unhealthy — run \`genesis logs\` (a busy port or a logged-out \`claude\` are the usual causes).`,
     );
   }
   console.log(
@@ -264,20 +277,38 @@ async function waitForHealth(port: number, tries: number): Promise<boolean> {
 async function cmdUninstall(): Promise<void> {
   const os = detectOS();
   const home = homedir();
+  let removed = true;
   for (const svc of SVCS) {
+    // The bootout/disable exit code is intentionally tolerated: uninstall is
+    // idempotent, and an already-stopped/not-loaded service returns non-zero
+    // there without being a real failure. What MUST hold is that the unit file
+    // is gone — that's the failure we propagate.
     if (os === "macos") {
       const uid = process.getuid?.() ?? 0;
       await sh(["launchctl", "bootout", `gui/${uid}/${serviceId("macos", svc)}`], { quiet: true });
       const path = launchdPlistPath(home, svc);
-      if (existsSync(path)) rmSync(path);
+      if (existsSync(path)) {
+        try {
+          rmSync(path);
+        } catch {
+          removed = false;
+        }
+      }
     } else {
       await sh(["systemctl", "--user", "disable", "--now", serviceId("linux", svc)], {
         quiet: true,
       });
       const path = systemdUnitPath(home, svc);
-      if (existsSync(path)) rmSync(path);
+      if (existsSync(path)) {
+        try {
+          rmSync(path);
+        } catch {
+          removed = false;
+        }
+      }
     }
   }
+  if (!removed) die("could not remove a service unit file — check permissions.");
   console.log(
     "✓ service removed. Config + secrets kept under ~/.config/genesis-bot (rm to purge).",
   );
@@ -285,7 +316,13 @@ async function cmdUninstall(): Promise<void> {
 
 async function cmdEach(action: "start" | "stop" | "status" | "logs"): Promise<void> {
   const os = detectOS();
-  for (const svc of SVCS) await serviceAction(os, svc, action);
+  let ok = true;
+  for (const svc of SVCS) ok = (await serviceAction(os, svc, action)) && ok;
+  // start/stop are operations a script depends on — fail loudly. status/logs are
+  // informational and never fail the CLI.
+  if (!ok && (action === "start" || action === "stop")) {
+    die(`one or more services failed to ${action}.`);
+  }
 }
 
 function usage(): void {
