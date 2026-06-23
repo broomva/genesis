@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, Store } from "@genesis/core";
+import { reconcileInterruptedSessions } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import {
   type HostProvider,
@@ -129,6 +130,29 @@ try {
     `[genesis] failed to open the store (check DATABASE_URL): ${e instanceof Error ? e.message : String(e)}`,
   );
   process.exit(1);
+}
+
+// Boot reconciliation (BRO-1530): a turn interrupted by a process crash (deploy,
+// OOM, port relocation) leaves phase="running" in the durable store. Extend the
+// runner's F20 invariant across the crash boundary — reset orphaned turns to
+// blocked so /status is truthful. Resume continuity is unaffected (agentSessionId
+// is durable; the next turn resumes the conversation).
+try {
+  const { reconciled, threadIds } = await reconcileInterruptedSessions(store);
+  if (reconciled > 0) {
+    // Cap the logged list so a mass reset (e.g. DB-wide corruption) can't dump
+    // an unbounded thread list into the launchd log.
+    const shown = threadIds.slice(0, 20).join(", ");
+    const more = threadIds.length > 20 ? ` (+${threadIds.length - 20} more)` : "";
+    console.log(
+      `[genesis] reconciled ${reconciled} interrupted session(s) → blocked: ${shown}${more}`,
+    );
+  }
+} catch (e) {
+  // Non-fatal: reconciliation is hygiene, not a boot prerequisite.
+  console.error(
+    `[genesis] session reconciliation failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+  );
 }
 
 let hostProvider: HostProvider | undefined;

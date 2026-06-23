@@ -59,6 +59,23 @@ describe("DrizzleStore (pglite) — Store contract", () => {
     expect(list.map((t) => t.id)).toEqual([a.id, b.id]);
     await store.close();
   });
+
+  test("findSessionsByPhase filters by phase (BRO-1530)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    const isoTs = "2026-01-01T00:00:00Z";
+    const mk = (id: string, threadId: string, phase: "running" | "done" | "idle") =>
+      store.upsertSession({ id, workspaceId: "ws-1", threadId, phase, createdAt: isoTs });
+    await mk("r1", "t-r1", "running");
+    await mk("r2", "t-r2", "running");
+    await mk("d1", "t-d1", "done");
+    expect((await store.findSessionsByPhase(["running"])).map((s) => s.id).sort()).toEqual([
+      "r1",
+      "r2",
+    ]);
+    expect(await store.findSessionsByPhase([])).toHaveLength(0);
+    await store.close();
+  });
 });
 
 describe("DrizzleStore (pglite) — FS-as-truth continuity", () => {

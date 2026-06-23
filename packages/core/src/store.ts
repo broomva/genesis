@@ -8,6 +8,9 @@ export interface Store {
   upsertWorkspace(ws: Workspace): Promise<Workspace>;
   findSessionByThread(threadId: string): Promise<Session | undefined>;
   upsertSession(s: Session): Promise<Session>;
+  /** Sessions whose stored phase is any of `phases`. Used for boot-time
+   *  reconciliation of turns interrupted by a process crash (BRO-1530). */
+  findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
   addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
   turnsForSession(sessionId: string): Promise<Turn[]>;
 }
@@ -36,6 +39,10 @@ export class InMemoryStore implements Store {
   async upsertSession(s: Session) {
     this.sessions.set(s.id, { ...s });
     return s;
+  }
+  async findSessionsByPhase(phases: readonly Session["phase"][]) {
+    const want = new Set(phases);
+    return [...this.sessions.values()].filter((s) => want.has(s.phase)).map((s) => ({ ...s }));
   }
   async addTurn(t: Omit<Turn, "id" | "createdAt">) {
     const turn: Turn = { ...t, id: id("turn"), createdAt: now() };
