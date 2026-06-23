@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseAllowlist } from "./allowlist";
+import { parseAllowlist, startupGate } from "./allowlist";
 
 describe("parseAllowlist", () => {
   test("unset/empty → open (allow all, sandbox posture)", () => {
@@ -30,5 +30,34 @@ describe("parseAllowlist", () => {
     const a = parseAllowlist("  547052379 , 111 ");
     expect(a.allows("telegram:547052379")).toBe(true);
     expect(a.allows("telegram:111")).toBe(true);
+  });
+});
+
+describe("startupGate (fail-closed, BRO-1534)", () => {
+  test("empty allowlist + no opt-out → REFUSE to start", () => {
+    for (const raw of [undefined, "", "  "]) {
+      const d = startupGate(raw, false);
+      expect(d.action).toBe("refuse");
+      if (d.action === "refuse") expect(d.reason).toMatch(/RCE-by-DM/);
+    }
+  });
+
+  test("empty allowlist + GENESIS_ALLOW_OPEN=1 → serve OPEN", () => {
+    const d = startupGate("", true);
+    expect(d.action).toBe("serve");
+    if (d.action === "serve") {
+      expect(d.open).toBe(true);
+      expect(d.allowlist.allows("telegram:anyone")).toBe(true);
+    }
+  });
+
+  test("configured allowlist → serve ENFORCED (opt-out irrelevant)", () => {
+    const d = startupGate("547052379", false);
+    expect(d.action).toBe("serve");
+    if (d.action === "serve") {
+      expect(d.open).toBe(false);
+      expect(d.allowlist.allows("telegram:547052379")).toBe(true);
+      expect(d.allowlist.allows("telegram:999")).toBe(false);
+    }
   });
 });
