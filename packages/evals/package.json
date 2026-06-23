@@ -1,0 +1,25 @@
+{
+  "name": "@genesis/evals",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "eval": "bun run src/run.ts"
+  },
+  "dependencies": {
+    "@genesis/core": "workspace:*",
+    "@genesis/host": "workspace:*",
+    "@genesis/projection": "workspace:*",
+    "@genesis/runner": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.2"
+  }
+}
