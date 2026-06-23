@@ -3,7 +3,7 @@
 // and postgres-js (Railway Postgres in prod).
 
 import { type Session, type Store, type Turn, type Workspace, isoNow, newId } from "@genesis/core";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -51,6 +51,15 @@ export class DrizzleStore implements Store {
   async findSessionByThread(threadId: string): Promise<Session | undefined> {
     const r = await this.db.select().from(sessions).where(eq(sessions.threadId, threadId)).limit(1);
     return r[0] ? toSession(r[0]) : undefined;
+  }
+
+  async findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]> {
+    if (phases.length === 0) return [];
+    const r = await this.db
+      .select()
+      .from(sessions)
+      .where(inArray(sessions.phase, phases as string[]));
+    return r.map(toSession);
   }
 
   async upsertSession(s: Session): Promise<Session> {
