@@ -92,6 +92,17 @@
         "typescript": "^5.7.2",
       },
     },
+    "packages/installer": {
+      "name": "@genesis/installer",
+      "version": "0.1.0",
+      "bin": {
+        "genesis": "./src/cli.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.7.2",
+      },
+    },
     "packages/projection": {
       "name": "@genesis/projection",
       "version": "0.1.0",
@@ -160,6 +171,8 @@
     "@genesis/evals": ["@genesis/evals@workspace:packages/evals"],
 
     "@genesis/host": ["@genesis/host@workspace:packages/host"],
+
+    "@genesis/installer": ["@genesis/installer@workspace:packages/installer"],
 
     "@genesis/projection": ["@genesis/projection@workspace:packages/projection"],
 

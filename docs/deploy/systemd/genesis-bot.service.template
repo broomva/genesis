@@ -1,0 +1,18 @@
+[Unit]
+Description=Genesis Telegram bot
+After=network-online.target
+After=genesis-api.service
+Wants=network-online.target
+Wants=genesis-api.service
+
+[Service]
+Type=simple
+# __HOME__ and __REPO__ are filled in by `genesis install`; this template is for
+# reference / manual installs.
+ExecStart=/bin/bash __HOME__/.config/genesis-bot/start-bot.sh
+WorkingDirectory=__REPO__
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

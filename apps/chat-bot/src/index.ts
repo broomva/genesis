@@ -15,7 +15,7 @@
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { Chat, type Logger, type StateAdapter } from "chat";
-import { parseAllowlist } from "./allowlist";
+import { startupGate } from "./allowlist";
 import { botStateFile, createFileState } from "./file-state";
 import { handleAgentMessage, nativeCommandMenu } from "./handler";
 
@@ -48,13 +48,22 @@ const state: StateAdapter = stateDir
 if (stateDir) console.log(`[genesis-bot] durable subscription state: ${botStateFile(stateDir)}`);
 const chat = new Chat({ userName, adapters: { telegram }, state, logger });
 
-// Owner allowlist (BRO-1512): when set, only these threads are served. Required
-// when the agent's workspace is a real dir (auto-allow agent = RCE-by-DM
-// otherwise). Unset → allow-all (sandbox posture).
-const allowlist = parseAllowlist(process.env.GENESIS_TELEGRAM_ALLOWED_USERS);
+// Owner allowlist (BRO-1512/1534): only configured threads are served. FAIL-
+// CLOSED — refuse to start an OPEN bot (no allowlist) unless GENESIS_ALLOW_OPEN=1
+// explicitly acknowledges a throwaway-sandbox posture (auto-allow agent on an
+// open bot = RCE-by-DM otherwise).
+const gateDecision = startupGate(
+  process.env.GENESIS_TELEGRAM_ALLOWED_USERS,
+  process.env.GENESIS_ALLOW_OPEN === "1",
+);
+if (gateDecision.action === "refuse") {
+  console.error(`[genesis-bot] ${gateDecision.reason}`);
+  process.exit(1);
+}
+const allowlist = gateDecision.allowlist;
 console.log(
-  allowlist.open
-    ? "[genesis-bot] allowlist OPEN — serving all threads (sandbox posture)"
+  gateDecision.open
+    ? "[genesis-bot] allowlist OPEN — serving ALL threads (GENESIS_ALLOW_OPEN=1, sandbox posture)"
     : "[genesis-bot] allowlist ENFORCED — only configured threads are served",
 );
 

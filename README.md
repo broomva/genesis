@@ -47,6 +47,43 @@ PORT=8787 GENESIS_WORKSPACE=/path/to/a/git/repo bun apps/api/src/index.ts
 GENESIS_WORKSPACE=/path/to/repo bun apps/api/src/cli.ts "do the thing"
 ```
 
+## Install the local bot (macOS / Linux)
+
+Run Genesis as an always-on **Telegram bot on your own machine** — the agent runs
+`claude` locally via your subscription (no per-run cost), gated to your own
+Telegram chat id. One command sets it up and registers a service (launchd on
+macOS, systemd `--user` on Linux):
+
+```bash
+git clone https://github.com/broomva/genesis && cd genesis
+bun install
+bun run genesis install        # prompts for bot token, your chat id, workspace
+```
+
+Prereqs on the target machine: **bun**, the **`claude` CLI logged in** (run
+`claude` once — subscription auth), and a Telegram **bot token** (from
+[@BotFather](https://t.me/BotFather)) + your numeric **chat id** (from
+[@userinfobot](https://t.me/userinfobot)). Non-interactive:
+
+```bash
+bun run genesis install --token <BOT_TOKEN> --owner <CHAT_ID> \
+  --workspace "$HOME/projects" --port 8787
+```
+
+Manage it:
+
+```bash
+bun run genesis status      # service state
+bun run genesis logs        # recent logs
+bun run genesis stop|start  # control both services
+bun run genesis uninstall   # remove the service (keeps your config)
+```
+
+> **Security.** The owner allowlist (`--owner`) is **required** — the agent has
+> tool access to `GENESIS_WORKSPACE`, so an un-gated bot is remote code execution
+> by DM. The token is written to `~/.config/genesis-bot/secrets.env` (0600),
+> never into the service unit. Details: `docs/deploy/{launchd,systemd}/README.md`.
+
 ## Chat SDK channel
 
 `POST /api/chat` speaks the **Vercel AI SDK UI message stream** protocol, so any

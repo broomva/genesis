@@ -1,0 +1,16 @@
+[Unit]
+Description=Genesis api (Hono/Bun)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# __HOME__ and __REPO__ are filled in by `genesis install`; this template is for
+# reference / manual installs. The start script sources env.sh (PATH, token, etc).
+ExecStart=/bin/bash __HOME__/.config/genesis-bot/start-api.sh
+WorkingDirectory=__REPO__
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

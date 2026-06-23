@@ -19,7 +19,7 @@ can no longer `posix_spawn` tmux).
 - **PATH**: launchd's PATH is minimal (`/usr/bin:/bin:…`). The agent must find
   `tmux` (homebrew), `bun`, and `claude`, or every turn fails with
   `ENOENT … posix_spawn 'tmux'`. `env.sh` prepends the real tool dirs.
-- **Token**: kept in `~/.claude/channels/telegram/.env` (0600), sourced with
+- **Token**: kept in `~/.config/genesis-bot/secrets.env` (0600), sourced with
   `set -a` so the bare `VAR=value` is exported to `exec bun`. Never put the
   token in the plist (world-readable in `~/Library/LaunchAgents`).
 - **Durable dirs**: data/state live under `~/.config/genesis-bot/` (not `/tmp`,
