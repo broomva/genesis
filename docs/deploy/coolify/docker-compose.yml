@@ -1,0 +1,70 @@
+# Genesis self-host — private server / Coolify (BRO-1535).
+# Local PRINT engine = subscription (FREE) on hardware YOU own. Auth is by token
+# (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`) — no credential file to
+# mount, nothing secret in git/the image.
+#
+# SECURITY: the api is INTERNAL ONLY (unauthenticated-by-default + runs the agent
+# with --dangerously-skip-permissions). It is NEVER published — only the bot
+# reaches it over the compose network, gated by GENESIS_TOKEN. Only the bot
+# egresses (outbound Telegram long-poll); it is owner-allowlisted + fail-closed.
+# ⚠ In Coolify, do NOT attach a domain to the `api` service — that would expose
+# an unauthenticated RCE agent to the internet.
+#
+# ⚠ BUILD-VERIFY REQUIRED — see README.md "Build-verify checklist" (not built in CI).
+
+services:
+  api:
+    build:
+      context: ../../..
+      dockerfile: docs/deploy/coolify/Dockerfile
+      args:
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-stable}
+    image: genesis-selfhost:local
+    restart: unless-stopped
+    environment:
+      GENESIS_HOST: local
+      GENESIS_WORKSPACE: /workspace
+      # Subscription auth (1-year token from `claude setup-token`). Required.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and set it in .env}
+      # Shared bearer bot↔api (gates /message + /threads even if the net is misconfigured).
+      GENESIS_TOKEN: ${GENESIS_TOKEN:?set GENESIS_TOKEN in .env (e.g. openssl rand -hex 32)}
+    volumes:
+      - genesis-data:/data
+      # The repo(s) the agent operates on. REQUIRED — no silent empty default (an
+      # empty /workspace boots healthy but the agent has nothing to work on).
+      - ${GENESIS_WORKSPACE_HOST:?set GENESIS_WORKSPACE_HOST to the path of your repos}:/workspace
+    # NO `ports:` — internal only. `expose` keeps 8787 on the compose network.
+    expose:
+      - "8787"
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://localhost:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  bot:
+    image: genesis-selfhost:local        # reuses the api image (built above)
+    restart: unless-stopped
+    command: ["bun", "apps/chat-bot/src/index.ts"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      GENESIS_URL: http://api:8787
+      GENESIS_TOKEN: ${GENESIS_TOKEN:?set GENESIS_TOKEN in .env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env (from @BotFather)}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      # REQUIRED — fail-closed. Without it the bot refuses to start (no open bot).
+      GENESIS_TELEGRAM_ALLOWED_USERS: ${GENESIS_TELEGRAM_ALLOWED_USERS:?set your numeric Telegram chat id}
+      GENESIS_BOT_STATE_DIR: /data/state
+    volumes:
+      - genesis-bot-data:/data
+
+volumes:
+  genesis-data:
+  genesis-bot-data:
