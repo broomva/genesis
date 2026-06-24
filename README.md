@@ -101,10 +101,28 @@ curl -N -X POST localhost:8787/api/chat -H 'content-type: application/json' \
 raw `ANTHROPIC_API_KEY`). Auth: `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`
 (`vercel env pull`). See `.env.example`. Default host is local (`claude` CLI).
 
-## Deploy (Railway)
+## Self-host on your own server (free, subscription)
+
+Run Genesis on **hardware you own** with the agent executing locally via your
+Claude subscription (no per-run cost) — the "claude CLI on your own computer"
+carve-out. Two ways:
+
+- **Plain Linux server (no Docker):** the installer above — `claude login` on the
+  box, then `bun run genesis install` (systemd). Simplest.
+- **Coolify / docker-compose:** `docs/deploy/coolify/` — a Dockerfile that bakes
+  the `claude` CLI (not credentials), a two-service compose (api internal-only +
+  outbound bot), and a persistent `~/.claude` volume you populate with one
+  `claude login` inside the container. See `docs/deploy/coolify/README.md`.
+
+Subscription auth is ToS-clean **only on owned hardware** — on rented/shared PaaS
+use the keyed model below.
+
+## Deploy (Railway — keyed)
 
 The engine is a long-running Bun/Hono server → deploys to Railway (always-on),
-not Vercel-as-a-site. `Dockerfile` + `railway.json` are included.
+not Vercel-as-a-site. Railway is not *your* hardware, so the agent runs in keyed
+Vercel-Sandbox microVMs (`GENESIS_HOST=vercel` + `AI_GATEWAY_API_KEY`), not the
+subscription. `Dockerfile` + `railway.json` are included.
 
 ```bash
 railway init -n genesis -w "<workspace>"
