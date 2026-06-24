@@ -96,12 +96,11 @@ the auth/security design is verified against the Claude Code docs, but confirm t
 operational bits on your host before relying on it:
 
 1. **Image builds:** `docker compose build` — confirms the native `claude`
-   installer runs in the `oven/bun` (Debian/glibc) image.
-2. **Agent runs as root + skip-permissions:** send a DM and confirm a turn
-   completes. Some Claude Code versions refuse `--dangerously-skip-permissions`
-   when running as **uid 0**. If a turn errors on that, either run the container
-   as a non-root user or set the version's documented bypass — check
-   `docker compose logs api` for the exact message.
+   installer runs as the non-root `bun` user in the `oven/bun` (Debian/glibc) image.
+2. **Workspace bind is writable by uid 1000:** the container runs as the non-root
+   `bun` user (uid 1000). Your `GENESIS_WORKSPACE_HOST` must be owned/writable by
+   uid 1000, or the agent gets permission errors on `/workspace`
+   (`sudo chown -R 1000:1000 <path>`, or deploy from a uid-1000 account).
 3. **Token auth works:** `docker compose exec api sh -lc 'claude -p "say hi"'`
    should answer using `CLAUDE_CODE_OAUTH_TOKEN` (no login prompt).
 4. **Workspace is a git repo:** the agent's first real task expects `/workspace`

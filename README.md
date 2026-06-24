@@ -110,9 +110,10 @@ carve-out. Two ways:
 - **Plain Linux server (no Docker):** the installer above — `claude login` on the
   box, then `bun run genesis install` (systemd). Simplest.
 - **Coolify / docker-compose:** `docs/deploy/coolify/` — a Dockerfile that bakes
-  the `claude` CLI (not credentials), a two-service compose (api internal-only +
-  outbound bot), and a persistent `~/.claude` volume you populate with one
-  `claude login` inside the container. See `docs/deploy/coolify/README.md`.
+  the `claude` CLI (not credentials, non-root), a two-service compose (api
+  internal-only + outbound bot), authenticated by a `CLAUDE_CODE_OAUTH_TOKEN`
+  (from `claude setup-token`) set as a runtime secret — no credential file
+  mounted. See `docs/deploy/coolify/README.md`.
 
 Subscription auth is ToS-clean **only on owned hardware** — on rented/shared PaaS
 use the keyed model below.
