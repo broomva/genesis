@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   // tracing includes hoisted deps and Turbopack does not mis-infer the root.
   outputFileTracingRoot: workspaceRoot,
   turbopack: { root: workspaceRoot },
+  // Keep the auth stack OUT of the server bundle so it loads as a real Node
+  // module at runtime. @electric-sql/pglite ships a WASM binary that the bundler
+  // must not inline; better-auth + the drizzle adapter resolve their own deps at
+  // runtime. Listing them here makes Next `require()` them from node_modules in
+  // the standalone output (their files are traced in), avoiding bundling the WASM.
+  serverExternalPackages: ["@electric-sql/pglite", "better-auth", "@better-auth/passkey"],
 };
 
 export default nextConfig;

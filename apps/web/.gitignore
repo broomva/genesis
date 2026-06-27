@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# auth pglite store (AUTH_DB_PATH default) — never commit the local auth DB
+/.data/
+
 # next.js
 /.next/
 /out/
