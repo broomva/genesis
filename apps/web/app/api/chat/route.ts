@@ -35,6 +35,9 @@ export async function POST(req: Request): Promise<Response> {
         ...(GENESIS_TOKEN ? { authorization: `Bearer ${GENESIS_TOKEN}` } : {}),
       },
       body,
+      // Abort the Genesis run if the browser disconnects — releases the engine
+      // instead of letting an abandoned run continue with no listener.
+      signal: req.signal,
       // Required by undici/Node to stream a request+response pair.
       // @ts-expect-error — `duplex` is valid at runtime; not yet in lib.dom types.
       duplex: "half",
