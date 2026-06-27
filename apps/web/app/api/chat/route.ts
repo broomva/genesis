@@ -40,11 +40,11 @@ export async function POST(req: Request): Promise<Response> {
       duplex: "half",
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "upstream fetch failed";
-    return Response.json(
-      { error: `genesis unreachable at ${GENESIS_URL}: ${message}` },
-      { status: 502 },
-    );
+    // Log the internal detail (host:port, cause) server-side only; the browser
+    // gets a generic message so the upstream address never leaks to the client.
+    const detail = err instanceof Error ? err.message : "upstream fetch failed";
+    console.error(`[bff] genesis unreachable at ${GENESIS_URL}: ${detail}`);
+    return Response.json({ error: "agent engine unreachable" }, { status: 502 });
   }
 
   // Copy only the headers that matter for the stream; drop hop-by-hop ones.

@@ -144,3 +144,34 @@
     @apply font-sans;
   }
 }
+
+/* Live-status text shimmer (used by the streaming status pill). Clips a moving
+   light sheen over the element's currentColor, so it inherits whatever text
+   color the pill sets (e.g. AI Blue). Honors prefers-reduced-motion. */
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.shimmer {
+  background-image: linear-gradient(
+    90deg,
+    currentColor 0%,
+    color-mix(in oklab, currentColor, white 60%) 50%,
+    currentColor 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}

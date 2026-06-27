@@ -18,11 +18,13 @@ export default function manifest(): MetadataRoute.Manifest {
         type: "image/svg+xml",
         purpose: "any",
       },
+      // Two raster purposes: a plain "any" icon (platforms that ignore the SVG
+      // and would over-crop a maskable) + a "maskable" adaptive icon (Android).
       {
         src: "/icon-192.png",
         sizes: "192x192",
         type: "image/png",
-        purpose: "maskable",
+        purpose: "any",
       },
       {
         src: "/icon-512.png",
