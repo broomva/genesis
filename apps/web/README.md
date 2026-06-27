@@ -63,8 +63,9 @@ Set these (see `.env.example`):
 
 - `BETTER_AUTH_SECRET` — random 32+ char signing secret (`openssl rand -base64 32`). Required.
 - `BETTER_AUTH_URL` — exact public origin (drives the passkey rpID + baseURL), e.g. `https://srv1692698-agent.tailf3e897.ts.net`.
-- `AUTH_BOOTSTRAP_TOKEN` — one-time owner-creation token. **Keep secret.** If unset, bootstrap is disabled (fail closed).
+- `AUTH_BOOTSTRAP_TOKEN` — one-time owner-creation token. **MUST be high-entropy** (`openssl rand -base64 32`): this custom route is not behind Better Auth's rate limiter, so a weak token is brute-forceable in the pre-owner window. **Keep secret.** If unset, bootstrap is disabled (fail closed). The window closes the instant the owner is created (later requests 409).
 - `AUTH_DB_PATH` — auth pglite dir (default `./.data/auth`, separate from the engine store).
+- `AUTH_OWNER_EMAIL` — optional; pins the owner email (cosmetic, single-user). Default `owner@genesis.local`.
 
 ### Closed signup + the bootstrap crux
 

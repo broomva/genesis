@@ -79,17 +79,29 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: "owner already exists" }, { status: 409 });
   }
 
-  const email =
-    typeof body.email === "string" && body.email.trim() ? body.email.trim() : "owner@genesis.local";
+  // Owner email is PINNED server-side (not taken from the request) so the
+  // user.email UNIQUE constraint is a real TOCTOU guard: concurrent bootstraps
+  // necessarily collide on the same email, and the loser gets 409 (see below).
+  // Single-user system — the address is cosmetic; AUTH_OWNER_EMAIL overrides.
+  const email = process.env.AUTH_OWNER_EMAIL?.trim() || "owner@genesis.local";
   const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Owner";
 
   // Create the single owner user. emailVerified is set true: there is no email
   // flow in this single-user system.
-  const user = await ctx.internalAdapter.createUser({
-    email,
-    name,
-    emailVerified: true,
-  });
+  let user: Awaited<ReturnType<typeof ctx.internalAdapter.createUser>>;
+  try {
+    user = await ctx.internalAdapter.createUser({
+      email,
+      name,
+      emailVerified: true,
+    });
+  } catch {
+    // The user.email UNIQUE constraint closes the countTotalUsers→createUser
+    // TOCTOU: two concurrent token-holding bootstraps both read count 0, but the
+    // second insert collides on the (now-pinned, identical) owner email and
+    // throws here → 409 instead of a second owner row.
+    return Response.json({ error: "owner already exists" }, { status: 409 });
+  }
 
   // Mint a session so the just-created owner is immediately authenticated and
   // can enroll a passkey without any further credential. Signature (verified
