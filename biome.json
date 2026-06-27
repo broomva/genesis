@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignore": ["**/*.d.ts", "**/fixtures/**", "dist/**", "node_modules/**"]
+    "ignore": ["**/*.d.ts", "**/fixtures/**", "dist/**", "node_modules/**", "**/.next/**"]
   },
   "formatter": {
     "enabled": true,
