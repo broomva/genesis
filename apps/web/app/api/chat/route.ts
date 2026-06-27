@@ -6,10 +6,13 @@
 // protocol (SSE: `x-vercel-ai-ui-message-stream: v1`), so the one thing that
 // must be correct is the passthrough: never await/buffer `upstream.body`.
 //
-// Auth is out of scope for this slice (a later PR adds Better Auth + passkey).
-// The seam: a bearer token is injected here from server-only env (GENESIS_TOKEN)
-// — the browser never sees the upstream credential. When Better Auth lands, the
-// per-user token is resolved from the session and swapped in at this exact line.
+// Auth gate: this route is the REAL enforcement point (middleware does only an
+// optimistic cookie check). The first thing POST does is verify a valid Better
+// Auth session via `auth.api.getSession`; with no session it returns 401 and
+// never touches the upstream engine. The upstream credential remains a
+// server-only bearer token (GENESIS_TOKEN) the browser never sees.
+
+import { auth } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +25,12 @@ const GENESIS_TOKEN = process.env.GENESIS_TOKEN;
 const STREAM_HEADER_PREFIXES = ["content-type", "cache-control", "x-vercel-ai-"];
 
 export async function POST(req: Request): Promise<Response> {
+  // AUTH GATE — must be first. No session ⇒ 401, no upstream call.
+  const session = await auth.api.getSession({ headers: req.headers });
+  if (!session) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   // Read the raw body once; forward it byte-identical (it already IS the AI SDK
   // request shape genesis `parseChatRequest` expects: { id, messages: [...] }).
   const body = await req.text();
