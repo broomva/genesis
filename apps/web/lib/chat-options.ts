@@ -23,12 +23,18 @@ export const MODEL_OPTIONS: readonly SelectOption[] = [
 ];
 export const DEFAULT_MODEL = "default";
 
-/** Effort picker → claude `--effort`. `standard` = omit the flag. Thinking only
- *  meaningfully engages at xhigh/max under subscription auth (BRO-1573 research),
- *  so the two non-default steps map there. */
+/** Effort picker → claude's native `--effort` enum (low|medium|high|xhigh|max).
+ *  `standard` = omit the flag (engine default). All five native levels are
+ *  exposed (BRO-1574); thinking only meaningfully engages at xhigh/max under
+ *  subscription auth, but the lower levels are valid and passed through verbatim.
+ *  NOTE: "ultracode" is NOT a claude `--effort` value (it's a Claude Code session
+ *  mode) — claude rejects it and falls back to default, so it is not offered. */
 export const EFFORT_OPTIONS: readonly SelectOption[] = [
   { value: "standard", label: "Standard" },
-  { value: "xhigh", label: "Extended" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" },
   { value: "max", label: "Max" },
 ];
 export const DEFAULT_EFFORT = "standard";

@@ -73,6 +73,11 @@ export function parseChatRequest(body: unknown): IncomingMessage {
 
 export type UiStreamPart =
   | { type: "start"; messageId: string }
+  // Reasoning parts (BRO-1574) — the AI-SDK v6 wire names; useChat aggregates
+  // start/delta(s)/end into a single reasoning UIMessagePart the client renders.
+  | { type: "reasoning-start"; id: string }
+  | { type: "reasoning-delta"; id: string; delta: string }
+  | { type: "reasoning-end"; id: string }
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
@@ -97,6 +102,8 @@ export interface StreamIds {
   messageId: string;
   /** A fresh text-part id per distinct text block (multi-turn → multiple parts). */
   newTextId: () => string;
+  /** A fresh id for the one-shot reasoning part (BRO-1574). */
+  newReasoningId: () => string;
 }
 
 /** Fold the canonical OutgoingEvent stream into ordered UI-stream parts.
@@ -120,6 +127,22 @@ export async function* toUiStreamParts(
   let currentId: string | null = null;
   let emitted = "";
   let errored: string | undefined;
+  // Reasoning is a ONE-SHOT indicator (BRO-1574): the latest note is captured from
+  // phase events (which carry it while thinking, before any answer text) and
+  // flushed once — as reasoning-start/delta/end — immediately before the first
+  // text part, so thinking renders above the answer. Prose is redacted upstream,
+  // so the note is a token-based summary, not verbatim chain-of-thought.
+  let pendingReasoning = "";
+  let reasoningFlushed = false;
+
+  function* flushReasoning(): Generator<UiStreamPart> {
+    if (reasoningFlushed || pendingReasoning.length === 0) return;
+    const rid = ids.newReasoningId();
+    yield { type: "reasoning-start", id: rid };
+    yield { type: "reasoning-delta", id: rid, delta: pendingReasoning };
+    yield { type: "reasoning-end", id: rid };
+    reasoningFlushed = true;
+  }
 
   try {
     for await (const ev of events) {
@@ -127,8 +150,17 @@ export async function* toUiStreamParts(
         errored = ev.message;
         break;
       }
+      // Capture the indicator note even on text-less thinking ticks (ev is
+      // phase|reply here — the error case already broke above).
+      if (ev.reasoning && ev.reasoning.length > 0) {
+        pendingReasoning = ev.reasoning;
+      }
       const text = ev.text;
       if (typeof text !== "string" || text.length === 0) continue;
+
+      // Thinking precedes the answer → flush the reasoning part before the first
+      // text part opens.
+      if (currentId === null) yield* flushReasoning();
 
       // A non-prefix block can't extend the open part → close it, start fresh.
       if (currentId !== null && !text.startsWith(emitted)) {
@@ -150,6 +182,8 @@ export async function* toUiStreamParts(
     errored = e instanceof Error ? e.message : String(e);
   }
 
+  // Thinking with no answer text (rare) still surfaces the indicator.
+  if (!reasoningFlushed) yield* flushReasoning();
   if (currentId !== null) yield { type: "text-end", id: currentId };
   if (errored !== undefined) yield { type: "error", errorText: errored };
   yield { type: "finish" };

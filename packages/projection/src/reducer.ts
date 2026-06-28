@@ -16,6 +16,7 @@ import {
   streamBlockStart,
   streamTextDelta,
   streamThinkingDelta,
+  streamThinkingTokens,
   textBlocks,
   toolUses,
 } from "./parser";
@@ -28,8 +29,14 @@ export interface RunState {
   lastText?: string;
   /** Accumulated extended-thinking text from partial `thinking_delta` events
    *  (BRO-1571). Surfaced separately from `lastText` so the UI can render it in a
-   *  collapsible Reasoning panel rather than inline with the answer. */
+   *  collapsible Reasoning panel rather than inline with the answer. NOTE: under
+   *  subscription/OAuth auth this is always "" (the prose is redacted) — use
+   *  `thinkingTokens` as the is-thinking signal instead (BRO-1574). */
   reasoning?: string;
+  /** Max thinking-token estimate seen this turn (BRO-1574). >0 ⇒ the model did
+   *  extended thinking, even when the prose is redacted. The basis for the
+   *  client's "Thought · ~N tokens" indicator. */
+  thinkingTokens?: number;
   turns: number;
   pendingQuestion?: string;
   error?: string;
@@ -108,7 +115,15 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       }
       const thinkingDelta = streamThinkingDelta(ev);
       if (thinkingDelta !== undefined) {
-        return { ...state, sessionId, reasoning: (state.reasoning ?? "") + thinkingDelta };
+        // Track the max token estimate as the is-thinking signal (the prose is
+        // usually "" under subscription auth — BRO-1574).
+        const tokens = streamThinkingTokens(ev) ?? 0;
+        return {
+          ...state,
+          sessionId,
+          reasoning: (state.reasoning ?? "") + thinkingDelta,
+          thinkingTokens: Math.max(state.thinkingTokens ?? 0, tokens),
+        };
       }
       // message_start / content_block_stop / message_delta / message_stop — keep
       // the run alive, capture any session id, no text change.
