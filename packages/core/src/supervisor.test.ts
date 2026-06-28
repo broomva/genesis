@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RunResult } from "@genesis/runner";
+import { InMemoryStore } from "./store";
 import { Supervisor } from "./supervisor";
 
 const ws = { id: "ws-1", name: "test", rootPath: "/tmp/genesis-test" };
@@ -54,6 +55,46 @@ describe("supervisor", () => {
     expect(seenResume).toBeUndefined(); // first turn: no resume
     await sup.dispatch("t2", "second");
     expect(seenResume).toBe("sid-persist"); // second turn resumes the captured session
+  });
+
+  test("listThreads returns threads newest-first with last-turn preview (BRO-1567)", async () => {
+    const store = new InMemoryStore();
+    await store.upsertWorkspace(ws);
+    // Seed three sessions with explicit (out-of-order) createdAt so the sort is
+    // deterministic regardless of insertion order.
+    await store.upsertSession({
+      id: "s-old",
+      workspaceId: "ws-1",
+      threadId: "t-old",
+      phase: "done",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.addTurn({ sessionId: "s-old", role: "user", text: "hi old" });
+    await store.addTurn({ sessionId: "s-old", role: "agent", text: "reply old" });
+    await store.upsertSession({
+      id: "s-new",
+      workspaceId: "ws-1",
+      threadId: "t-new",
+      phase: "running",
+      createdAt: "2026-02-01T00:00:00.000Z",
+    });
+    await store.addTurn({ sessionId: "s-new", role: "user", text: "hi new" });
+    // A resolved-but-never-run thread has no turns → undefined preview.
+    await store.upsertSession({
+      id: "s-empty",
+      workspaceId: "ws-1",
+      threadId: "t-empty",
+      phase: "idle",
+      createdAt: "2026-01-15T00:00:00.000Z",
+    });
+
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: fakeRunner("x") });
+    const threads = await sup.listThreads();
+    expect(threads.map((t) => t.threadId)).toEqual(["t-new", "t-empty", "t-old"]); // newest-first
+    expect(threads.find((t) => t.threadId === "t-old")?.lastText).toBe("reply old");
+    expect(threads.find((t) => t.threadId === "t-new")?.lastText).toBe("hi new");
+    expect(threads.find((t) => t.threadId === "t-empty")?.lastText).toBeUndefined();
+    expect(threads.find((t) => t.threadId === "t-new")?.phase).toBe("running");
   });
 
   test("reset works for the PRINT engine (no control) — clears agentSessionId (BRO-1524)", async () => {

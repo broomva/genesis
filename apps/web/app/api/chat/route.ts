@@ -19,39 +19,29 @@
 // With NEITHER ⇒ 401, no upstream call. AGENT_TOKEN unset ⇒ the agent path is
 // hard-disabled (fail closed), so it can never weaken the gate when absent.
 
-import { auth } from "@/lib/auth";
-import { timingSafeEqual } from "@/lib/timing-safe-equal";
+import { authorizePrincipal } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const GENESIS_URL = process.env.GENESIS_URL ?? "http://127.0.0.1:8787";
 const GENESIS_TOKEN = process.env.GENESIS_TOKEN;
-// Machine-principal token. Unset ⇒ no agent path (fail closed).
-const AGENT_TOKEN = process.env.AGENT_TOKEN;
 
 // Headers worth mirroring from the upstream streaming response so the AI SDK
 // client parses the stream correctly (content-type + the AI-SDK stream marker).
 const STREAM_HEADER_PREFIXES = ["content-type", "cache-control", "x-vercel-ai-"];
 
-// True iff a valid machine token is presented. Fail-closed: no env ⇒ false even
-// for an empty header, so the agent path simply does not exist unless configured.
-function agentAuthorized(req: Request): boolean {
-  if (!AGENT_TOKEN) return false;
-  const provided = req.headers.get("x-agent-token") ?? "";
-  return provided.length > 0 && timingSafeEqual(provided, AGENT_TOKEN);
-}
-
 export async function POST(req: Request): Promise<Response> {
   // AUTH GATE — must be first. Human session OR machine token; else 401, no
-  // upstream call. The session check stays primary and unchanged.
-  const session = await auth.api.getSession({ headers: req.headers });
-  const asAgent = !session && agentAuthorized(req);
-  if (!session && !asAgent) {
+  // upstream call (shared with /api/threads* via lib/api-auth).
+  const principal = await authorizePrincipal(req);
+  if (!principal.ok) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   // Attribute the principal server-side (never impersonates the owner user).
-  if (asAgent) console.info("[bff] /api/chat authorized as machine principal (agent)");
+  if (principal.asAgent) {
+    console.info("[bff] /api/chat authorized as machine principal (agent)");
+  }
 
   // Read the raw body once; forward it byte-identical (it already IS the AI SDK
   // request shape genesis `parseChatRequest` expects: { id, messages: [...] }).
