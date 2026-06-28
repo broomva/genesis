@@ -47,3 +47,18 @@ export async function fetchThreadMessages(
       }) as UIMessage,
   );
 }
+
+/** Reset a thread's agent session (BRO-1576) via the /api/control BFF proxy — the
+ *  next turn starts with fresh context (same thread). Returns true on success. */
+export async function resetThread(threadId: string): Promise<boolean> {
+  try {
+    const res = await fetch("/api/control", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ threadId, action: "reset" }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

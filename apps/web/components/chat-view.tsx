@@ -1,14 +1,18 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type UIMessage } from "ai";
-import { PanelLeft } from "lucide-react";
-import { useMemo } from "react";
+import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
+import { PanelLeft, Paperclip } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 
 import {
   PromptInput,
+  PromptInputActionAddAttachments,
+  PromptInputActionMenu,
+  PromptInputActionMenuContent,
+  PromptInputActionMenuTrigger,
   PromptInputBody,
   PromptInputFooter,
   type PromptInputMessage,
@@ -35,7 +39,36 @@ import {
 } from "@/components/ui/message-scroller";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { EFFORT_OPTIONS, MODEL_OPTIONS, effortToBody, modelToBody } from "@/lib/chat-options";
+import { parseSlash, slashHelpText } from "@/lib/slash";
+import { resetThread } from "@/lib/threads";
 import { cn } from "@/lib/utils";
+
+// Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
+// inline images, so only text-ish files are inlined as fenced blocks; anything
+// else is noted (not silently dropped). FileUIPart.url is a data: URL, so
+// fetch().text() decodes it client-side.
+const TEXT_FILE_RE =
+  /\.(md|markdown|txt|text|json|jsonl|ya?ml|toml|ini|env|csv|tsv|tsx?|jsx?|mjs|cjs|py|rs|go|rb|java|c|h|cpp|cs|php|sh|bash|zsh|sql|css|scss|html?|xml|svg|log|diff|patch)$/i;
+
+async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> {
+  if (files.length === 0) return "";
+  const blocks = await Promise.all(
+    files.map(async (f) => {
+      const name = f.filename ?? "attachment";
+      const isText = (f.mediaType ?? "").startsWith("text/") || TEXT_FILE_RE.test(name);
+      if (!isText) {
+        return `\n\n[attachment "${name}" (${f.mediaType || "binary"}) omitted — only text/code files are inlined on this deployment]`;
+      }
+      try {
+        const content = await (await fetch(f.url)).text();
+        return `\n\nAttached file \`${name}\`:\n\`\`\`\n${content}\n\`\`\``;
+      } catch {
+        return `\n\n[attachment "${name}" could not be read]`;
+      }
+    }),
+  );
+  return blocks.join("");
+}
 
 // Pull the rendered text out of a UIMessage's parts[] (AI SDK v6 shape).
 function messageText(message: UIMessage): string {
@@ -88,6 +121,7 @@ export function ChatView({
   initialMessages,
   onActivity,
   onMenuClick,
+  onNewThread,
   model,
   effort,
   onModelChange,
@@ -97,6 +131,8 @@ export function ChatView({
   initialMessages: UIMessage[];
   onActivity: () => void;
   onMenuClick: () => void;
+  /** Start a brand-new thread (the `/new` slash command). */
+  onNewThread: () => void;
   /** Selected model + effort (owned by the parent so they survive ChatView's
    *  per-thread remount); passed per-turn on the send body. */
   model: string;
@@ -111,19 +147,44 @@ export function ChatView({
     transport,
     onFinish: onActivity,
   });
+  // Ephemeral composer feedback (slash-command result / errors), shown above the input.
+  const [notice, setNotice] = useState<string | null>(null);
 
   const busy = status === "submitted" || status === "streaming";
 
   // PromptInput owns the textarea state + clears on submit. While a turn is in
   // flight the submit control is a STOP button (status drives the icon), so a
   // submit during streaming aborts instead of double-sending.
-  function handleSubmit(message: PromptInputMessage) {
+  async function handleSubmit(message: PromptInputMessage) {
     if (busy) {
       stop();
       return;
     }
-    const text = message.text?.trim();
-    if (!text) return;
+    const raw = message.text?.trim() ?? "";
+    const files = message.files ?? [];
+
+    // A `/`-prefixed message is a local command, not an agent turn (BRO-1576).
+    const command = files.length === 0 ? parseSlash(raw) : null;
+    if (command === "new") {
+      setNotice(null);
+      onNewThread();
+      return;
+    }
+    if (command === "reset") {
+      setNotice("Resetting the agent's memory for this thread…");
+      setNotice(
+        (await resetThread(threadId)) ? "Agent memory reset for this thread." : "Reset failed.",
+      );
+      return;
+    }
+    if (command === "help") {
+      setNotice(slashHelpText());
+      return;
+    }
+
+    const text = raw + (await inlineAttachments(files));
+    if (!text.trim()) return;
+    setNotice(null);
     void sendMessage(
       { text },
       { body: { model: modelToBody(model), effort: effortToBody(effort) } },
@@ -214,49 +275,72 @@ export function ChatView({
       </MessageScrollerProvider>
 
       <footer className="border-border bg-background shrink-0 border-t px-4 py-3">
-        <TooltipProvider>
-          <PromptInput onSubmit={handleSubmit} className="mx-auto w-full max-w-2xl">
-            <PromptInputBody>
-              <PromptInputTextarea
-                placeholder="Message the agent…"
-                aria-label="Message the agent"
-              />
-            </PromptInputBody>
-            <PromptInputFooter>
-              <PromptInputTools>
-                <PromptInputSelect value={model} onValueChange={onModelChange}>
-                  <PromptInputSelectTrigger aria-label="Model">
-                    <PromptInputSelectValue />
-                  </PromptInputSelectTrigger>
-                  <PromptInputSelectContent>
-                    {MODEL_OPTIONS.map((o) => (
-                      <PromptInputSelectItem key={o.value} value={o.value}>
-                        {o.label}
-                      </PromptInputSelectItem>
-                    ))}
-                  </PromptInputSelectContent>
-                </PromptInputSelect>
-                <PromptInputSelect value={effort} onValueChange={onEffortChange}>
-                  <PromptInputSelectTrigger aria-label="Effort">
-                    <PromptInputSelectValue />
-                  </PromptInputSelectTrigger>
-                  <PromptInputSelectContent>
-                    {EFFORT_OPTIONS.map((o) => (
-                      <PromptInputSelectItem key={o.value} value={o.value}>
-                        {o.label}
-                      </PromptInputSelectItem>
-                    ))}
-                  </PromptInputSelectContent>
-                </PromptInputSelect>
-              </PromptInputTools>
-              {/* onStop → during a stream the button becomes type=button and
+        <div className="mx-auto w-full max-w-2xl">
+          {notice ? (
+            <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-lg border px-3 py-2 font-mono text-xs whitespace-pre-line">
+              <span>{notice}</span>
+              <button
+                type="button"
+                onClick={() => setNotice(null)}
+                aria-label="Dismiss"
+                className="hover:text-foreground shrink-0 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          ) : null}
+          <TooltipProvider>
+            <PromptInput onSubmit={handleSubmit} multiple accept="text/*" className="w-full">
+              <PromptInputBody>
+                <PromptInputTextarea
+                  placeholder="Message the agent…  (/help for commands)"
+                  aria-label="Message the agent"
+                />
+              </PromptInputBody>
+              <PromptInputFooter>
+                <PromptInputTools>
+                  <PromptInputActionMenu>
+                    <PromptInputActionMenuTrigger aria-label="Attach files">
+                      <Paperclip className="size-4" />
+                    </PromptInputActionMenuTrigger>
+                    <PromptInputActionMenuContent>
+                      <PromptInputActionAddAttachments label="Attach text files" />
+                    </PromptInputActionMenuContent>
+                  </PromptInputActionMenu>
+                  <PromptInputSelect value={model} onValueChange={onModelChange}>
+                    <PromptInputSelectTrigger aria-label="Model">
+                      <PromptInputSelectValue />
+                    </PromptInputSelectTrigger>
+                    <PromptInputSelectContent>
+                      {MODEL_OPTIONS.map((o) => (
+                        <PromptInputSelectItem key={o.value} value={o.value}>
+                          {o.label}
+                        </PromptInputSelectItem>
+                      ))}
+                    </PromptInputSelectContent>
+                  </PromptInputSelect>
+                  <PromptInputSelect value={effort} onValueChange={onEffortChange}>
+                    <PromptInputSelectTrigger aria-label="Effort">
+                      <PromptInputSelectValue />
+                    </PromptInputSelectTrigger>
+                    <PromptInputSelectContent>
+                      {EFFORT_OPTIONS.map((o) => (
+                        <PromptInputSelectItem key={o.value} value={o.value}>
+                          {o.label}
+                        </PromptInputSelectItem>
+                      ))}
+                    </PromptInputSelectContent>
+                  </PromptInputSelect>
+                </PromptInputTools>
+                {/* onStop → during a stream the button becomes type=button and
                   aborts directly (no form submit/reset), so text typed mid-stream
                   isn't wiped (P20 BRO-1573). handleSubmit's busy-guard remains the
                   Enter-key fallback. */}
-              <PromptInputSubmit status={status} onStop={stop} />
-            </PromptInputFooter>
-          </PromptInput>
-        </TooltipProvider>
+                <PromptInputSubmit status={status} onStop={stop} />
+              </PromptInputFooter>
+            </PromptInput>
+          </TooltipProvider>
+        </div>
       </footer>
     </div>
   );
