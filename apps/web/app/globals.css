@@ -2,6 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* Let Tailwind scan streamdown's compiled JS so it emits the utility classes the
+   markdown renderer uses (BRO-1566). bun's isolated layout does NOT hoist deps to
+   the monorepo root — it symlinks them per-app at apps/web/node_modules/<pkg> (the
+   same path the module resolver uses for `import "streamdown"`). globals.css is at
+   apps/web/app/ → one level up reaches that node_modules. streamdown reads the
+   shadcn/arcan-glass CSS vars defined below, so it themes to dark for free. */
+@source "../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
