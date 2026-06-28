@@ -113,16 +113,19 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           lastText: (state.lastText ?? "") + textDelta,
         };
       }
+      // Capture the token estimate INDEPENDENTLY of the prose (P20 BRO-1574): the
+      // prose is usually redacted to "" under subscription auth, and a future
+      // thinking_delta could carry only estimated_tokens with no `thinking` key —
+      // so the is-thinking signal must not hinge on the prose being present.
       const thinkingDelta = streamThinkingDelta(ev);
-      if (thinkingDelta !== undefined) {
-        // Track the max token estimate as the is-thinking signal (the prose is
-        // usually "" under subscription auth — BRO-1574).
-        const tokens = streamThinkingTokens(ev) ?? 0;
+      const thinkingTokens = streamThinkingTokens(ev);
+      if (thinkingDelta !== undefined || thinkingTokens !== undefined) {
         return {
           ...state,
           sessionId,
-          reasoning: (state.reasoning ?? "") + thinkingDelta,
-          thinkingTokens: Math.max(state.thinkingTokens ?? 0, tokens),
+          phase: "running",
+          reasoning: (state.reasoning ?? "") + (thinkingDelta ?? ""),
+          thinkingTokens: Math.max(state.thinkingTokens ?? 0, thinkingTokens ?? 0),
         };
       }
       // message_start / content_block_stop / message_delta / message_stop — keep
