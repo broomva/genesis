@@ -20,6 +20,7 @@
 // hard-disabled (fail closed), so it can never weaken the gate when absent.
 
 import { auth } from "@/lib/auth";
+import { timingSafeEqual } from "@/lib/timing-safe-equal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,16 +33,6 @@ const AGENT_TOKEN = process.env.AGENT_TOKEN;
 // Headers worth mirroring from the upstream streaming response so the AI SDK
 // client parses the stream correctly (content-type + the AI-SDK stream marker).
 const STREAM_HEADER_PREFIXES = ["content-type", "cache-control", "x-vercel-ai-"];
-
-// Constant-time string compare — avoids leaking the token via response timing.
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
-}
 
 // True iff a valid machine token is presented. Fail-closed: no env ⇒ false even
 // for an empty header, so the agent path simply does not exist unless configured.
