@@ -31,14 +31,46 @@ export async function proxyGenesisGetJson(path: string, req: Request): Promise<R
       },
     });
   } catch (err) {
-    // A client disconnect aborts the fetch (routine: thread switch / navigation
-    // triggers the caller's AbortController). That is NOT an engine outage — skip
-    // the unreachable alarm and return a client-closed status the browser ignores.
-    if (err instanceof Error && err.name === "AbortError") {
-      return new Response(null, { status: 499 });
-    }
-    const detail = err instanceof Error ? err.message : "upstream fetch failed";
-    console.error(`[bff] genesis unreachable at ${GENESIS_URL}: ${detail}`);
-    return Response.json({ error: "agent engine unreachable" }, { status: 502 });
+    return upstreamError(err);
   }
+}
+
+/** POST a JSON body to the genesis engine and pass the body + status through
+ *  (BRO-1576). `path` must start with "/". The caller's authorizePrincipal must
+ *  already have run; this only adds the server→engine bearer. */
+export async function proxyGenesisPostJson(
+  path: string,
+  body: string,
+  req: Request,
+): Promise<Response> {
+  try {
+    const upstream = await fetch(`${GENESIS_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(GENESIS_TOKEN ? { authorization: `Bearer ${GENESIS_TOKEN}` } : {}),
+      },
+      body,
+      signal: req.signal,
+    });
+    return new Response(await upstream.text(), {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+      },
+    });
+  } catch (err) {
+    return upstreamError(err);
+  }
+}
+
+/** Shared error mapping: a client-disconnect AbortError → 499 (no alarm); any
+ *  other failure logs the address server-side only and returns a generic 502. */
+function upstreamError(err: unknown): Response {
+  if (err instanceof Error && err.name === "AbortError") {
+    return new Response(null, { status: 499 });
+  }
+  const detail = err instanceof Error ? err.message : "upstream fetch failed";
+  console.error(`[bff] genesis unreachable at ${GENESIS_URL}: ${detail}`);
+  return Response.json({ error: "agent engine unreachable" }, { status: 502 });
 }

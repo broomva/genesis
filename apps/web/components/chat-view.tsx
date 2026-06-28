@@ -45,10 +45,16 @@ import { cn } from "@/lib/utils";
 
 // Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
 // inline images, so only text-ish files are inlined as fenced blocks; anything
-// else is noted (not silently dropped). FileUIPart.url is a data: URL, so
-// fetch().text() decodes it client-side.
+// else is noted (not silently dropped). PromptInput exposes each file as a
+// FileUIPart with a blob: URL, so fetch().text() decodes it client-side. The
+// `accept`/`TEXT_FILE_RE` split is intentional: TEXT_FILE_RE is the single source
+// of truth for what gets inlined (OS MIME for code files is unreliable —
+// .ts→video/mp2t, .json→application/json — so we do NOT gate the picker on it).
 const TEXT_FILE_RE =
   /\.(md|markdown|txt|text|json|jsonl|ya?ml|toml|ini|env|csv|tsv|tsx?|jsx?|mjs|cjs|py|rs|go|rb|java|c|h|cpp|cs|php|sh|bash|zsh|sql|css|scss|html?|xml|svg|log|diff|patch)$/i;
+
+// Cap inlined content so a large log/CSV can't blow the prompt token budget.
+const MAX_INLINE_BYTES = 100_000;
 
 async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> {
   if (files.length === 0) return "";
@@ -60,8 +66,13 @@ async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> 
         return `\n\n[attachment "${name}" (${f.mediaType || "binary"}) omitted — only text/code files are inlined on this deployment]`;
       }
       try {
-        const content = await (await fetch(f.url)).text();
-        return `\n\nAttached file \`${name}\`:\n\`\`\`\n${content}\n\`\`\``;
+        let content = await (await fetch(f.url)).text();
+        let truncated = "";
+        if (content.length > MAX_INLINE_BYTES) {
+          content = content.slice(0, MAX_INLINE_BYTES);
+          truncated = `\n… [truncated to ${MAX_INLINE_BYTES.toLocaleString()} chars]`;
+        }
+        return `\n\nAttached file \`${name}\`:\n\`\`\`\n${content}${truncated}\n\`\`\``;
       } catch {
         return `\n\n[attachment "${name}" could not be read]`;
       }
@@ -290,7 +301,12 @@ export function ChatView({
             </div>
           ) : null}
           <TooltipProvider>
-            <PromptInput onSubmit={handleSubmit} multiple accept="text/*" className="w-full">
+            <PromptInput
+              onSubmit={handleSubmit}
+              multiple
+              onError={(e) => setNotice(e.message)}
+              className="w-full"
+            >
               <PromptInputBody>
                 <PromptInputTextarea
                   placeholder="Message the agent…  (/help for commands)"
