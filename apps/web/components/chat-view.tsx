@@ -25,6 +25,7 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
+import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -98,6 +99,34 @@ function messageReasoning(message: UIMessage): string {
     .join("");
 }
 
+// Empty-state starter prompts (BRO-1577) — tappable, send immediately.
+const STARTERS: readonly string[] = [
+  "What can you help me with?",
+  "Summarize the current state of this workspace",
+  "Run the test suite and report failures",
+  "What changed in the last commit?",
+];
+
+// Three-dot "thinking" loader for the gap before the first token (BRO-1577) —
+// replaces the bare "…". Per-dot delay staggers the pulse; reduced-motion safe.
+function ChatLoader() {
+  return (
+    <span
+      className="text-muted-foreground inline-flex items-center gap-1 py-1"
+      role="status"
+      aria-label="Thinking"
+    >
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="loader-dot inline-block size-1.5 rounded-full bg-current"
+          style={{ animationDelay: `${i * 0.16}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
 function StatusPill({ status }: { status: ReturnType<typeof useChat>["status"] }) {
   const busy = status === "submitted" || status === "streaming";
   const label =
@@ -163,6 +192,17 @@ export function ChatView({
 
   const busy = status === "submitted" || status === "streaming";
 
+  // Send a turn with the current model/effort selection. Shared by the composer
+  // and the empty-state suggestion chips (BRO-1577).
+  function send(text: string) {
+    if (!text.trim()) return;
+    setNotice(null);
+    void sendMessage(
+      { text },
+      { body: { model: modelToBody(model), effort: effortToBody(effort) } },
+    );
+  }
+
   // PromptInput owns the textarea state + clears on submit. While a turn is in
   // flight the submit control is a STOP button (status drives the icon), so a
   // submit during streaming aborts instead of double-sending.
@@ -193,13 +233,7 @@ export function ChatView({
       return;
     }
 
-    const text = raw + (await inlineAttachments(files));
-    if (!text.trim()) return;
-    setNotice(null);
-    void sendMessage(
-      { text },
-      { body: { model: modelToBody(model), effort: effortToBody(effort) } },
-    );
+    send(raw + (await inlineAttachments(files)));
   }
 
   return (
@@ -229,8 +263,15 @@ export function ChatView({
           <MessageScrollerViewport className="px-4">
             <MessageScrollerContent className="mx-auto w-full max-w-2xl py-6">
               {messages.length === 0 ? (
-                <div className="text-muted-foreground py-16 text-center font-mono text-sm">
-                  Message the agent to begin.
+                <div className="message-in flex flex-col items-center gap-4 py-16 text-center">
+                  <p className="text-muted-foreground font-mono text-sm">
+                    Message the agent to begin, or try:
+                  </p>
+                  <Suggestions className="justify-center">
+                    {STARTERS.map((s) => (
+                      <Suggestion key={s} suggestion={s} onClick={send} />
+                    ))}
+                  </Suggestions>
                 </div>
               ) : (
                 messages.map((message) => {
@@ -242,6 +283,7 @@ export function ChatView({
                       key={message.id}
                       messageId={message.id}
                       scrollAnchor={isUser}
+                      className="message-in"
                     >
                       <Message align={isUser ? "end" : "start"}>
                         <MessageContent>
@@ -265,7 +307,7 @@ export function ChatView({
                                     {text}
                                   </Streamdown>
                                 ) : busy ? (
-                                  "…"
+                                  <ChatLoader />
                                 ) : null}
                               </BubbleContent>
                             )}
