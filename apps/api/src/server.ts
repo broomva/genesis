@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
+import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
 
@@ -141,16 +142,21 @@ export function build(opts: BuildOpts) {
   }));
   app.post("/api/chat", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    let incoming: { threadId: string; text: string };
+    let incoming: IncomingMessage;
     try {
       incoming = chat.parseIncoming(await c.req.json().catch(() => null));
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : "bad request" }, 400);
     }
     const events = eventStream(async (emit) => {
-      const result = await supervisor.dispatch(incoming.threadId, incoming.text, (state) => {
-        emit({ kind: "phase", phase: state.phase, text: state.lastText });
-      });
+      const result = await supervisor.dispatch(
+        incoming.threadId,
+        incoming.text,
+        (state) => {
+          emit({ kind: "phase", phase: state.phase, text: state.lastText });
+        },
+        { model: incoming.model, effort: incoming.effort },
+      );
       emit({ kind: "reply", phase: result.phase, text: result.reply });
     });
     return chat.encodeStream(events);

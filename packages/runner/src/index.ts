@@ -12,6 +12,12 @@ import {
   reduce,
 } from "@genesis/projection";
 
+/** Claude's native `--effort` flag enum (BRO-1573). Thinking only meaningfully
+ *  engages at xhigh/max under subscription auth; there is no "off" level. */
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+export const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
 export interface RunOptions {
   prompt: string;
   /** A git repository root; a worktree is cut from here unless worktree=false. */
@@ -21,6 +27,11 @@ export interface RunOptions {
   host?: ExecutionHost;
   /** CLI binary; default "claude". */
   agentBin?: string;
+  /** Per-turn model override → `--model <name>` (claude alias or full id).
+   *  Omitted → the engine default (claude-opus-4-8[1m]). */
+  model?: string;
+  /** Per-turn extended-thinking effort → `--effort <level>` (BRO-1573). */
+  effort?: EffortLevel;
   /** Cut an isolated git worktree for the run (default true). Ignored on a
    *  microVM host — the VM is itself the isolation boundary. */
   worktree?: boolean;
@@ -106,6 +117,14 @@ function agentArgs(opts: RunOptions): string[] {
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.extraArgs) args.push(...opts.extraArgs);
+  // Per-turn knobs LAST so they override any constructor-level extraArgs default
+  // (claude takes the last --model / --effort on the line). EQUALS-FORM
+  // (`--model=<v>`) so the value can never be parsed as a separate flag even if a
+  // caller smuggled a dash-prefixed string past validation — defense-in-depth on
+  // top of the parseChatRequest allowlist (P20 BRO-1573). Verified claude accepts
+  // both `--model=haiku` and `--effort=max`.
+  if (opts.model) args.push(`--model=${opts.model}`);
+  if (opts.effort) args.push(`--effort=${opts.effort}`);
   return args;
 }
 

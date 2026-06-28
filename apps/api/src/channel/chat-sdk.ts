@@ -7,6 +7,7 @@
 //   body:    `data: {json}\n\n` parts, terminated by `data: [DONE]\n\n`
 //   parts:   start · text-start · text-delta · text-end · error · finish
 
+import { EFFORT_LEVELS, type EffortLevel } from "./types";
 import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
 
 // ───────────────────────────── parsing ─────────────────────────────
@@ -31,7 +32,13 @@ function messageText(m: UIMessage): string {
  *  single-message `{ id, message }` trigger shape. Throws on an unusable body. */
 export function parseChatRequest(body: unknown): IncomingMessage {
   if (typeof body !== "object" || body === null) throw new Error("chat request must be an object");
-  const b = body as { id?: unknown; messages?: unknown; message?: unknown };
+  const b = body as {
+    id?: unknown;
+    messages?: unknown;
+    message?: unknown;
+    model?: unknown;
+    effort?: unknown;
+  };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
   let text = "";
@@ -42,7 +49,24 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     text = messageText(b.message as UIMessage);
   }
   if (!text.trim()) throw new Error("chat request has no user text");
-  return { threadId, text };
+
+  // Per-turn knobs (BRO-1573) ride as top-level body fields next to {id, messages}
+  // because DefaultChatTransport merges per-call `sendMessage(_, {body})` there.
+  // Validate to the allowed sets — an unknown effort/model is dropped (never
+  // forwarded so the engine can't warn-and-fallback on a bad value).
+  //
+  // model MUST start with an alphanumeric (claude aliases haiku|sonnet|opus|fable
+  // and full ids like claude-opus-4-8 all do): this rejects any dash-prefixed
+  // value so it can never be reparsed as a CLI flag in `--model`'s slot (P20
+  // BRO-1573 — the runner ALSO uses the equals-form as defense-in-depth).
+  const modelRaw = typeof b.model === "string" ? b.model.trim() : "";
+  const model = /^[A-Za-z0-9][\w.-]*$/.test(modelRaw) ? modelRaw : undefined;
+  const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
+  const effort = (EFFORT_LEVELS as readonly string[]).includes(effortRaw)
+    ? (effortRaw as EffortLevel)
+    : undefined;
+
+  return { threadId, text, model, effort };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────

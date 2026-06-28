@@ -309,3 +309,39 @@ describe("supervisor — remoteCwd threading (P20 MED-1)", () => {
     expect(seenRemoteCwd).toBe("/vercel/sandbox/app");
   });
 });
+
+describe("supervisor — per-turn model + effort threading (BRO-1573)", () => {
+  test("dispatch passes turnOpts model + effort into the runner", async () => {
+    let seen: { model?: string; effort?: string } = {};
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: async (o) => {
+        seen = { model: o.model, effort: o.effort };
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("t-opts", "hi", undefined, { model: "haiku", effort: "max" });
+    expect(seen).toEqual({ model: "haiku", effort: "max" });
+  });
+
+  test("omitted turnOpts leaves model/effort undefined (engine default)", async () => {
+    let seen: { model?: string; effort?: string } = { model: "x", effort: "x" };
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: async (o) => {
+        seen = { model: o.model, effort: o.effort };
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("t-default", "hi");
+    expect(seen).toEqual({ model: undefined, effort: undefined });
+  });
+});
