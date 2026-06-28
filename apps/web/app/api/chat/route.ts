@@ -7,10 +7,17 @@
 // must be correct is the passthrough: never await/buffer `upstream.body`.
 //
 // Auth gate: this route is the REAL enforcement point (middleware does only an
-// optimistic cookie check). The first thing POST does is verify a valid Better
-// Auth session via `auth.api.getSession`; with no session it returns 401 and
-// never touches the upstream engine. The upstream credential remains a
-// server-only bearer token (GENESIS_TOKEN) the browser never sees.
+// optimistic cookie check). POST authenticates one of TWO principals before it
+// touches the upstream engine:
+//   • HUMAN  — a valid Better Auth session (passkey). This is the primary path;
+//     a browser fetch carries the session cookie automatically.
+//   • AGENT  — a server-only machine token presented in the `X-Agent-Token`
+//     header, compared constant-time to AGENT_TOKEN. Lets the agent operate /
+//     dogfood the channel without a biometric authenticator. Distinct header
+//     from the upstream `Authorization: Bearer GENESIS_TOKEN` (which the route
+//     sets itself, server→engine) — no collision with the client credential.
+// With NEITHER ⇒ 401, no upstream call. AGENT_TOKEN unset ⇒ the agent path is
+// hard-disabled (fail closed), so it can never weaken the gate when absent.
 
 import { auth } from "@/lib/auth";
 
@@ -19,17 +26,41 @@ export const dynamic = "force-dynamic";
 
 const GENESIS_URL = process.env.GENESIS_URL ?? "http://127.0.0.1:8787";
 const GENESIS_TOKEN = process.env.GENESIS_TOKEN;
+// Machine-principal token. Unset ⇒ no agent path (fail closed).
+const AGENT_TOKEN = process.env.AGENT_TOKEN;
 
 // Headers worth mirroring from the upstream streaming response so the AI SDK
 // client parses the stream correctly (content-type + the AI-SDK stream marker).
 const STREAM_HEADER_PREFIXES = ["content-type", "cache-control", "x-vercel-ai-"];
 
+// Constant-time string compare — avoids leaking the token via response timing.
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+// True iff a valid machine token is presented. Fail-closed: no env ⇒ false even
+// for an empty header, so the agent path simply does not exist unless configured.
+function agentAuthorized(req: Request): boolean {
+  if (!AGENT_TOKEN) return false;
+  const provided = req.headers.get("x-agent-token") ?? "";
+  return provided.length > 0 && timingSafeEqual(provided, AGENT_TOKEN);
+}
+
 export async function POST(req: Request): Promise<Response> {
-  // AUTH GATE — must be first. No session ⇒ 401, no upstream call.
+  // AUTH GATE — must be first. Human session OR machine token; else 401, no
+  // upstream call. The session check stays primary and unchanged.
   const session = await auth.api.getSession({ headers: req.headers });
-  if (!session) {
+  const asAgent = !session && agentAuthorized(req);
+  if (!session && !asAgent) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
+  // Attribute the principal server-side (never impersonates the owner user).
+  if (asAgent) console.info("[bff] /api/chat authorized as machine principal (agent)");
 
   // Read the raw body once; forward it byte-identical (it already IS the AI SDK
   // request shape genesis `parseChatRequest` expects: { id, messages: [...] }).
