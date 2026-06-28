@@ -90,10 +90,20 @@ export function scrubAgentEnv(
   return out;
 }
 
-/** Build the agent argv. `--verbose` is required to stream NDJSON under `-p`. */
+/** Build the agent argv. `--verbose` is required to stream NDJSON under `-p`;
+ *  `--include-partial-messages` emits token-level `stream_event` deltas so the
+ *  chat streams progressively instead of landing in one block (BRO-1571). */
 function agentArgs(opts: RunOptions): string[] {
   const bin = opts.agentBin ?? "claude";
-  const args = [bin, "-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
+  const args = [
+    bin,
+    "-p",
+    opts.prompt,
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--verbose",
+  ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.extraArgs) args.push(...opts.extraArgs);
   return args;

@@ -10,7 +10,15 @@
 //    AskUserQuestion ends the turn, but the human still owes an answer, so the
 //    run stays gated (HITL signal preserved) until a real answer arrives.
 
-import { type AgentEvent, sessionIdOf, textBlocks, toolUses } from "./parser";
+import {
+  type AgentEvent,
+  sessionIdOf,
+  streamBlockStart,
+  streamTextDelta,
+  streamThinkingDelta,
+  textBlocks,
+  toolUses,
+} from "./parser";
 
 export type RunPhase = "idle" | "running" | "awaiting" | "blocked" | "done";
 
@@ -18,6 +26,10 @@ export interface RunState {
   phase: RunPhase;
   sessionId?: string;
   lastText?: string;
+  /** Accumulated extended-thinking text from partial `thinking_delta` events
+   *  (BRO-1571). Surfaced separately from `lastText` so the UI can render it in a
+   *  collapsible Reasoning panel rather than inline with the answer. */
+  reasoning?: string;
   turns: number;
   pendingQuestion?: string;
   error?: string;
@@ -70,6 +82,37 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
         };
       }
       return { ...state, sessionId, phase: "running", lastText, turns: state.turns + 1 };
+    }
+
+    case "stream_event": {
+      // Token-level partials (BRO-1571) — fold incremental deltas into `lastText`
+      // (answer) / `reasoning` (thinking) so the chat streams. The COMPLETE
+      // `assistant` event still arrives after and stays the authority for
+      // turn-count + AskUserQuestion detection; by then the accumulated text
+      // equals its final block, so it re-sets the same value (no double-emit).
+      const ev = event.event;
+      // A new content block resets its accumulator → a fresh text block won't
+      // prefix-extend the previous one (the connector opens a new text part).
+      const blockStart = streamBlockStart(ev);
+      if (blockStart === "text") return { ...state, sessionId, phase: "running", lastText: "" };
+      if (blockStart === "thinking")
+        return { ...state, sessionId, phase: "running", reasoning: "" };
+      const textDelta = streamTextDelta(ev);
+      if (textDelta !== undefined) {
+        return {
+          ...state,
+          sessionId,
+          phase: "running",
+          lastText: (state.lastText ?? "") + textDelta,
+        };
+      }
+      const thinkingDelta = streamThinkingDelta(ev);
+      if (thinkingDelta !== undefined) {
+        return { ...state, sessionId, reasoning: (state.reasoning ?? "") + thinkingDelta };
+      }
+      // message_start / content_block_stop / message_delta / message_stop — keep
+      // the run alive, capture any session id, no text change.
+      return { ...state, sessionId };
     }
 
     case "user":

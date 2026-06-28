@@ -23,11 +23,27 @@ export interface AgentMessage {
   content?: ContentBlock[] | string;
 }
 
+/** A raw Anthropic streaming event wrapped by `--include-partial-messages`
+ *  (the `stream_event` envelope, BRO-1571). We model only the fields the reducer
+ *  folds on; everything else passes through untyped. Sub-`type` is one of:
+ *  message_start, content_block_start, content_block_delta, content_block_stop,
+ *  message_delta, message_stop. Text tokens arrive as `delta.type==="text_delta"`
+ *  (`delta.text`); extended-thinking tokens as `"thinking_delta"` (`delta.thinking`). */
+export interface PartialStreamEvent {
+  type: string;
+  index?: number;
+  delta?: { type?: string; text?: string; thinking?: string };
+  content_block?: { type?: string };
+}
+
 /** A parsed event from a coding-agent CLI stream-json line, tagged by `type`. */
 export type AgentEvent =
   | { type: "system"; subtype?: string; session_id?: string }
   | { type: "assistant"; message: AgentMessage; session_id?: string }
   | { type: "user"; message: AgentMessage; session_id?: string }
+  // Token-level partial under `--include-partial-messages` (BRO-1571): the
+  // incremental channel that makes the chat stream instead of land all at once.
+  | { type: "stream_event"; event: PartialStreamEvent; session_id?: string }
   | {
       type: "result";
       subtype?: string;
@@ -36,7 +52,7 @@ export type AgentEvent =
       result?: string;
     };
 
-const KNOWN = new Set(["system", "assistant", "user", "result"]);
+const KNOWN = new Set(["system", "assistant", "user", "result", "stream_event"]);
 
 /**
  * Parse a single NDJSON line into an {@link AgentEvent}.
@@ -88,4 +104,28 @@ export function toolUses(msg: AgentMessage): Array<{ name: string; input: unknow
   return blocks(msg)
     .filter((b) => b.type === "tool_use" && typeof b.name === "string")
     .map((b) => ({ name: b.name as string, input: b.input }));
+}
+
+// ── Partial-message (stream_event) accessors (BRO-1571) ──
+// Small pure readers so the reducer stays declarative about the incremental
+// token channel without re-deriving the Anthropic delta shape inline.
+
+/** The text fragment of a `content_block_delta` / `text_delta`, else undefined. */
+export function streamTextDelta(ev: PartialStreamEvent): string | undefined {
+  return ev.type === "content_block_delta" && ev.delta?.type === "text_delta"
+    ? ev.delta.text
+    : undefined;
+}
+
+/** The reasoning fragment of a `content_block_delta` / `thinking_delta`, else undefined. */
+export function streamThinkingDelta(ev: PartialStreamEvent): string | undefined {
+  return ev.type === "content_block_delta" && ev.delta?.type === "thinking_delta"
+    ? ev.delta.thinking
+    : undefined;
+}
+
+/** The content-block kind ("text" | "thinking" | …) when a new block begins,
+ *  else undefined. A new block is the reset boundary for its accumulator. */
+export function streamBlockStart(ev: PartialStreamEvent): string | undefined {
+  return ev.type === "content_block_start" ? ev.content_block?.type : undefined;
 }
