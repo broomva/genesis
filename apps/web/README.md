@@ -19,8 +19,74 @@ Build + run the production server:
 
 ```bash
 bun run build
-GENESIS_URL=http://100.82.195.109:8787 bun run start
+GENESIS_URL=http://<engine-host>:8787 bun run start
 ```
+
+## Testing & dogfooding
+
+Three layers, run in order — each gates the next. (Detailed command blocks for
+layers 2–3 live in **Verifying the gate** and **Agent / machine principal**
+below.)
+
+**Layer 1 — Automated (CI, every PR).** `.github/workflows/ci.yml` runs on every
+push/PR. Run it locally before pushing:
+
+```bash
+bun install --frozen-lockfile && bunx biome ci . && bun run typecheck && bun test
+```
+
+**Layer 2 — Local pre-deploy gate (the standalone bundle).** Build the *real*
+artifact (`output: "standalone"`) and prove the auth gate against it before
+deploying — see **Verifying the gate** below. Expected: anon → **401**, valid
+`X-Agent-Token` → **200 + stream**, wrong token → **401**, bootstrap → cookie →
+chat → **200**.
+
+**Layer 3 — Live dogfood on the VPS (observe + operate).** Deploy, then drive the
+live channel while tailing logs. Rebuild + restart after merging a PWA PR:
+
+```bash
+ssh agent@<vps> 'export PATH=$HOME/.bun/bin:$PATH; cd ~/genesis && \
+  git fetch origin -q && git checkout main -q && git pull -q origin main && \
+  bun install --frozen-lockfile && bun run --filter @genesis/web build && \
+  cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static && \
+  cp -r apps/web/public        apps/web/.next/standalone/apps/web/public && \
+  systemctl --user restart genesis-web && systemctl --user is-active genesis-web'
+```
+
+Then **observe** (`journalctl --user -u genesis-web -f`) while you **operate** the
+authed channel with the agent token (sourced on-box so it never leaves the
+server) — see **Agent / machine principal** below. For UI/render changes, also do
+a visual check in a real browser (Interceptor) — but the human passkey gate means
+the browser needs a signed-in session (WebAuthn user-activation can't be faked
+headlessly; a human clicks "Sign in with passkey" once).
+
+### Secrets layout (VPS)
+
+`~/.config/genesis-web/secrets.env` (`0600`, referenced as `EnvironmentFile=` in
+the systemd unit):
+
+| Var | Note |
+|-----|------|
+| `BETTER_AUTH_SECRET` | session/cookie signing (`openssl rand -base64 32`) |
+| `BETTER_AUTH_URL` | exact public origin (drives passkey rpID) |
+| `AUTH_BOOTSTRAP_TOKEN` | one-time owner creation; spent after first bootstrap |
+| `AUTH_DB_PATH` | → `~/.local/share/genesis-web/auth` — **outside the build dir** |
+| `AGENT_TOKEN` | machine-principal token for `X-Agent-Token` |
+
+> **Rebuild gotcha:** `next build` wipes `.next/standalone`. Keep `AUTH_DB_PATH`
+> **outside** the app tree (e.g. `~/.local/share/genesis-web/auth`) or a rebuild
+> erases the owner+passkey and forces a re-bootstrap. The `cp -r` of `.next/static`
+> + `public` into the standalone dir is required each rebuild (Next does not bundle
+> them).
+
+### Before opening a PWA PR
+
+- [ ] Layer 1 green (`biome ci` · `typecheck` · `bun test` · standalone build emits `server.js`)
+- [ ] Layer 2 curl matrix passes on the standalone bundle (gate 401 / agent-token 200 / cookie 200)
+- [ ] For UI/render changes: Layer 3 visual check on the live URL after redeploy
+
+> The genesis repo is public — use placeholders (`<vps>`, `<engine-host>`) in docs
+> and never commit a token; secrets live only in the `0600` `secrets.env` on the box.
 
 ## What the BFF does
 
