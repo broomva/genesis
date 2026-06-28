@@ -238,7 +238,7 @@ export function ChatView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="border-border flex shrink-0 items-center gap-3 border-b px-4 py-3">
+      <header className="border-border flex shrink-0 items-center gap-3 border-b px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
         <Button
           type="button"
           size="icon-sm"
@@ -327,7 +327,7 @@ export function ChatView({
         </MessageScroller>
       </MessageScrollerProvider>
 
-      <footer className="border-border bg-background shrink-0 border-t px-4 py-3">
+      <footer className="border-border bg-background shrink-0 border-t px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <div className="mx-auto w-full max-w-2xl">
           {notice ? (
             <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-lg border px-3 py-2 font-mono text-xs whitespace-pre-line">

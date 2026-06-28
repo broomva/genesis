@@ -59,7 +59,7 @@ export function ThreadDrawer({
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="border-border flex items-center gap-2 border-b px-3 py-3">
+        <div className="border-border flex items-center gap-2 border-b px-3 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:pt-3">
           <span className="font-mono text-sm font-semibold tracking-tight text-[var(--ai-blue)]">
             Genesis
           </span>
@@ -76,7 +76,7 @@ export function ThreadDrawer({
           </Button>
         </div>
 
-        <nav className="min-h-0 flex-1 overflow-y-auto p-2">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
           {threads.length === 0 ? (
             <p className="text-muted-foreground px-2 py-6 text-center font-mono text-xs">
               No conversations yet.
