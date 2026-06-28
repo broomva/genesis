@@ -126,6 +126,28 @@ curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/chat \
 curl -s http://localhost:3000/api/auth/ok   # → {"ok":true}  (handler mounted)
 ```
 
+### Agent / machine principal (operate + dogfood)
+
+`/api/chat` accepts **two** principals: a human Better Auth session (passkey,
+primary) **or** the agent's machine token in the `X-Agent-Token` header
+(constant-time compared to `AGENT_TOKEN`). This lets the agent operate and
+dogfood the channel without a biometric authenticator. It does **not** weaken
+the human gate — a browser never sends `X-Agent-Token`, and the `0600` token is
+not held by a random tailnet device. Unset `AGENT_TOKEN` ⇒ the path is disabled
+(fail closed).
+
+```bash
+# With AGENT_TOKEN set on the server — MUST stream (200), not 401:
+curl -sN -X POST https://srv1692698-agent.tailf3e897.ts.net/api/chat \
+  -H "X-Agent-Token: $AGENT_TOKEN" -H 'content-type: application/json' \
+  -d '{"id":"t","messages":[{"id":"m","role":"user","parts":[{"type":"text","text":"hi"}]}]}'
+# a wrong/absent token still returns 401 (gate intact for everyone else)
+```
+
+Observe the server while driving it (no app code — over SSH on the VPS):
+`journalctl --user -u genesis-web -f` · `systemctl --user status genesis-web` ·
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/health`.
+
 ## PWA
 
 - `app/manifest.ts` → installable manifest (`display: standalone`, brand colors).

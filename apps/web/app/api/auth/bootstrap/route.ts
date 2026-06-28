@@ -25,20 +25,11 @@
 //     (or a later passkey-signed-in owner) can add a passkey. There is no path
 //     for an unauthenticated, tokenless caller to enroll a credential.
 import { auth, ensureAuthDb } from "@/lib/auth";
+import { timingSafeEqual } from "@/lib/timing-safe-equal";
 import { makeSignature } from "better-auth/crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// Constant-time string compare to avoid leaking the token via timing.
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
-}
 
 type BootstrapBody = {
   token?: unknown;
