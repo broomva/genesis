@@ -110,10 +110,13 @@ const STARTERS: readonly string[] = [
 // Three-dot "thinking" loader for the gap before the first token (BRO-1577) —
 // replaces the bare "…". Per-dot delay staggers the pulse; reduced-motion safe.
 function ChatLoader() {
+  // <output> has the implicit ARIA role "status" — semantic element instead of a
+  // span+role="status" (biome a11y/useSemanticElements; this slipped through to
+  // main red in #36/#37 because piping the local biome check through `tail`
+  // masked its exit code — fixed forward here, BRO-1582).
   return (
-    <span
+    <output
       className="text-muted-foreground inline-flex items-center gap-1 py-1"
-      role="status"
       aria-label="Thinking"
     >
       {[0, 1, 2].map((i) => (
@@ -123,7 +126,7 @@ function ChatLoader() {
           style={{ animationDelay: `${i * 0.16}s` }}
         />
       ))}
-    </span>
+    </output>
   );
 }
 
