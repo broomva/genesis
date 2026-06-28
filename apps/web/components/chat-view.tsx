@@ -2,11 +2,25 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { ArrowUp, PanelLeft } from "lucide-react";
-import { useMemo, useState } from "react";
+import { PanelLeft } from "lucide-react";
+import { useMemo } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  type PromptInputMessage,
+  PromptInputSelect,
+  PromptInputSelectContent,
+  PromptInputSelectItem,
+  PromptInputSelectTrigger,
+  PromptInputSelectValue,
+  PromptInputSubmit,
+  PromptInputTextarea,
+  PromptInputTools,
+} from "@/components/ai-elements/prompt-input";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Message, MessageContent } from "@/components/ui/message";
@@ -18,6 +32,8 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { EFFORT_OPTIONS, MODEL_OPTIONS, effortToBody, modelToBody } from "@/lib/chat-options";
 import { cn } from "@/lib/utils";
 
 // Pull the rendered text out of a UIMessage's parts[] (AI SDK v6 shape).
@@ -62,29 +78,46 @@ export function ChatView({
   initialMessages,
   onActivity,
   onMenuClick,
+  model,
+  effort,
+  onModelChange,
+  onEffortChange,
 }: {
   threadId: string;
   initialMessages: UIMessage[];
   onActivity: () => void;
   onMenuClick: () => void;
+  /** Selected model + effort (owned by the parent so they survive ChatView's
+   *  per-thread remount); passed per-turn on the send body. */
+  model: string;
+  effort: string;
+  onModelChange: (value: string) => void;
+  onEffortChange: (value: string) => void;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
-  const { messages, sendMessage, status, error } = useChat({
+  const { messages, sendMessage, status, error, stop } = useChat({
     id: threadId,
     messages: initialMessages,
     transport,
     onFinish: onActivity,
   });
-  const [input, setInput] = useState("");
 
   const busy = status === "submitted" || status === "streaming";
 
-  function onSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    const text = input.trim();
-    if (!text || busy) return;
-    setInput("");
-    void sendMessage({ text });
+  // PromptInput owns the textarea state + clears on submit. While a turn is in
+  // flight the submit control is a STOP button (status drives the icon), so a
+  // submit during streaming aborts instead of double-sending.
+  function handleSubmit(message: PromptInputMessage) {
+    if (busy) {
+      stop();
+      return;
+    }
+    const text = message.text?.trim();
+    if (!text) return;
+    void sendMessage(
+      { text },
+      { body: { model: modelToBody(model), effort: effortToBody(effort) } },
+    );
   }
 
   return (
@@ -169,26 +202,42 @@ export function ChatView({
       </MessageScrollerProvider>
 
       <footer className="border-border bg-background shrink-0 border-t px-4 py-3">
-        <form onSubmit={onSubmit} className="mx-auto flex w-full max-w-2xl items-end gap-2">
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="Message the agent…"
-            aria-label="Message the agent"
-            className={cn(
-              "bg-card border-border placeholder:text-muted-foreground flex-1 rounded-lg border px-3.5 py-2.5 text-sm",
-              "focus-visible:border-ring focus-visible:ring-ring/40 outline-none focus-visible:ring-2",
-            )}
-          />
-          <Button
-            type="submit"
-            size="icon"
-            disabled={busy || input.trim().length === 0}
-            aria-label="Send message"
-          >
-            <ArrowUp className="size-4" />
-          </Button>
-        </form>
+        <TooltipProvider>
+          <PromptInput onSubmit={handleSubmit} className="mx-auto w-full max-w-2xl">
+            <PromptInputBody>
+              <PromptInputTextarea placeholder="Message the agent…" />
+            </PromptInputBody>
+            <PromptInputFooter>
+              <PromptInputTools>
+                <PromptInputSelect value={model} onValueChange={onModelChange}>
+                  <PromptInputSelectTrigger aria-label="Model">
+                    <PromptInputSelectValue />
+                  </PromptInputSelectTrigger>
+                  <PromptInputSelectContent>
+                    {MODEL_OPTIONS.map((o) => (
+                      <PromptInputSelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </PromptInputSelectItem>
+                    ))}
+                  </PromptInputSelectContent>
+                </PromptInputSelect>
+                <PromptInputSelect value={effort} onValueChange={onEffortChange}>
+                  <PromptInputSelectTrigger aria-label="Effort">
+                    <PromptInputSelectValue />
+                  </PromptInputSelectTrigger>
+                  <PromptInputSelectContent>
+                    {EFFORT_OPTIONS.map((o) => (
+                      <PromptInputSelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </PromptInputSelectItem>
+                    ))}
+                  </PromptInputSelectContent>
+                </PromptInputSelect>
+              </PromptInputTools>
+              <PromptInputSubmit status={status} />
+            </PromptInputFooter>
+          </PromptInput>
+        </TooltipProvider>
       </footer>
     </div>
   );

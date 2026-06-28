@@ -78,6 +78,28 @@ describe("parseChatRequest", () => {
       "no user text",
     );
   });
+
+  test("extracts per-turn model + valid effort from top-level body fields (BRO-1573)", () => {
+    const r = parseChatRequest({
+      id: "c",
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+      model: "haiku",
+      effort: "max",
+    });
+    expect(r.model).toBe("haiku");
+    expect(r.effort).toBe("max");
+  });
+
+  test("drops an unknown effort value (never forwarded as --effort)", () => {
+    const r = parseChatRequest({
+      id: "c",
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+      model: "  ", // whitespace-only → undefined
+      effort: "off", // not in the enum → undefined
+    });
+    expect(r.model).toBeUndefined();
+    expect(r.effort).toBeUndefined();
+  });
 });
 
 describe("encodePart / SSE format", () => {

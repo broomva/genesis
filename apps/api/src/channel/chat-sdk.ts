@@ -7,6 +7,7 @@
 //   body:    `data: {json}\n\n` parts, terminated by `data: [DONE]\n\n`
 //   parts:   start · text-start · text-delta · text-end · error · finish
 
+import { EFFORT_LEVELS, type EffortLevel } from "./types";
 import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
 
 // ───────────────────────────── parsing ─────────────────────────────
@@ -31,7 +32,13 @@ function messageText(m: UIMessage): string {
  *  single-message `{ id, message }` trigger shape. Throws on an unusable body. */
 export function parseChatRequest(body: unknown): IncomingMessage {
   if (typeof body !== "object" || body === null) throw new Error("chat request must be an object");
-  const b = body as { id?: unknown; messages?: unknown; message?: unknown };
+  const b = body as {
+    id?: unknown;
+    messages?: unknown;
+    message?: unknown;
+    model?: unknown;
+    effort?: unknown;
+  };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
   let text = "";
@@ -42,7 +49,18 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     text = messageText(b.message as UIMessage);
   }
   if (!text.trim()) throw new Error("chat request has no user text");
-  return { threadId, text };
+
+  // Per-turn knobs (BRO-1573) ride as top-level body fields next to {id, messages}
+  // because DefaultChatTransport merges per-call `sendMessage(_, {body})` there.
+  // Validate to the allowed sets — an unknown effort is dropped (never forwarded
+  // as `--effort` so the engine can't warn-and-fallback on a bad value).
+  const model = typeof b.model === "string" && b.model.trim() ? b.model.trim() : undefined;
+  const effort =
+    typeof b.effort === "string" && (EFFORT_LEVELS as readonly string[]).includes(b.effort)
+      ? (b.effort as EffortLevel)
+      : undefined;
+
+  return { threadId, text, model, effort };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────

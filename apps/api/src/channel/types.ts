@@ -9,6 +9,10 @@
 // A ChannelConnector is the only place that knows a provider's wire format.
 
 import type { RunPhase } from "@genesis/projection";
+// EffortLevel lives in @genesis/runner (it owns the claude argv); re-export so
+// channel consumers keep importing it from "./types" (single source of truth).
+export { EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
+import type { EffortLevel } from "@genesis/runner";
 
 /** Canonical inbound message — what every connector normalizes a request into. */
 export interface IncomingMessage {
@@ -16,6 +20,11 @@ export interface IncomingMessage {
   threadId: string;
   /** The user's text for this turn. */
   text: string;
+  /** Per-turn model override (claude alias: haiku|sonnet|opus|fable, or full id).
+   *  Omitted → the engine default (claude-opus-4-8[1m]). */
+  model?: string;
+  /** Per-turn extended-thinking effort (`--effort`). Omitted → engine default. */
+  effort?: EffortLevel;
 }
 
 /** Canonical outbound event — a live run transition or the final reply. */

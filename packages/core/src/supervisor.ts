@@ -15,11 +15,25 @@ import {
   StaticHostProvider,
 } from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
-import { type RunOptions, type RunResult, removeWorktree, runAgent } from "@genesis/runner";
+import {
+  type EffortLevel,
+  type RunOptions,
+  type RunResult,
+  removeWorktree,
+  runAgent,
+} from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, Turn, Workspace } from "./types";
 
 export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
+
+/** Per-turn overrides supplied by the channel (BRO-1573) — model + effort chosen
+ *  in the UI for THIS message. Override the constructor-level defaults; absent
+ *  fields fall back to the engine default. */
+export interface TurnOptions {
+  model?: string;
+  effort?: EffortLevel;
+}
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
  *  it; the print engine has none (control ops return not-supported). Keyed by
@@ -146,9 +160,10 @@ export class Supervisor {
     threadId: string,
     text: string,
     onState?: (state: RunState, event: AgentEvent) => void,
+    turnOpts?: TurnOptions,
   ): Promise<DispatchResult> {
     const prev = this.chains.get(threadId) ?? Promise.resolve();
-    const next = prev.catch(() => {}).then(() => this.runTurn(threadId, text, onState));
+    const next = prev.catch(() => {}).then(() => this.runTurn(threadId, text, onState, turnOpts));
     const guarded = next.catch(() => {});
     this.chains.set(threadId, guarded);
     // Compare-and-delete once this turn settles, unless a newer dispatch replaced
@@ -163,6 +178,7 @@ export class Supervisor {
     threadId: string,
     text: string,
     onState?: (state: RunState, event: AgentEvent) => void,
+    turnOpts?: TurnOptions,
   ): Promise<DispatchResult> {
     const session = await this.resolve(threadId);
     const workspace = (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
@@ -185,6 +201,9 @@ export class Supervisor {
         resumeSessionId: session.agentSessionId,
         host: lease.host,
         extraArgs: this.extraArgs,
+        // Per-turn model/effort (BRO-1573) override the constructor defaults.
+        model: turnOpts?.model,
+        effort: turnOpts?.effort,
         remoteCwd: lease.remoteCwd ?? this.remoteCwd,
         // Stable per-session worktree → reused across turns so claude --resume
         // finds its cwd-scoped session (multi-turn continuity on LocalHost).
