@@ -4,6 +4,8 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { ArrowUp } from "lucide-react";
 import { useState } from "react";
+import { Streamdown } from "streamdown";
+import "streamdown/styles.css";
 
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -107,9 +109,30 @@ export default function ChatPage() {
                             variant={isUser ? "default" : "muted"}
                             align={isUser ? "end" : "start"}
                           >
-                            <BubbleContent className="whitespace-pre-wrap">
-                              {text || (busy ? "…" : "")}
-                            </BubbleContent>
+                            {isUser ? (
+                              <BubbleContent className="whitespace-pre-wrap">{text}</BubbleContent>
+                            ) : (
+                              <BubbleContent>
+                                {text ? (
+                                  // streamdown parses INCOMPLETE markdown so partial
+                                  // fences/lists/bold don't break mid-stream. Themed via
+                                  // the shadcn/arcan-glass CSS vars in globals.css; the
+                                  // @source line there makes Tailwind emit its utilities.
+                                  // No code/math/mermaid plugins → pure-JS pipeline, no
+                                  // WASM in the standalone trace. First/last margins are
+                                  // collapsed so bubble padding stays even.
+                                  <Streamdown
+                                    className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                                    isAnimating={status === "streaming"}
+                                    animated
+                                  >
+                                    {text}
+                                  </Streamdown>
+                                ) : busy ? (
+                                  "…"
+                                ) : null}
+                              </BubbleContent>
+                            )}
                           </Bubble>
                         </MessageContent>
                       </Message>
