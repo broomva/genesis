@@ -205,7 +205,10 @@ export function ChatView({
         <TooltipProvider>
           <PromptInput onSubmit={handleSubmit} className="mx-auto w-full max-w-2xl">
             <PromptInputBody>
-              <PromptInputTextarea placeholder="Message the agent…" />
+              <PromptInputTextarea
+                placeholder="Message the agent…"
+                aria-label="Message the agent"
+              />
             </PromptInputBody>
             <PromptInputFooter>
               <PromptInputTools>
@@ -234,7 +237,11 @@ export function ChatView({
                   </PromptInputSelectContent>
                 </PromptInputSelect>
               </PromptInputTools>
-              <PromptInputSubmit status={status} />
+              {/* onStop → during a stream the button becomes type=button and
+                  aborts directly (no form submit/reset), so text typed mid-stream
+                  isn't wiped (P20 BRO-1573). handleSubmit's busy-guard remains the
+                  Enter-key fallback. */}
+              <PromptInputSubmit status={status} onStop={stop} />
             </PromptInputFooter>
           </PromptInput>
         </TooltipProvider>

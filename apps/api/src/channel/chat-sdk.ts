@@ -52,13 +52,19 @@ export function parseChatRequest(body: unknown): IncomingMessage {
 
   // Per-turn knobs (BRO-1573) ride as top-level body fields next to {id, messages}
   // because DefaultChatTransport merges per-call `sendMessage(_, {body})` there.
-  // Validate to the allowed sets — an unknown effort is dropped (never forwarded
-  // as `--effort` so the engine can't warn-and-fallback on a bad value).
-  const model = typeof b.model === "string" && b.model.trim() ? b.model.trim() : undefined;
-  const effort =
-    typeof b.effort === "string" && (EFFORT_LEVELS as readonly string[]).includes(b.effort)
-      ? (b.effort as EffortLevel)
-      : undefined;
+  // Validate to the allowed sets — an unknown effort/model is dropped (never
+  // forwarded so the engine can't warn-and-fallback on a bad value).
+  //
+  // model MUST start with an alphanumeric (claude aliases haiku|sonnet|opus|fable
+  // and full ids like claude-opus-4-8 all do): this rejects any dash-prefixed
+  // value so it can never be reparsed as a CLI flag in `--model`'s slot (P20
+  // BRO-1573 — the runner ALSO uses the equals-form as defense-in-depth).
+  const modelRaw = typeof b.model === "string" ? b.model.trim() : "";
+  const model = /^[A-Za-z0-9][\w.-]*$/.test(modelRaw) ? modelRaw : undefined;
+  const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
+  const effort = (EFFORT_LEVELS as readonly string[]).includes(effortRaw)
+    ? (effortRaw as EffortLevel)
+    : undefined;
 
   return { threadId, text, model, effort };
 }

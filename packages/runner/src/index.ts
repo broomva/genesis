@@ -118,9 +118,13 @@ function agentArgs(opts: RunOptions): string[] {
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.extraArgs) args.push(...opts.extraArgs);
   // Per-turn knobs LAST so they override any constructor-level extraArgs default
-  // (claude takes the last --model / --effort on the line).
-  if (opts.model) args.push("--model", opts.model);
-  if (opts.effort) args.push("--effort", opts.effort);
+  // (claude takes the last --model / --effort on the line). EQUALS-FORM
+  // (`--model=<v>`) so the value can never be parsed as a separate flag even if a
+  // caller smuggled a dash-prefixed string past validation — defense-in-depth on
+  // top of the parseChatRequest allowlist (P20 BRO-1573). Verified claude accepts
+  // both `--model=haiku` and `--effort=max`.
+  if (opts.model) args.push(`--model=${opts.model}`);
+  if (opts.effort) args.push(`--effort=${opts.effort}`);
   return args;
 }
 

@@ -42,3 +42,14 @@ export function modelToBody(model: string): string | undefined {
 export function effortToBody(effort: string): string | undefined {
   return effort === DEFAULT_EFFORT ? undefined : effort;
 }
+
+/** A persisted value is only honored if it still maps to a known option — a
+ *  stale value from a renamed/removed option would leave the controlled Radix
+ *  Select with no matching item (blank trigger). */
+export function isKnownModel(value: string | null): value is string {
+  return value != null && MODEL_OPTIONS.some((o) => o.value === value);
+}
+
+export function isKnownEffort(value: string | null): value is string {
+  return value != null && EFFORT_OPTIONS.some((o) => o.value === value);
+}

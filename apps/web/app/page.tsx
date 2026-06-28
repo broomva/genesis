@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ChatView } from "@/components/chat-view";
 import { ThreadDrawer } from "@/components/thread-drawer";
-import { DEFAULT_EFFORT, DEFAULT_MODEL } from "@/lib/chat-options";
+import { DEFAULT_EFFORT, DEFAULT_MODEL, isKnownEffort, isKnownModel } from "@/lib/chat-options";
 import { type ThreadSummary, fetchThreadMessages, fetchThreads } from "@/lib/threads";
 
 // localStorage keys — active thread (restore the conversation on reload) + the
@@ -33,9 +33,9 @@ export default function ChatPage() {
     if (!stored) localStorage.setItem(ACTIVE_KEY, id);
     setActiveThreadId(id);
     const m = localStorage.getItem(MODEL_KEY);
-    if (m) setModel(m);
+    if (isKnownModel(m)) setModel(m);
     const e = localStorage.getItem(EFFORT_KEY);
-    if (e) setEffort(e);
+    if (isKnownEffort(e)) setEffort(e);
   }, []);
 
   const onModelChange = useCallback((value: string) => {
