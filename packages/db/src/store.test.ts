@@ -76,6 +76,19 @@ describe("DrizzleStore (pglite) — Store contract", () => {
     expect(await store.findSessionsByPhase([])).toHaveLength(0);
     await store.close();
   });
+
+  test("listSessions returns every session ordered by createdAt (BRO-1567)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    const mk = (id: string, threadId: string, createdAt: string) =>
+      store.upsertSession({ id, workspaceId: "ws-1", threadId, phase: "idle", createdAt });
+    await mk("b", "t-b", "2026-02-01T00:00:00.000Z");
+    await mk("a", "t-a", "2026-01-01T00:00:00.000Z");
+    await mk("c", "t-c", "2026-03-01T00:00:00.000Z");
+    const all = await store.listSessions();
+    expect(all.map((s) => s.id)).toEqual(["a", "b", "c"]); // createdAt-ascending
+    await store.close();
+  });
 });
 
 describe("DrizzleStore (pglite) — FS-as-truth continuity", () => {

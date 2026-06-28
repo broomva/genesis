@@ -62,6 +62,11 @@ export class DrizzleStore implements Store {
     return r.map(toSession);
   }
 
+  async listSessions(): Promise<Session[]> {
+    const r = await this.db.select().from(sessions).orderBy(sessions.createdAt);
+    return r.map(toSession);
+  }
+
   async upsertSession(s: Session): Promise<Session> {
     const row = {
       id: s.id,

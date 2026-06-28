@@ -11,6 +11,9 @@ export interface Store {
   /** Sessions whose stored phase is any of `phases`. Used for boot-time
    *  reconciliation of turns interrupted by a process crash (BRO-1530). */
   findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
+  /** Every session, for the thread-list UI (BRO-1567). Order is unspecified —
+   *  callers (Supervisor.listThreads) sort for display. */
+  listSessions(): Promise<Session[]>;
   addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
   turnsForSession(sessionId: string): Promise<Turn[]>;
 }
@@ -43,6 +46,9 @@ export class InMemoryStore implements Store {
   async findSessionsByPhase(phases: readonly Session["phase"][]) {
     const want = new Set(phases);
     return [...this.sessions.values()].filter((s) => want.has(s.phase)).map((s) => ({ ...s }));
+  }
+  async listSessions() {
+    return [...this.sessions.values()].map((s) => ({ ...s }));
   }
   async addTurn(t: Omit<Turn, "id" | "createdAt">) {
     const turn: Turn = { ...t, id: id("turn"), createdAt: now() };

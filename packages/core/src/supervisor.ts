@@ -76,6 +76,16 @@ export interface DispatchResult {
   phase: RunState["phase"];
 }
 
+/** One row of the thread-list UI (BRO-1567): enough to render + resume a thread
+ *  without loading its full transcript. `lastText` is the most-recent turn's text
+ *  (any role) for a drawer preview; undefined for a never-run thread. */
+export interface ThreadSummary {
+  threadId: string;
+  phase: Session["phase"];
+  createdAt: string;
+  lastText?: string;
+}
+
 export class Supervisor {
   private readonly store: Store;
   private readonly run: RunnerFn;
@@ -240,6 +250,28 @@ export class Supervisor {
   async history(threadId: string): Promise<Turn[]> {
     const s = await this.store.findSessionByThread(threadId);
     return s ? this.store.turnsForSession(s.id) : [];
+  }
+
+  /** Every thread, newest-first, for the PWA thread drawer (BRO-1567). Reads the
+   *  last turn per session for a preview — N+1 over sessions, fine at single-user
+   *  scale (one owner, a handful of threads); revisit with a JOIN if it grows. */
+  async listThreads(): Promise<ThreadSummary[]> {
+    const sessions = await this.store.listSessions();
+    const summaries = await Promise.all(
+      sessions.map(async (s): Promise<ThreadSummary> => {
+        const turns = await this.store.turnsForSession(s.id);
+        return {
+          threadId: s.threadId,
+          phase: s.phase,
+          createdAt: s.createdAt,
+          lastText: turns.at(-1)?.text,
+        };
+      }),
+    );
+    // Newest-first by createdAt (ISO strings sort lexicographically).
+    return summaries.sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
   }
 
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
