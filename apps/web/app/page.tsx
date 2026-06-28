@@ -106,6 +106,7 @@ export default function ChatPage() {
             initialMessages={initialMessages}
             onActivity={onActivity}
             onMenuClick={() => setDrawerOpen(true)}
+            onNewThread={newThread}
             model={model}
             effort={effort}
             onModelChange={onModelChange}
