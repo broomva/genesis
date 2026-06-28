@@ -42,7 +42,11 @@ export default function RootLayout({
       lang="en"
       className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="bg-background text-foreground min-h-full flex flex-col">
+      {/* h-dvh (dynamic viewport) so the chat column reaches the PHYSICAL bottom
+          under viewport-fit=cover — `min-h-full` (= layout viewport, excludes the
+          iOS home-indicator inset) left a dead band below the composer (BRO-1582).
+          overflow-hidden: the chat manages its own scroll regions. */}
+      <body className="bg-background text-foreground h-dvh overflow-hidden">
         {children}
         <ServiceWorker />
       </body>
