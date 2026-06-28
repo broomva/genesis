@@ -32,7 +32,11 @@ export interface AgentMessage {
 export interface PartialStreamEvent {
   type: string;
   index?: number;
-  delta?: { type?: string; text?: string; thinking?: string };
+  // `estimated_tokens` rides on thinking_delta — a running count of the model's
+  // thinking budget. Under subscription/OAuth auth the `thinking` text is redacted
+  // to "" (only signature + this count come through), so it is the ONLY usable
+  // thinking signal on the VPS (BRO-1574).
+  delta?: { type?: string; text?: string; thinking?: string; estimated_tokens?: number };
   content_block?: { type?: string };
 }
 
@@ -121,6 +125,14 @@ export function streamTextDelta(ev: PartialStreamEvent): string | undefined {
 export function streamThinkingDelta(ev: PartialStreamEvent): string | undefined {
   return ev.type === "content_block_delta" && ev.delta?.type === "thinking_delta"
     ? ev.delta.thinking
+    : undefined;
+}
+
+/** The running thinking-token estimate on a `thinking_delta`, else undefined.
+ *  The usable thinking signal when the prose is redacted (BRO-1574). */
+export function streamThinkingTokens(ev: PartialStreamEvent): number | undefined {
+  return ev.type === "content_block_delta" && ev.delta?.type === "thinking_delta"
+    ? ev.delta.estimated_tokens
     : undefined;
 }
 

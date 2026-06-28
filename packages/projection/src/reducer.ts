@@ -16,6 +16,7 @@ import {
   streamBlockStart,
   streamTextDelta,
   streamThinkingDelta,
+  streamThinkingTokens,
   textBlocks,
   toolUses,
 } from "./parser";
@@ -28,8 +29,14 @@ export interface RunState {
   lastText?: string;
   /** Accumulated extended-thinking text from partial `thinking_delta` events
    *  (BRO-1571). Surfaced separately from `lastText` so the UI can render it in a
-   *  collapsible Reasoning panel rather than inline with the answer. */
+   *  collapsible Reasoning panel rather than inline with the answer. NOTE: under
+   *  subscription/OAuth auth this is always "" (the prose is redacted) — use
+   *  `thinkingTokens` as the is-thinking signal instead (BRO-1574). */
   reasoning?: string;
+  /** Max thinking-token estimate seen this turn (BRO-1574). >0 ⇒ the model did
+   *  extended thinking, even when the prose is redacted. The basis for the
+   *  client's "Thought · ~N tokens" indicator. */
+  thinkingTokens?: number;
   turns: number;
   pendingQuestion?: string;
   error?: string;
@@ -106,9 +113,20 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           lastText: (state.lastText ?? "") + textDelta,
         };
       }
+      // Capture the token estimate INDEPENDENTLY of the prose (P20 BRO-1574): the
+      // prose is usually redacted to "" under subscription auth, and a future
+      // thinking_delta could carry only estimated_tokens with no `thinking` key —
+      // so the is-thinking signal must not hinge on the prose being present.
       const thinkingDelta = streamThinkingDelta(ev);
-      if (thinkingDelta !== undefined) {
-        return { ...state, sessionId, reasoning: (state.reasoning ?? "") + thinkingDelta };
+      const thinkingTokens = streamThinkingTokens(ev);
+      if (thinkingDelta !== undefined || thinkingTokens !== undefined) {
+        return {
+          ...state,
+          sessionId,
+          phase: "running",
+          reasoning: (state.reasoning ?? "") + (thinkingDelta ?? ""),
+          thinkingTokens: Math.max(state.thinkingTokens ?? 0, thinkingTokens ?? 0),
+        };
       }
       // message_start / content_block_stop / message_delta / message_stop — keep
       // the run alive, capture any session id, no text change.

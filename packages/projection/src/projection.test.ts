@@ -265,6 +265,32 @@ describe("projection reducer — token streaming (BRO-1571)", () => {
     expect(s.reasoning).toBe("let me think"); // preserved
   });
 
+  test("thinking_delta captures max estimated_tokens as the is-thinking signal (BRO-1574)", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(
+      s,
+      sd({ type: "content_block_start", index: 0, content_block: { type: "thinking" } }),
+    );
+    s = reduce(
+      s,
+      sd({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "", estimated_tokens: 50 },
+      }),
+    );
+    s = reduce(
+      s,
+      sd({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "", estimated_tokens: 150 },
+      }),
+    );
+    expect(s.thinkingTokens).toBe(150); // max, the indicator basis
+    expect(s.reasoning).toBe(""); // prose redacted under subscription auth
+  });
+
   test("a new text block resets lastText so blocks render separately", () => {
     let s = reduce(initialState, { type: "system", session_id: "s" });
     s = reduce(s, sd({ type: "content_block_start", index: 0, content_block: { type: "text" } }));

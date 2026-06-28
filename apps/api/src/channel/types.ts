@@ -27,10 +27,13 @@ export interface IncomingMessage {
   effort?: EffortLevel;
 }
 
-/** Canonical outbound event — a live run transition or the final reply. */
+/** Canonical outbound event — a live run transition or the final reply.
+ *  `reasoning` is a short human-readable thinking INDICATOR note (BRO-1574) — not
+ *  verbatim chain-of-thought (redacted under subscription auth); the connector
+ *  emits it once as AI-SDK reasoning parts before the answer text. */
 export type OutgoingEvent =
-  | { kind: "phase"; phase: RunPhase; text?: string }
-  | { kind: "reply"; phase: RunPhase; text: string }
+  | { kind: "phase"; phase: RunPhase; text?: string; reasoning?: string }
+  | { kind: "reply"; phase: RunPhase; text: string; reasoning?: string }
   | { kind: "error"; message: string };
 
 /** Translates a provider's wire format ↔ the canonical contract. */

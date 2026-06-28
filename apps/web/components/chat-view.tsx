@@ -21,6 +21,7 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
+import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Message, MessageContent } from "@/components/ui/message";
@@ -40,6 +41,15 @@ import { cn } from "@/lib/utils";
 function messageText(message: UIMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
+    .map((part) => (part as { text: string }).text)
+    .join("");
+}
+
+// The reasoning INDICATOR note (BRO-1574) — joined from reasoning parts. Empty
+// when the turn did no extended thinking (effort off / low).
+function messageReasoning(message: UIMessage): string {
+  return message.parts
+    .filter((part) => part.type === "reasoning")
     .map((part) => (part as { text: string }).text)
     .join("");
 }
@@ -154,6 +164,7 @@ export function ChatView({
                 messages.map((message) => {
                   const isUser = message.role === "user";
                   const text = messageText(message);
+                  const reasoning = isUser ? "" : messageReasoning(message);
                   return (
                     <MessageScrollerItem
                       key={message.id}
@@ -162,6 +173,7 @@ export function ChatView({
                     >
                       <Message align={isUser ? "end" : "start"}>
                         <MessageContent>
+                          {reasoning ? <ThinkingIndicator note={reasoning} /> : null}
                           <Bubble
                             variant={isUser ? "default" : "muted"}
                             align={isUser ? "end" : "start"}

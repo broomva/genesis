@@ -11,6 +11,16 @@ import { PAGE } from "./ui";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
+/** Build the thinking INDICATOR note from the token estimate (BRO-1574). The
+ *  reasoning prose is redacted under subscription/OAuth auth, so the honest
+ *  surface is "the model did extended thinking, ~N tokens worth". Undefined when
+ *  no thinking happened (effort off / low). */
+function thinkingNote(tokens: number | undefined): string | undefined {
+  return tokens && tokens > 0
+    ? `Extended thinking · ~${tokens} tokens (reasoning content is private on this deployment)`
+    : undefined;
+}
+
 export interface BuildOpts {
   workspaceRoot: string;
   extraArgs?: string[];
@@ -139,6 +149,7 @@ export function build(opts: BuildOpts) {
   const chat = new ChatSdkConnector(() => ({
     messageId: crypto.randomUUID(),
     newTextId: () => crypto.randomUUID(),
+    newReasoningId: () => crypto.randomUUID(),
   }));
   app.post("/api/chat", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
@@ -153,7 +164,15 @@ export function build(opts: BuildOpts) {
         incoming.threadId,
         incoming.text,
         (state) => {
-          emit({ kind: "phase", phase: state.phase, text: state.lastText });
+          // reasoning note rides the phase events; the connector emits it once as
+          // AI-SDK reasoning parts before the answer text (BRO-1574). The prose is
+          // redacted under subscription auth, so this is a token-based indicator.
+          emit({
+            kind: "phase",
+            phase: state.phase,
+            text: state.lastText,
+            reasoning: thinkingNote(state.thinkingTokens),
+          });
         },
         { model: incoming.model, effort: incoming.effort },
       );

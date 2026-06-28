@@ -10,10 +10,12 @@ import {
 } from "./chat-sdk";
 import type { OutgoingEvent } from "./types";
 
-/** Deterministic text ids: t1, t2, … so multi-part assertions are stable. */
+/** Deterministic ids: t1, t2, … (text) and r1, r2, … (reasoning) so multi-part
+ *  assertions are stable. */
 function deterministicIds() {
   let n = 0;
-  return { messageId: "m1", newTextId: () => `t${++n}` };
+  let r = 0;
+  return { messageId: "m1", newTextId: () => `t${++n}`, newReasoningId: () => `r${++r}` };
 }
 
 async function collectFrom(gen: AsyncIterable<OutgoingEvent>): Promise<UiStreamPart[]> {
@@ -140,6 +142,31 @@ describe("toUiStreamParts — canonical events → UI message stream", () => {
     expect(deltas).toEqual(["Thinking", " about it", " — done."]);
   });
 
+  test("emits a one-shot reasoning part BEFORE the first text (BRO-1574)", async () => {
+    const parts = await collect([
+      { kind: "phase", phase: "running", reasoning: "Extended thinking · ~150 tokens" },
+      { kind: "phase", phase: "running", text: "The answer" },
+      { kind: "reply", phase: "done", text: "The answer is 42." },
+    ]);
+    expect(parts.slice(0, 5).map((p) => p.type)).toEqual([
+      "start",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end",
+      "text-start",
+    ]);
+    expect((parts.find((p) => p.type === "reasoning-delta") as { delta: string }).delta).toBe(
+      "Extended thinking · ~150 tokens",
+    );
+    // emitted exactly once even though reasoning rode multiple phase events
+    expect(parts.filter((p) => p.type === "reasoning-start")).toHaveLength(1);
+  });
+
+  test("no reasoning part when the turn did no thinking", async () => {
+    const parts = await collect([{ kind: "reply", phase: "done", text: "hi" }]);
+    expect(parts.some((p) => p.type === "reasoning-start")).toBe(false);
+  });
+
   test("NON-prefix blocks (real multi-turn lastText) render as SEPARATE parts, never concatenated (HIGH-1)", async () => {
     // the reducer's lastText is the latest text BLOCK — successive blocks are unrelated.
     const parts = await collect([
@@ -232,7 +259,11 @@ describe("uiMessageStreamResponse — full SSE wire output", () => {
     async function* gen() {
       yield { kind: "reply", phase: "done", text: "hi" } as OutgoingEvent;
     }
-    const res = uiMessageStreamResponse(gen(), { messageId: "m", newTextId: () => "t" });
+    const res = uiMessageStreamResponse(gen(), {
+      messageId: "m",
+      newTextId: () => "t",
+      newReasoningId: () => "r",
+    });
     expect(res.headers.get("x-vercel-ai-ui-message-stream")).toBe("v1");
     const body = await res.text();
     expect(body).toBe(
@@ -255,6 +286,7 @@ describe("uiMessageStreamResponse — full SSE wire output", () => {
     const body = await uiMessageStreamResponse(gen(), {
       messageId: "m",
       newTextId: () => "t",
+      newReasoningId: () => "r",
     }).text();
     // text-end precedes error (no dangling open part), and the stream still terminates.
     expect(body.indexOf('"type":"text-end"')).toBeLessThan(body.indexOf('"type":"error"'));
