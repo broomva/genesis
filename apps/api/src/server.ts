@@ -95,8 +95,9 @@ export function build(opts: BuildOpts) {
   });
 
   // Thread LIST for the PWA drawer (BRO-1567). Same bearer gate as the rest —
-  // it exposes thread metadata + last-turn previews. Registered before the
-  // `:id` route so the static path is unambiguous.
+  // it exposes thread metadata + last-turn previews. (Hono matches the static
+  // `/threads` ahead of the `/threads/:id` param route regardless of order, so
+  // the two never collide.)
   app.get("/threads", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     return c.json({ threads: await supervisor.listThreads() });

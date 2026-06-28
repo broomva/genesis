@@ -21,13 +21,22 @@ export async function proxyGenesisGetJson(path: string, req: Request): Promise<R
       signal: req.signal,
     });
     // Pass the raw body through rather than re-serializing, so the response is
-    // byte-identical to what the engine produced.
+    // byte-identical to what the engine produced. Mirror the upstream
+    // content-type for fidelity (defaulting to JSON, which is all /threads* emit).
     const body = await upstream.text();
     return new Response(body, {
       status: upstream.status,
-      headers: { "content-type": "application/json; charset=utf-8" },
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+      },
     });
   } catch (err) {
+    // A client disconnect aborts the fetch (routine: thread switch / navigation
+    // triggers the caller's AbortController). That is NOT an engine outage — skip
+    // the unreachable alarm and return a client-closed status the browser ignores.
+    if (err instanceof Error && err.name === "AbortError") {
+      return new Response(null, { status: 499 });
+    }
     const detail = err instanceof Error ? err.message : "upstream fetch failed";
     console.error(`[bff] genesis unreachable at ${GENESIS_URL}: ${detail}`);
     return Response.json({ error: "agent engine unreachable" }, { status: 502 });

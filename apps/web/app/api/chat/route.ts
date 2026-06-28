@@ -64,6 +64,11 @@ export async function POST(req: Request): Promise<Response> {
       duplex: "half",
     });
   } catch (err) {
+    // A client disconnect aborts the fetch — normal, not an engine outage; the
+    // browser is already gone, so skip the unreachable alarm.
+    if (err instanceof Error && err.name === "AbortError") {
+      return new Response(null, { status: 499 });
+    }
     // Log the internal detail (host:port, cause) server-side only; the browser
     // gets a generic message so the upstream address never leaks to the client.
     const detail = err instanceof Error ? err.message : "upstream fetch failed";
