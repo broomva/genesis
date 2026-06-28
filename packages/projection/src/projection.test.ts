@@ -3,9 +3,13 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type AgentEvent,
+  type PartialStreamEvent,
   parseLine,
   parseStream,
   sessionIdOf,
+  streamBlockStart,
+  streamTextDelta,
+  streamThinkingDelta,
   textBlocks,
   toolUses,
 } from "./parser";
@@ -22,6 +26,27 @@ describe("parser", () => {
     expect(parseLine('{"type":"assistant","message":{"content":[]}}')?.type).toBe("assistant");
     expect(parseLine('{"type":"user","message":{"content":[]}}')?.type).toBe("user");
     expect(parseLine('{"type":"result","subtype":"success"}')?.type).toBe("result");
+    expect(
+      parseLine('{"type":"stream_event","event":{"type":"message_start"},"session_id":"s"}')?.type,
+    ).toBe("stream_event"); // BRO-1571 partial-message channel
+  });
+
+  test("stream_event delta accessors extract text / thinking / block-start", () => {
+    const td = parseLine(
+      '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}',
+    );
+    const tk = parseLine(
+      '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}',
+    );
+    const bs = parseLine(
+      '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}',
+    );
+    if (td?.type !== "stream_event" || tk?.type !== "stream_event" || bs?.type !== "stream_event")
+      throw new Error("expected stream_event");
+    expect(streamTextDelta(td.event)).toBe("Hel");
+    expect(streamThinkingDelta(td.event)).toBeUndefined();
+    expect(streamThinkingDelta(tk.event)).toBe("hmm");
+    expect(streamBlockStart(bs.event)).toBe("text");
   });
 
   test("rejects blanks, malformed JSON, and unknown types", () => {
@@ -156,5 +181,112 @@ describe("projection reducer — hardened edges (post-P20)", () => {
       },
     });
     expect(s.pendingQuestion).toBe("A? | B?");
+  });
+});
+
+describe("projection reducer — token streaming (BRO-1571)", () => {
+  const sd = (event: PartialStreamEvent): AgentEvent => ({
+    type: "stream_event",
+    event,
+    session_id: "s",
+  });
+
+  test("text_delta events accumulate lastText incrementally", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, sd({ type: "content_block_start", index: 0, content_block: { type: "text" } }));
+    expect(s.lastText).toBe("");
+    s = reduce(
+      s,
+      sd({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hel" } }),
+    );
+    expect(s.lastText).toBe("Hel"); // streams, not all-at-once
+    s = reduce(
+      s,
+      sd({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } }),
+    );
+    expect(s.lastText).toBe("Hello");
+    expect(s.phase).toBe("running");
+  });
+
+  test("the final complete assistant event does not double the streamed text", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, sd({ type: "content_block_start", index: 0, content_block: { type: "text" } }));
+    s = reduce(
+      s,
+      sd({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "Hello world" },
+      }),
+    );
+    // Complete assistant message arrives with the full text == accumulated.
+    s = reduce(s, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    });
+    expect(s.lastText).toBe("Hello world");
+    expect(s.turns).toBe(1); // assistant stays the turn-count authority
+    s = reduce(s, { type: "result", subtype: "success", result: "Hello world" });
+    expect(s.phase).toBe("done");
+    expect(s.lastText).toBe("Hello world"); // no duplication
+  });
+
+  test("thinking_delta accumulates into reasoning, separate from lastText", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(
+      s,
+      sd({ type: "content_block_start", index: 0, content_block: { type: "thinking" } }),
+    );
+    s = reduce(
+      s,
+      sd({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "let me " },
+      }),
+    );
+    s = reduce(
+      s,
+      sd({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "think" },
+      }),
+    );
+    expect(s.reasoning).toBe("let me think");
+    expect(s.lastText).toBeUndefined(); // reasoning never leaks into the answer
+    // then the visible answer streams in its own block
+    s = reduce(s, sd({ type: "content_block_start", index: 1, content_block: { type: "text" } }));
+    s = reduce(
+      s,
+      sd({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Done." } }),
+    );
+    expect(s.lastText).toBe("Done.");
+    expect(s.reasoning).toBe("let me think"); // preserved
+  });
+
+  test("a new text block resets lastText so blocks render separately", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, sd({ type: "content_block_start", index: 0, content_block: { type: "text" } }));
+    s = reduce(
+      s,
+      sd({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "first" } }),
+    );
+    expect(s.lastText).toBe("first");
+    s = reduce(s, sd({ type: "content_block_start", index: 1, content_block: { type: "text" } }));
+    expect(s.lastText).toBe(""); // reset boundary — connector opens a new text part
+    s = reduce(
+      s,
+      sd({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "second" } }),
+    );
+    expect(s.lastText).toBe("second");
+  });
+
+  test("non-text stream events keep the run alive and capture session id", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, sd({ type: "message_start" }));
+    s = reduce(s, sd({ type: "message_stop" }));
+    expect(s.phase).toBe("running");
+    expect(s.sessionId).toBe("s");
   });
 });
