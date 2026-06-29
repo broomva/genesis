@@ -108,7 +108,10 @@ export function build(opts: BuildOpts) {
       case "unarchive":
         return c.json(await supervisor.archiveThread(threadId, false));
       case "rename":
-        return c.json(await supervisor.setTitle(threadId, body.title ?? ""));
+        // Validate at the boundary — body is only type-cast, so a non-string
+        // title (e.g. {title: 1}) would otherwise reach setTitle().trim() and throw.
+        if (typeof body.title !== "string") return c.json({ error: "title must be a string" }, 400);
+        return c.json(await supervisor.setTitle(threadId, body.title));
       default:
         return c.json({ error: `unknown action: ${body.action ?? "(none)"}` }, 400);
     }

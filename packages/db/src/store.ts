@@ -102,10 +102,13 @@ export class DrizzleStore implements Store {
   }
 
   async deleteSession(id: string): Promise<void> {
-    // No FK cascade (session_id is plain text) — remove turns first, then the
-    // session, so a crash mid-delete never orphans turns behind a live session.
-    await this.db.delete(turns).where(eq(turns.sessionId, id));
-    await this.db.delete(sessions).where(eq(sessions.id, id));
+    // No FK cascade (session_id is plain text) — remove turns then the session,
+    // atomically in one transaction so a crash mid-delete can't leave a session
+    // with 0 turns (or orphaned turns). pglite + postgres-js both support it.
+    await this.db.transaction(async (tx: DrizzleDb) => {
+      await tx.delete(turns).where(eq(turns.sessionId, id));
+      await tx.delete(sessions).where(eq(sessions.id, id));
+    });
   }
 
   async addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn> {

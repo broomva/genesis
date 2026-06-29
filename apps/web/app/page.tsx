@@ -1,7 +1,7 @@
 "use client";
 
 import type { UIMessage } from "ai";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChatView } from "@/components/chat-view";
 import { ThreadDrawer } from "@/components/thread-drawer";
@@ -55,9 +55,47 @@ export default function ChatPage() {
     localStorage.setItem(EFFORT_KEY, value);
   }, []);
 
-  const refreshThreads = useCallback(async () => {
-    setThreads(await fetchThreads());
+  // Optimistic-mutation overrides (BRO-1592, P20 F14/F15/F16). archive/rename
+  // write on the server BEHIND the per-thread dispatch chain — so for a thread
+  // that is itself running, the write lands only after the turn ends. Meanwhile
+  // the freshness poll full-replaces `threads` with server truth, which would
+  // revert the optimistic update for the whole turn. So: hold a per-thread
+  // override, re-apply it on every refresh, and self-clear it once the server
+  // confirms (or the mutation fails).
+  const pendingRef = useRef<Map<string, { archived?: boolean; title?: string; deleted?: boolean }>>(
+    new Map(),
+  );
+
+  const reconcile = useCallback((server: ThreadSummary[]): ThreadSummary[] => {
+    const pend = pendingRef.current;
+    for (const [id, ov] of [...pend]) {
+      const row = server.find((t) => t.threadId === id);
+      if (ov.deleted) {
+        if (!row) pend.delete(id); // delete confirmed once the row is gone
+      } else if (
+        row &&
+        (ov.archived === undefined || row.archived === ov.archived) &&
+        (ov.title === undefined || (row.title ?? "") === (ov.title ?? ""))
+      ) {
+        pend.delete(id); // server caught up with the optimistic value
+      }
+    }
+    return server
+      .filter((t) => !pend.get(t.threadId)?.deleted)
+      .map((t) => {
+        const ov = pend.get(t.threadId);
+        if (!ov) return t;
+        return {
+          ...t,
+          ...(ov.archived !== undefined ? { archived: ov.archived } : {}),
+          ...("title" in ov ? { title: ov.title } : {}),
+        };
+      });
   }, []);
+
+  const refreshThreads = useCallback(async () => {
+    setThreads(reconcile(await fetchThreads()));
+  }, [reconcile]);
 
   useEffect(() => {
     void refreshThreads();
@@ -100,8 +138,11 @@ export default function ChatPage() {
 
   const onArchive = useCallback(
     async (threadId: string, archived: boolean) => {
+      const pend = pendingRef.current;
+      pend.set(threadId, { ...pend.get(threadId), archived });
       setThreads((prev) => prev.map((t) => (t.threadId === threadId ? { ...t, archived } : t)));
-      await archiveThread(threadId, archived);
+      const ok = await archiveThread(threadId, archived);
+      if (!ok) pend.delete(threadId); // drop the override → next refresh shows truth
       void refreshThreads();
     },
     [refreshThreads],
@@ -109,10 +150,12 @@ export default function ChatPage() {
 
   const onRename = useCallback(
     async (threadId: string, title: string) => {
-      setThreads((prev) =>
-        prev.map((t) => (t.threadId === threadId ? { ...t, title: title || undefined } : t)),
-      );
-      await renameThread(threadId, title);
+      const next = title || undefined;
+      const pend = pendingRef.current;
+      pend.set(threadId, { ...pend.get(threadId), title: next });
+      setThreads((prev) => prev.map((t) => (t.threadId === threadId ? { ...t, title: next } : t)));
+      const ok = await renameThread(threadId, title);
+      if (!ok) pend.delete(threadId);
       void refreshThreads();
     },
     [refreshThreads],
@@ -120,11 +163,17 @@ export default function ChatPage() {
 
   const onDelete = useCallback(
     async (threadId: string) => {
+      // Await the delete BEFORE switching away / removing the row (P20 F14): a
+      // failed delete must not strand the user on a minted thread while the old
+      // one resurrects on the next refresh.
+      const ok = await deleteThread(threadId);
+      if (!ok) {
+        void refreshThreads();
+        return;
+      }
+      pendingRef.current.set(threadId, { deleted: true });
       setThreads((prev) => prev.filter((t) => t.threadId !== threadId));
-      // If the active thread is deleted, drop to a fresh empty one so the chat
-      // pane never points at a now-gone transcript.
       if (threadId === activeThreadId) newThread();
-      await deleteThread(threadId);
       void refreshThreads();
     },
     [activeThreadId, newThread, refreshThreads],

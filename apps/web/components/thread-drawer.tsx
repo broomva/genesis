@@ -37,6 +37,17 @@ import { cn } from "@/lib/utils";
 // DS canon (SKILL.md authoritative, BRO-1592): halts read in accent-blue ("Needs
 // you"), not red; reserve danger for true failures. So awaiting → blue-accent,
 // blocked ("Stuck") → warning.
+// DS plain voice for the status dot's accessible name (SKILL.md: system enums
+// are a developer surface; users — incl. screen-reader users — get plain
+// language). The dot conveys status by colour, so this is its text alternative.
+const PHASE_LABEL: Record<ThreadPhase, string> = {
+  idle: "Queued",
+  running: "Running",
+  awaiting: "Needs you",
+  blocked: "Stuck",
+  done: "Done",
+};
+
 const PHASE_DOT: Record<Exclude<ThreadPhase, "running">, string> = {
   awaiting: "bg-[var(--bv-blue-accent)]",
   blocked: "bg-[var(--bv-warning)]",
@@ -95,11 +106,11 @@ function ThreadRow({
         {/* The dot carries phase by color — give it an accessible name so status
             isn't conveyed by color alone (WCAG 1.4.1). */}
         {t.phase === "running" ? (
-          <span className="bv-dot-live shrink-0" role="img" aria-label="running" />
+          <span className="bv-dot-live shrink-0" role="img" aria-label={PHASE_LABEL.running} />
         ) : (
           <span
             role="img"
-            aria-label={t.phase}
+            aria-label={PHASE_LABEL[t.phase] ?? PHASE_LABEL.idle}
             className={cn("size-1.5 shrink-0 rounded-full", PHASE_DOT[t.phase] ?? PHASE_DOT.idle)}
           />
         )}
@@ -112,7 +123,10 @@ function ThreadRow({
             type="button"
             aria-label="Conversation actions"
             className={cn(
-              "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors",
+              // At-rest contrast must clear the WCAG 1.4.11 3:1 non-text floor —
+              // /80 (not /60) keeps the glyph legible while still quiet (DS: no
+              // hover-only affordances, so it's always visible).
+              "flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 transition-colors",
               "hover:bg-[var(--bv-frost-8)] hover:text-foreground focus-visible:text-foreground",
               "data-[state=open]:bg-[var(--bv-frost-8)] data-[state=open]:text-foreground",
               "[@media(pointer:coarse)]:size-9",
@@ -270,7 +284,8 @@ export function ThreadDrawer({
                 type="button"
                 onClick={() => setQuery("")}
                 aria-label="Clear search"
-                className="text-muted-foreground hover:text-foreground -mr-1 inline-flex shrink-0 items-center justify-center rounded-md p-0.5"
+                // ≥24px hit area (WCAG 2.5.8), bumped to 44px on coarse pointers.
+                className="text-muted-foreground hover:text-foreground -mr-1.5 inline-flex size-6 shrink-0 items-center justify-center rounded-md [@media(pointer:coarse)]:size-11"
               >
                 <X className="size-3.5" />
               </button>
@@ -306,7 +321,9 @@ export function ThreadDrawer({
                 <Archive className="size-3" />
                 {showArchived ? "Hide" : "Show"} archived ({archivedCount})
               </button>
-              {showArchived ? (
+              {/* A query reveals archived matches even when collapsed — otherwise
+                  searching for a thread that's been archived would find nothing. */}
+              {showArchived || query.trim() ? (
                 <ul className="mt-1 flex flex-col gap-1">
                   {archived.map((t) => (
                     <li key={t.threadId}>
