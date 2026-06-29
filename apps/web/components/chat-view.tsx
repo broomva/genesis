@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
-import { PanelLeft, Paperclip } from "lucide-react";
+import { ArrowUp, PanelLeft, Paperclip, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
@@ -62,7 +62,7 @@ async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> 
       const name = f.filename ?? "attachment";
       const isText = (f.mediaType ?? "").startsWith("text/") || TEXT_FILE_RE.test(name);
       if (!isText) {
-        return `\n\n[attachment "${name}" (${f.mediaType || "binary"}) omitted — only text/code files are inlined on this deployment]`;
+        return `\n\n[attachment "${name}" (${f.mediaType || "binary"}) omitted (only text/code files are inlined on this deployment)]`;
       }
       try {
         let content = await (await fetch(f.url)).text();
@@ -133,7 +133,11 @@ function ChatLoader() {
 // read in the danger hue, no dot.
 function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"] }) {
   if (status === "error") {
-    return <span className="text-[var(--bv-danger)] text-xs">Something went wrong</span>;
+    return (
+      <span role="alert" className="text-[var(--bv-danger)] text-xs">
+        Something went wrong
+      </span>
+    );
   }
   const busy = status === "submitted" || status === "streaming";
   if (!busy) return null;
@@ -239,13 +243,13 @@ export function ChatView({
           type="button"
           size="icon-sm"
           variant="ghost"
-          className="md:hidden"
+          className="md:hidden [@media(pointer:coarse)]:size-11"
           onClick={onMenuClick}
           aria-label="Open conversations"
         >
           <PanelLeft className="size-4" />
         </Button>
-        <span className="text-foreground text-[0.95rem] font-semibold tracking-tight">Genesis</span>
+        <span className="text-foreground text-[0.95rem] font-medium tracking-tight">Genesis</span>
         <span className="text-muted-foreground hidden text-sm sm:inline">agent chat</span>
         <div className="ml-auto flex items-center gap-2">
           <RunningStatus status={status} />
@@ -314,7 +318,9 @@ export function ChatView({
                 })
               )}
               {error ? (
-                <div className="text-[var(--bv-danger)] text-sm">{error.message}</div>
+                <div role="alert" className="text-[var(--bv-danger)] text-sm">
+                  {error.message}
+                </div>
               ) : null}
             </MessageScrollerContent>
           </MessageScrollerViewport>
@@ -333,9 +339,9 @@ export function ChatView({
                 type="button"
                 onClick={() => setNotice(null)}
                 aria-label="Dismiss"
-                className="hover:text-foreground shrink-0 transition-colors"
+                className="hover:text-foreground -m-1 inline-flex shrink-0 items-center justify-center rounded-md p-1 transition-colors [@media(pointer:coarse)]:size-11"
               >
-                ✕
+                <X className="size-3.5" />
               </button>
             </div>
           ) : null}
@@ -348,7 +354,7 @@ export function ChatView({
             >
               <PromptInputBody>
                 <PromptInputTextarea
-                  placeholder="Message the agent…  (/help for commands)"
+                  placeholder="Message the agent… (/help for commands)"
                   aria-label="Message the agent"
                 />
               </PromptInputBody>
@@ -387,16 +393,17 @@ export function ChatView({
                     </PromptInputSelectContent>
                   </PromptInputSelect>
                 </PromptInputTools>
-                {/* DS send — a circular primary-fill button (hover lightens one
-                  step to ink-hover). onStop → during a stream the button becomes
-                  type=button and aborts directly (no form submit/reset), so text
-                  typed mid-stream isn't wiped (P20 BRO-1573). handleSubmit's
-                  busy-guard remains the Enter-key fallback. */}
-                <PromptInputSubmit
-                  status={status}
-                  onStop={stop}
-                  className="size-9 rounded-full hover:bg-[var(--bv-ink-hover)]"
-                />
+                {/* DS send — a circular primary-fill button with the DS up-arrow at
+                  rest (the button inherits the ink-hover lighten from the default
+                  variant). The component swaps in its own spinner/stop/error glyphs
+                  for the in-flight states, so only the idle icon is overridden.
+                  onStop → during a stream the button becomes type=button and aborts
+                  directly (no form submit/reset), so text typed mid-stream isn't
+                  wiped (P20 BRO-1573). handleSubmit's busy-guard is the Enter-key
+                  fallback. */}
+                <PromptInputSubmit status={status} onStop={stop} className="size-9 rounded-full">
+                  {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
+                </PromptInputSubmit>
               </PromptInputFooter>
             </PromptInput>
           </TooltipProvider>

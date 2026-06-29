@@ -310,6 +310,14 @@
     color: var(--bv-blue-text);
     text-decoration: none;
   }
+  /* The app-wide ai-blue focus signature (DS base.css) — the quiet "focus is
+     ai-blue, never black" rule. shadcn controls that set `outline-none` + their
+     own ring opt out cleanly; this catches everything else (thread rows, links,
+     bare buttons) so nothing focuses without a visible indicator. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
   code,
   kbd,
   samp,
@@ -367,6 +375,13 @@
   border: 1px solid var(--glass-border);
   border-radius: var(--bv-radius-composer);
   box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer);
+}
+
+/* Scrim behind overlays (the mobile drawer) — blue-black, never gray. */
+.bv-scrim {
+  background: oklch(0.14 0.025 270 / 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 /* The chat composer wears the glass capsule. Applied to the AI-Elements

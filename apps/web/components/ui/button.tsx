@@ -9,13 +9,20 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/80",
+        // DS: primary hover lightens the ink one step (--bv-ink-hover), not opacity.
+        default: "bg-primary text-primary-foreground hover:bg-[var(--bv-ink-hover)]",
+        // DS interaction layer: hover/selected = frosted blue (--accent = --bv-frost-8),
+        // never gray. --accent is specified for both themes, so no dark: overrides.
         outline:
-          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+          // The dark:hover/aria-expanded overrides are REQUIRED: the resting
+          // `dark:bg-input/30` has equal specificity to `hover:bg-accent` and is
+          // emitted later, so without a dark-gated hover it would win and the dark
+          // hover/open feedback would vanish (P20 cascade fix).
+          "border-border bg-background hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-accent dark:hover:text-accent-foreground dark:aria-expanded:bg-accent dark:aria-expanded:text-accent-foreground",
         secondary:
-          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
+          "bg-secondary text-secondary-foreground hover:bg-accent aria-expanded:bg-accent aria-expanded:text-accent-foreground",
         ghost:
-          "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
+          "hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground",
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",

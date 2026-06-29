@@ -49,6 +49,7 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
       title="Toggle theme"
+      className="[@media(pointer:coarse)]:size-11"
     >
       {/* While `isDark` is null (SSR + first client render, before the effect
           reads the script-applied class) show a neutral placeholder — never the
