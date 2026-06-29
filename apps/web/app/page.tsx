@@ -88,8 +88,12 @@ export default function ChatPage() {
     void refreshThreads();
   }, [refreshThreads]);
 
+  // `fixed inset-0` (below) pins the app to the viewport (ICB) directly — the
+  // bulletproof full-screen technique for iOS standalone PWAs, where `100dvh`
+  // under-resolves (reports shorter than the real screen → a dark band below the
+  // composer, BRO-1582). Header/footer carry the safe-area insets.
   return (
-    <div className="bg-background text-foreground flex h-dvh overflow-hidden">
+    <div className="bg-background text-foreground fixed inset-0 flex overflow-hidden">
       <ThreadDrawer
         threads={threads}
         activeThreadId={activeThreadId}
