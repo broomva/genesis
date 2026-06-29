@@ -8,8 +8,10 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Genesis agent chat — a local-first PWA channel.",
     start_url: "/",
     display: "standalone",
-    background_color: "#0b0d12",
-    theme_color: "#0b0d12",
+    // Light is the default canvas (the DS signature). The splash/background and
+    // chrome tint match it; dark mode is an in-app toggle, not a manifest switch.
+    background_color: "#ffffff",
+    theme_color: "#ffffff",
     orientation: "portrait",
     icons: [
       {

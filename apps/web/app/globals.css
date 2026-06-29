@@ -7,21 +7,33 @@
    the monorepo root — it symlinks them per-app at apps/web/node_modules/<pkg> (the
    same path the module resolver uses for `import "streamdown"`). globals.css is at
    apps/web/app/ → one level up reaches that node_modules. streamdown reads the
-   shadcn/arcan-glass CSS vars defined below, so it themes to dark for free. */
+   shadcn CSS vars defined below, so it themes with the rest of the app for free. */
 @source "../node_modules/streamdown/dist/*.js";
 
+/* Dark is a class on <html> (toggled by the theme control + the no-flash script in
+   layout.tsx), not prefers-color-scheme — so the toggle is authoritative. */
 @custom-variant dark (&:is(.dark *));
 
+/* ============================================================
+   Broomva Design System — Houston's calm monochrome philosophy
+   on an Arcan-blue OKLCH axis. Light-first; dark fully specified.
+   Synthesized from ~/Downloads/Broomva Design System (2)/tokens
+   (colors · typography · spacing · glass · motion · base) into a
+   single Tailwind-v4 stylesheet (BRO-1583).
+
+   The rule: every "black" and "gray" sits on the cool blue axis
+   (hue ~265). The ink reads as black until you look closely.
+   All colors are OKLCH. No pure #000, no pure-#fff text in dark.
+   ============================================================ */
+
 @theme inline {
+  /* Semantic tokens → Tailwind color utilities (bg-background, text-foreground…) */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-panel: var(--panel);
   --color-ai-blue: var(--ai-blue);
   --color-success: var(--success);
   --color-amber: var(--amber);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -51,6 +63,19 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+
+  /* DS accents exposed directly (e.g. text-bv-blue) */
+  --color-bv-blue: var(--bv-blue);
+  --color-bv-blue-text: var(--bv-blue-text);
+  --color-bv-blue-accent: var(--bv-blue-accent);
+
+  /* System-font stacks (full DS treatment — no mono-terminal chrome; mono is
+     reserved for code blocks). */
+  --font-sans: var(--bv-font-sans);
+  --font-mono: var(--bv-font-mono);
+  --font-heading: var(--bv-font-heading);
+
+  /* shadcn radius ladder (kept) + DS signature composer radius */
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -58,87 +83,209 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-composer: var(--bv-radius-composer);
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  /* ── DS scaffolding tokens ──────────────────────────────── */
+  /* Ink (replaces Houston's #0d0d0d) — barely-blue near-black */
+  --bv-ink: oklch(0.175 0.022 265);
+  --bv-ink-hover: oklch(0.28 0.035 263);
+  --bv-white: oklch(1 0 0);
+
+  /* Cool gray scale (hue 265, whisper chroma) */
+  --bv-gray-50: oklch(0.978 0.002 265);
+  --bv-gray-100: oklch(0.945 0.004 265);
+  --bv-gray-200: oklch(0.915 0.005 265);
+  --bv-gray-300: oklch(0.84 0.006 265);
+  --bv-gray-400: oklch(0.76 0.008 265);
+  --bv-gray-500: oklch(0.68 0.01 265);
+  --bv-gray-600: oklch(0.5 0.015 265);
+  --bv-gray-700: oklch(0.38 0.02 265);
+  --bv-gray-800: oklch(0.3 0.022 265);
+  --bv-gray-900: oklch(0.23 0.022 265);
+
+  --bv-canvas-soft: oklch(0.966 0.003 265);
+  --bv-canvas-soft-2: oklch(0.958 0.004 265);
+
+  /* Arcan accents — the only hues in the system */
+  --bv-blue: oklch(0.6 0.12 260);
+  --bv-blue-accent: oklch(0.65 0.14 235);
+  /* Text-grade ai-blue — a darker step that clears WCAG AA (≈5.6:1) on the white
+     canvas. --bv-blue (0.6) is only ~4:1 on white, fine for ≥3:1 non-text uses
+     (rings, halos, icon glyphs, the live dot) but below 4.5:1 for body text. Links
+     + the running label use this variant; dark mode aliases it back (already AA). */
+  --bv-blue-text: oklch(0.52 0.13 260);
+
+  /* Frosted blue tints — hover / selected */
+  --bv-frost-4: oklch(0.6 0.12 260 / 0.05);
+  --bv-frost-8: oklch(0.6 0.12 260 / 0.09);
+  --bv-frost-12: oklch(0.6 0.12 260 / 0.14);
+
+  /* Borders (blue-black at low alpha) */
+  --bv-border-5: oklch(0.25 0.04 265 / 0.07);
+  --bv-border-15: oklch(0.25 0.04 265 / 0.16);
+  --bv-border-25: oklch(0.25 0.04 265 / 0.26);
+
+  --bv-hover-soft: oklch(0.3 0.03 265 / 0.05);
+  --bv-hover-medium: oklch(0.3 0.03 265 / 0.08);
+
+  /* Status */
+  --bv-success: oklch(0.62 0.17 152);
+  --bv-info: var(--bv-blue);
+  --bv-warning: oklch(0.76 0.15 85);
+  --bv-danger: oklch(0.56 0.21 27);
+
+  /* Comet-glow stops (running signal) */
+  --bv-glow-blue: oklch(0.62 0.18 258);
+  --bv-glow-indigo: oklch(0.66 0.15 280);
+  --bv-glow-cyan: oklch(0.72 0.13 220);
+  --bv-glow-ice: oklch(0.84 0.07 240);
+
+  /* Shadows — every shadow carries a hint of blue */
+  --bv-shadow-edge: 0 1px 0 oklch(0.25 0.05 265 / 0.06);
+  --bv-shadow-card-hover: 0 6px 16px oklch(0.45 0.09 260 / 0.09), 0 1px 0
+    oklch(0.25 0.05 265 / 0.06);
+  --bv-shadow-composer: 0 4px 4px oklch(0.45 0.09 260 / 0.05), 0 4px 80px 8px
+    oklch(0.55 0.12 260 / 0.08), 0 0 1px oklch(0.2 0.04 265 / 0.65);
+  --bv-shadow-glow: 0 0 24px oklch(0.6 0.12 260 / 0.16);
+
+  /* Radii ladder (Houston verbatim) + signature radii */
+  --bv-radius-chip: 0.25rem;
+  --bv-radius-md: 0.375rem;
+  --bv-radius-lg: 0.5rem;
+  --bv-radius-xl: 0.75rem;
+  --bv-radius-2xl: 1rem;
+  --bv-radius-composer: 28px;
+  --bv-radius-full: 9999px;
+
+  /* Motion */
+  --bv-ease-standard: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --bv-ease-morph: cubic-bezier(0.4, 0, 0.2, 1);
+  --bv-dur-fast: 0.15s;
+  --bv-dur-common: 0.2s;
+  --bv-dur-slow: 0.35s;
+  --bv-dur-morph: 0.5s;
+
+  /* Type — system stacks (CalSans is opt-in for marketing only, not app chrome) */
+  --bv-font-sans: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+  --bv-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --bv-font-heading: var(--bv-font-sans);
+  --bv-weight-regular: 400;
+  --bv-weight-medium: 500;
+  --bv-weight-semi: 600;
+
+  /* ── Semantic tokens (light, production default) ────────── */
+  --background: var(--bv-white);
+  --foreground: var(--bv-ink);
+  --card: var(--bv-white);
+  --card-foreground: var(--bv-ink);
+  --popover: var(--bv-white);
+  --popover-foreground: var(--bv-ink);
+  --primary: var(--bv-ink);
+  --primary-foreground: var(--bv-white);
+  --secondary: var(--bv-canvas-soft);
+  --secondary-foreground: var(--bv-ink);
+  --muted: var(--bv-canvas-soft);
+  --muted-foreground: var(--bv-gray-600);
+  --accent: var(--bv-frost-8); /* hover/selected = frosted blue */
+  --accent-foreground: var(--bv-gray-700);
+  --destructive: var(--bv-danger);
+  --border: var(--bv-border-5);
+  --input: var(--bv-gray-200);
+  --ring: var(--bv-blue); /* focus is ai-blue, not black */
+
+  --chart-1: var(--bv-glow-blue);
+  --chart-2: var(--bv-glow-indigo);
+  --chart-3: var(--bv-glow-cyan);
+  --chart-4: var(--bv-blue-accent);
+  --chart-5: var(--bv-gray-500);
+
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  /* arcan-glass brand tokens (also defined in .dark; here for root fallback) */
-  --panel: #11151f;
-  --ai-blue: #7aa2ff;
-  --success: #7ee0a5;
-  --amber: #ffcf6a;
+
+  --sidebar: var(--bv-canvas-soft);
+  --sidebar-foreground: var(--bv-ink);
+  --sidebar-primary: var(--bv-ink);
+  --sidebar-primary-foreground: var(--bv-white);
+  --sidebar-accent: var(--bv-frost-8);
+  --sidebar-accent-foreground: var(--bv-gray-700);
+  --sidebar-border: var(--bv-border-5);
+  --sidebar-ring: var(--bv-blue);
+
+  /* Glass semantic surfaces (overlays / composer / popovers ONLY) */
+  --glass-surface: oklch(0.99 0.002 265 / 0.8);
+  --glass-surface-heavy: oklch(0.99 0.002 265 / 0.9);
+  --glass-border: oklch(0.45 0.06 262 / 0.14);
+  --glass-light-line: oklch(1 0 0 / 0.55);
+
+  /* Compat aliases — components still reference these names directly. */
+  --panel: var(--sidebar);
+  --ai-blue: var(--bv-blue);
+  --success: var(--bv-success);
+  --amber: var(--bv-warning);
 }
 
+/* ── Dark mode — fully specified, Arcan deep blue-purple ──── */
 .dark {
-  /* arcan-glass dark-first palette
-     #0b0d12 background · #11151f panel · #7aa2ff AI Blue · #7ee0a5 success · #ffcf6a amber */
-  --background: #0b0d12;
-  --foreground: #e6e9ef;
-  --card: #11151f;
-  --card-foreground: #e6e9ef;
-  --popover: #11151f;
-  --popover-foreground: #e6e9ef;
-  --primary: #7aa2ff;
-  --primary-foreground: #0b0d12;
-  --secondary: #1a2030;
-  --secondary-foreground: #e6e9ef;
-  --muted: #161b27;
-  --muted-foreground: #8a93a6;
-  --accent: #1a2030;
-  --accent-foreground: #e6e9ef;
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: #1d2230;
-  --input: #232a3a;
-  --ring: #7aa2ff;
-  /* arcan-glass brand tokens (exposed via @theme as --color-*) */
-  --panel: #11151f;
-  --ai-blue: #7aa2ff;
-  --success: #7ee0a5;
-  --amber: #ffcf6a;
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.135 0.02 272); /* deep blue-purple, never pure black */
+  --foreground: oklch(0.965 0.004 265);
+  --card: oklch(0.175 0.025 272);
+  --card-foreground: oklch(0.965 0.004 265);
+  --popover: oklch(0.175 0.025 272);
+  --popover-foreground: oklch(0.965 0.004 265);
+  --primary: oklch(0.965 0.004 265);
+  --primary-foreground: oklch(0.155 0.022 270);
+  --secondary: oklch(0.165 0.022 272);
+  --secondary-foreground: oklch(0.965 0.004 265);
+  --muted: oklch(0.185 0.024 272);
+  --muted-foreground: oklch(0.62 0.02 270);
+  --accent: oklch(0.6 0.12 260 / 0.13);
+  --accent-foreground: oklch(0.88 0.012 268);
+  --destructive: oklch(0.64 0.2 25);
+  --border: oklch(0.62 0.05 268 / 0.11);
+  --input: oklch(0.26 0.028 272);
+  --ring: var(--bv-blue);
+
+  --sidebar: oklch(0.115 0.018 272);
+  --sidebar-foreground: oklch(0.965 0.004 265);
+  --sidebar-primary: oklch(0.965 0.004 265);
+  --sidebar-primary-foreground: oklch(0.155 0.022 270);
+  --sidebar-accent: oklch(0.6 0.12 260 / 0.14);
+  --sidebar-accent-foreground: oklch(0.88 0.012 268);
+  --sidebar-border: oklch(0.62 0.05 268 / 0.09);
+  --sidebar-ring: var(--bv-blue);
+
+  /* DS scaffolding overrides for dark */
+  /* On the deep canvas the base ai-blue already clears AA — alias the text variant
+     back so links/labels keep the full-chroma brand hue in dark mode. */
+  --bv-blue-text: var(--bv-blue);
+  --bv-canvas-soft: oklch(0.165 0.022 272);
+  --bv-canvas-soft-2: oklch(0.205 0.025 272);
+  --bv-ink-hover: oklch(0.88 0.012 268);
+  --bv-border-5: oklch(0.62 0.05 268 / 0.09);
+  --bv-border-15: oklch(0.62 0.05 268 / 0.18);
+  --bv-border-25: oklch(0.62 0.05 268 / 0.28);
+  --bv-hover-soft: oklch(0.8 0.04 268 / 0.06);
+  --bv-hover-medium: oklch(0.8 0.04 268 / 0.1);
+  --bv-gray-500: oklch(0.52 0.018 270);
+  --bv-gray-600: oklch(0.62 0.02 270);
+  --bv-gray-700: oklch(0.72 0.016 268);
+
+  --bv-success: oklch(0.72 0.17 155);
+  --bv-warning: oklch(0.85 0.16 88);
+  --bv-danger: oklch(0.64 0.2 25);
+
+  --bv-shadow-edge: 0 1px 0 oklch(0 0 0 / 0.25);
+  --bv-shadow-card-hover: 0 6px 16px oklch(0 0 0 / 0.35), 0 0 20px oklch(0.6 0.12 260 / 0.1);
+  --bv-shadow-composer: 0 4px 8px oklch(0 0 0 / 0.3), 0 4px 64px 8px oklch(0.6 0.12 260 / 0.13), 0 0
+    1px oklch(0.7 0.08 262 / 0.55);
+  --bv-shadow-glow: 0 0 28px oklch(0.6 0.12 260 / 0.22);
+
+  --glass-surface: oklch(0.185 0.026 272 / 0.66);
+  --glass-surface-heavy: oklch(0.185 0.026 272 / 0.84);
+  --glass-border: oklch(0.62 0.06 265 / 0.18);
+  --glass-light-line: oklch(1 0 0 / 0.06);
 }
 
 @layer base {
@@ -147,15 +294,230 @@
   }
   body {
     @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
   html {
     @apply font-sans;
+    color-scheme: light dark;
+  }
+  /* Sentence-case, system-font headings — never uppercase, never tracking-wider. */
+  h1 {
+    font-weight: var(--bv-weight-regular);
+    letter-spacing: -0.01em;
+  }
+  a {
+    color: var(--bv-blue-text);
+    text-decoration: none;
+  }
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--bv-font-mono);
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--bv-border-15);
+    border-radius: var(--bv-radius-full);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--bv-border-25);
   }
 }
 
-/* Live-status text shimmer (used by the streaming status pill). Clips a moving
-   light sheen over the element's currentColor, so it inherits whatever text
-   color the pill sets (e.g. AI Blue). Honors prefers-reduced-motion. */
+/* ============================================================
+   Glass — earned, not ambient. Only overlays (dialogs, command
+   palette), popovers (menus, tooltips, dropdowns), and the
+   composer. Cards, panels, sidebars and chrome stay matte.
+   Every glass surface carries the inner light line — that's
+   what makes it glass and not a gray panel.
+   ============================================================ */
+
+.bv-glass {
+  background: var(--glass-surface);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--bv-radius-xl);
+  box-shadow: inset 0 1px 0 var(--glass-light-line), 0 8px 24px oklch(0.3 0.06 262 / 0.12);
+}
+
+.bv-glass-heavy {
+  background: var(--glass-surface-heavy);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--bv-radius-2xl);
+  box-shadow: inset 0 1px 0 var(--glass-light-line), 0 16px 48px oklch(0.3 0.06 262 / 0.18);
+}
+
+/* The composer — glass + the signature frosted-blue halo, the one dramatic
+   depth cue in the whole system. */
+.bv-glass-composer {
+  background: var(--glass-surface-heavy);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--bv-radius-composer);
+  box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer);
+}
+
+/* The chat composer wears the glass capsule. Applied to the AI-Elements
+   PromptInput's inner InputGroup (data-slot) via the form's `.bv-composer` class,
+   so the vendored component stays untouched. The halo IS the focus cue — so the
+   default focus-within ring is softened to the inner light line + a whisper edge. */
+.bv-composer [data-slot="input-group"] {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--bv-radius-composer);
+  background: var(--glass-surface-heavy);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer);
+  transition: box-shadow var(--bv-dur-common) var(--bv-ease-standard);
+}
+.bv-composer [data-slot="input-group"]:focus-within {
+  border-color: var(--glass-border);
+  box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer), 0 0 0 3px
+    var(--bv-frost-12);
+}
+
+/* ============================================================
+   Motion — live signals. The Undertow is THE running treatment:
+   a contained halo of breathing pools, a counter-phase tide, and
+   a faint 9s orbit. The tidepool dot carries the same weather at
+   dot scale. Calm is load-bearing — presence, not progress.
+   ============================================================ */
+
+.bv-undertow {
+  position: relative;
+  isolation: isolate;
+  padding: 4px;
+  margin: 0 -4px;
+  border-radius: calc(var(--bv-radius-xl) + 4px);
+  overflow: hidden;
+}
+.bv-undertow::before {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  z-index: -1;
+  background: radial-gradient(42% 55% at 22% 35%, var(--bv-glow-blue), transparent 70%),
+    radial-gradient(36% 48% at 78% 65%, var(--bv-glow-cyan), transparent 70%);
+  filter: blur(12px);
+  opacity: 0.7;
+  animation: bv-undertow-pools 4.2s ease-in-out infinite alternate;
+}
+.bv-undertow::after {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    transparent 30%,
+    oklch(0.62 0.18 258 / 0.28) 50%,
+    var(--bv-glow-ice) 58%,
+    transparent 72%
+  );
+  filter: blur(12px);
+  opacity: 0.55;
+  animation: bv-undertow-tide 3.4s ease-in-out infinite alternate;
+}
+.bv-undertow-orbit {
+  position: absolute;
+  inset: -50%;
+  z-index: -1;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    transparent 58%,
+    oklch(0.62 0.18 258 / 0.18) 70%,
+    var(--bv-glow-blue) 80%,
+    var(--bv-glow-ice) 86%,
+    transparent 92%
+  );
+  filter: blur(13px);
+  opacity: 0.4;
+  animation: bv-undertow-orbit 9s linear infinite;
+}
+@keyframes bv-undertow-pools {
+  from {
+    transform: translateY(-14%) scale(1);
+    opacity: 0.5;
+  }
+  to {
+    transform: translateY(14%) scale(1.18);
+    opacity: 0.95;
+  }
+}
+@keyframes bv-undertow-tide {
+  from {
+    transform: translateY(22%) translateX(-8%);
+  }
+  to {
+    transform: translateY(-22%) translateX(8%);
+  }
+}
+@keyframes bv-undertow-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Tidepool dot — the running signal at dot scale. Blue → ice weather drifting
+   through the circle; one motion language at every scale. */
+.bv-dot-live {
+  position: relative;
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  flex-shrink: 0;
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bv-dot-live::before {
+  content: "";
+  position: absolute;
+  inset: -60% -20%;
+  background: linear-gradient(
+    160deg,
+    var(--bv-blue) 20%,
+    oklch(0.62 0.18 258 / 0.55) 42%,
+    oklch(0.82 0.09 230) 55%,
+    var(--bv-blue) 80%
+  );
+  animation: bv-dot-tide 3.2s ease-in-out infinite alternate;
+}
+@keyframes bv-dot-tide {
+  from {
+    transform: translateY(-16%);
+  }
+  to {
+    transform: translateY(16%);
+  }
+}
+/* The standing/listening dot — quieter than the tidepool. */
+.bv-dot--pulse {
+  animation: bv-dot-pulse 1s ease-in-out infinite alternate;
+}
+@keyframes bv-dot-pulse {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.35;
+  }
+}
+
+/* Live-status text shimmer (used by the streaming status label). Clips a moving
+   light sheen over the element's currentColor. Honors prefers-reduced-motion. */
 @keyframes shimmer {
   from {
     background-position: 200% 0;
@@ -177,17 +539,9 @@
   -webkit-text-fill-color: transparent;
   animation: shimmer 1.6s linear infinite;
 }
-@media (prefers-reduced-motion: reduce) {
-  .shimmer {
-    animation: none;
-    -webkit-text-fill-color: currentColor;
-  }
-}
 
 /* Message enter motion (BRO-1577) — fade + small slide-up, ease-out. Fires once
-   when a message first mounts (React keeps the keyed element across streaming
-   updates, so it doesn't replay per token). transform/opacity only — never a
-   layout property. */
+   when a message first mounts. transform/opacity only — never a layout property. */
 @keyframes message-in {
   from {
     opacity: 0;
@@ -218,6 +572,17 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bv-undertow::before,
+  .bv-undertow::after,
+  .bv-undertow-orbit,
+  .bv-dot-live::before,
+  .bv-dot--pulse {
+    animation: none;
+  }
+  .shimmer {
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+  }
   .message-in {
     animation: none;
   }

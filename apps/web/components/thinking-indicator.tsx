@@ -14,8 +14,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 export function ThinkingIndicator({ note }: { note: string }) {
   return (
     <Collapsible className="mb-1.5 w-fit max-w-[80%]">
-      <CollapsibleTrigger className="group text-muted-foreground hover:text-foreground flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-        <BrainIcon aria-hidden className="size-3.5 text-[var(--ai-blue)]" />
+      <CollapsibleTrigger className="group text-muted-foreground hover:text-foreground flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+        <BrainIcon aria-hidden className="size-3.5 text-[var(--bv-blue)]" />
         <span>Reasoned</span>
         <ChevronDownIcon
           aria-hidden
