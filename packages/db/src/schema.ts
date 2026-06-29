@@ -1,6 +1,6 @@
 // Drizzle schema — the durable shape of a Genesis "self".
 // Phase 2 promotes the Phase-1 in-memory Workspace/Session/Turn to Postgres rows.
-import { bigserial, index, pgTable, text } from "drizzle-orm/pg-core";
+import { bigserial, boolean, index, pgTable, text } from "drizzle-orm/pg-core";
 
 export const workspaces = pgTable("workspaces", {
   id: text("id").primaryKey(),
@@ -15,6 +15,11 @@ export const sessions = pgTable("sessions", {
   agentSessionId: text("agent_session_id"), // null until the first run resumes
   phase: text("phase").notNull(),
   createdAt: text("created_at").notNull(),
+  // Session management (BRO-1592): soft-archive (hide from the default drawer
+  // list, reversible) + a human-readable title (auto-derived from the first
+  // user turn, or renamed). Both additive — see the ALTER block in MIGRATE_SQL.
+  archived: boolean("archived").notNull().default(false),
+  title: text("title"),
 });
 
 export const turns = pgTable(
@@ -33,10 +38,12 @@ export const turns = pgTable(
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
 
-// Fresh-schema bootstrap — runs on store creation (CREATE … IF NOT EXISTS).
-// It creates missing tables but does NOT ALTER existing ones: additive schema
-// changes (e.g. a new column) need real migrations (drizzle-kit; a Slice B+
-// concern). Safe re-run on an up-to-date DB; greenfield-only for now.
+// Fresh-schema bootstrap — runs on store creation. CREATE … IF NOT EXISTS makes
+// missing tables; the ADD COLUMN … IF NOT EXISTS block below carries *additive*
+// migrations forward onto an existing DB (BRO-1592). Both Postgres and pglite
+// support ADD COLUMN IF NOT EXISTS, so this stays a single idempotent script —
+// safe to re-run on a fresh OR an up-to-date DB. Non-additive changes (drop /
+// rename / type change) still need a real migration tool (drizzle-kit).
 // Multi-statement; executed via the raw client.
 export const MIGRATE_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -61,4 +68,6 @@ CREATE TABLE IF NOT EXISTS turns (
   created_at text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turns_session_idx ON turns (session_id);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
 `;

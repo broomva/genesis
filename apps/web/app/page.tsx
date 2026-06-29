@@ -6,7 +6,14 @@ import { useCallback, useEffect, useState } from "react";
 import { ChatView } from "@/components/chat-view";
 import { ThreadDrawer } from "@/components/thread-drawer";
 import { DEFAULT_EFFORT, DEFAULT_MODEL, isKnownEffort, isKnownModel } from "@/lib/chat-options";
-import { type ThreadSummary, fetchThreadMessages, fetchThreads } from "@/lib/threads";
+import {
+  type ThreadSummary,
+  archiveThread,
+  deleteThread,
+  fetchThreadMessages,
+  fetchThreads,
+  renameThread,
+} from "@/lib/threads";
 
 // localStorage keys — active thread (restore the conversation on reload) + the
 // model/effort selection (sticky across threads + reloads). Owned here, not in
@@ -88,6 +95,54 @@ export default function ChatPage() {
     void refreshThreads();
   }, [refreshThreads]);
 
+  // --- Session management (BRO-1592). Optimistic local update, then the mutation,
+  // then a refresh to reconcile with the engine's truth.
+
+  const onArchive = useCallback(
+    async (threadId: string, archived: boolean) => {
+      setThreads((prev) => prev.map((t) => (t.threadId === threadId ? { ...t, archived } : t)));
+      await archiveThread(threadId, archived);
+      void refreshThreads();
+    },
+    [refreshThreads],
+  );
+
+  const onRename = useCallback(
+    async (threadId: string, title: string) => {
+      setThreads((prev) =>
+        prev.map((t) => (t.threadId === threadId ? { ...t, title: title || undefined } : t)),
+      );
+      await renameThread(threadId, title);
+      void refreshThreads();
+    },
+    [refreshThreads],
+  );
+
+  const onDelete = useCallback(
+    async (threadId: string) => {
+      setThreads((prev) => prev.filter((t) => t.threadId !== threadId));
+      // If the active thread is deleted, drop to a fresh empty one so the chat
+      // pane never points at a now-gone transcript.
+      if (threadId === activeThreadId) newThread();
+      await deleteThread(threadId);
+      void refreshThreads();
+    },
+    [activeThreadId, newThread, refreshThreads],
+  );
+
+  // Status freshness (BRO-1596): the drawer otherwise only refreshes on a turn
+  // finishing here. While any thread is live (running/awaiting) its phase can
+  // change out-of-band, so poll on a short cadence — but only while the tab is
+  // visible and only while something is actually live (idle/done need no poll).
+  const hasLiveThread = threads.some((t) => t.phase === "running" || t.phase === "awaiting");
+  useEffect(() => {
+    if (!hasLiveThread) return;
+    const id = setInterval(() => {
+      if (!document.hidden) void refreshThreads();
+    }, 4000);
+    return () => clearInterval(id);
+  }, [hasLiveThread, refreshThreads]);
+
   // `fixed inset-0` (below) pins the app to the viewport (ICB) directly — the
   // bulletproof full-screen technique for iOS standalone PWAs, where `100dvh`
   // under-resolves (reports shorter than the real screen → a dark band below the
@@ -101,6 +156,9 @@ export default function ChatPage() {
         onClose={() => setDrawerOpen(false)}
         onSelect={selectThread}
         onNew={newThread}
+        onArchive={onArchive}
+        onDelete={onDelete}
+        onRename={onRename}
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {activeThreadId && initialMessages !== null ? (

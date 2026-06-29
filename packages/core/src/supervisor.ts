@@ -92,12 +92,26 @@ export interface DispatchResult {
 
 /** One row of the thread-list UI (BRO-1567): enough to render + resume a thread
  *  without loading its full transcript. `lastText` is the most-recent turn's text
- *  (any role) for a drawer preview; undefined for a never-run thread. */
+ *  (any role) for a drawer preview; undefined for a never-run thread. `title`
+ *  (BRO-1592) is the auto-derived/renamed label; `archived` lets the drawer hide
+ *  soft-archived threads. */
 export interface ThreadSummary {
   threadId: string;
   phase: Session["phase"];
   createdAt: string;
   lastText?: string;
+  title?: string;
+  archived: boolean;
+}
+
+/** First-user-turn → a short thread title (BRO-1592). First line, collapsed
+ *  whitespace, ~6 words / 48 chars. Empty input → undefined (keep the preview). */
+export function deriveTitle(text: string): string | undefined {
+  const oneLine = text.trim().split("\n")[0]?.replace(/\s+/g, " ").trim() ?? "";
+  if (!oneLine) return undefined;
+  const words = oneLine.split(" ").slice(0, 6).join(" ");
+  const clipped = words.length > 48 ? `${words.slice(0, 48).trimEnd()}…` : words;
+  return clipped;
 }
 
 export class Supervisor {
@@ -184,6 +198,10 @@ export class Supervisor {
     const workspace = (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
     await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
+    // Derive a thread title from the first user turn (BRO-1592) — persisted with
+    // the phase write below, so the drawer shows a stable label instead of a
+    // running last-text preview. Never overwrites a title once set (or renamed).
+    if (!session.title) session.title = deriveTitle(text);
     session.phase = "running";
     await this.store.upsertSession(session);
 
@@ -284,6 +302,8 @@ export class Supervisor {
           phase: s.phase,
           createdAt: s.createdAt,
           lastText: turns.at(-1)?.text,
+          title: s.title,
+          archived: s.archived ?? false,
         };
       }),
     );
@@ -331,5 +351,48 @@ export class Supervisor {
     if (s === undefined) return { ok: false, reason: "no-session" };
     const st = this.control ? await this.control.status(s.id) : { alive: false };
     return { ok: true, phase: s.phase, alive: st.alive, sessionId: st.sessionId };
+  }
+
+  // --- Session management (BRO-1592) — archive / rename / delete.
+
+  /** Soft-archive (hide from the default drawer list) or restore a thread. A
+   *  no-op-safe toggle; reversible. Re-reads after the in-flight turn settles so
+   *  it can't be clobbered by a racing phase write-back. */
+  async archiveThread(threadId: string, archived: boolean): Promise<ControlResult> {
+    await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    s.archived = archived;
+    await this.store.upsertSession(s);
+    return { ok: true, phase: s.phase };
+  }
+
+  /** Rename a thread (BRO-1592). Empty title clears it → the drawer falls back
+   *  to the last-text preview. */
+  async setTitle(threadId: string, title: string): Promise<ControlResult> {
+    await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    s.title = title.trim() || undefined;
+    await this.store.upsertSession(s);
+    return { ok: true, phase: s.phase };
+  }
+
+  /** Hard-delete a thread and its transcript (BRO-1592). Mirrors reset()'s race
+   *  discipline: kill any live engine session FIRST (so it can't write phase back
+   *  after the row is gone), drain the in-flight dispatch, then delete + drop the
+   *  per-thread chain entry. Irreversible. */
+  async deleteThread(threadId: string): Promise<ControlResult> {
+    const s = await this.store.findSessionByThread(threadId);
+    if (s === undefined) return { ok: false, reason: "no-session" };
+    // Interactive engine: tear down the live process before deleting durable rows
+    // (B2 race — a racing runTurn finally-write would otherwise resurrect a row).
+    if (this.control) await this.control.reset(s.id).catch(() => false);
+    await (this.chains.get(threadId) ?? Promise.resolve()).catch(() => {});
+    this.chains.delete(threadId);
+    // Re-resolve in case the thread was recreated while we waited.
+    const fresh = await this.store.findSessionByThread(threadId);
+    if (fresh) await this.store.deleteSession(fresh.id);
+    return { ok: true };
   }
 }

@@ -11,6 +11,10 @@ export interface ThreadSummary {
   phase: ThreadPhase;
   createdAt: string;
   lastText?: string;
+  /** Auto-derived/renamed title (BRO-1592); drawer falls back to lastText. */
+  title?: string;
+  /** Soft-archived → hidden from the default list (BRO-1592). */
+  archived?: boolean;
 }
 
 interface Turn {
@@ -48,15 +52,42 @@ export async function fetchThreadMessages(
   );
 }
 
-/** Reset a thread's agent session (BRO-1576) via the /api/control BFF proxy — the
- *  next turn starts with fresh context (same thread). Returns true on success. */
-export async function resetThread(threadId: string): Promise<boolean> {
+/** POST a /control action to the BFF (shared by reset/archive/rename, BRO-1592).
+ *  Returns true on a 2xx. The BFF forwards the body verbatim to the engine. */
+async function control(body: Record<string, unknown>): Promise<boolean> {
   try {
     const res = await fetch("/api/control", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ threadId, action: "reset" }),
+      body: JSON.stringify(body),
     });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Reset a thread's agent session (BRO-1576) — next turn starts with fresh
+ *  context (same thread). Returns true on success. */
+export function resetThread(threadId: string): Promise<boolean> {
+  return control({ threadId, action: "reset" });
+}
+
+/** Soft-archive (true) or restore (false) a thread (BRO-1592). */
+export function archiveThread(threadId: string, archived: boolean): Promise<boolean> {
+  return control({ threadId, action: archived ? "archive" : "unarchive" });
+}
+
+/** Rename a thread (BRO-1592); empty title clears it back to the preview. */
+export function renameThread(threadId: string, title: string): Promise<boolean> {
+  return control({ threadId, action: "rename", title });
+}
+
+/** Hard-delete a thread + transcript (BRO-1592) via DELETE /api/threads/:id.
+ *  Irreversible. Returns true on success. */
+export async function deleteThread(threadId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
     return res.ok;
   } catch {
     return false;
