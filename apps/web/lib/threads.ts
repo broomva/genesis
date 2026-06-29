@@ -55,15 +55,32 @@ interface Turn {
   costUsd?: number;
   /** Ordered text+tool timeline (BRO-1607). Absent on user turns / pre-1607 rows. */
   parts?: StoredPart[];
-  /** Extended-thinking estimate (BRO-1607) → rebuilds the reasoning indicator. */
+  /** Extended-thinking estimate (BRO-1607) → the `~N tokens` on the indicator. */
   thinkingTokens?: number;
+  /** The model reasoned this turn (BRO-1608) → whether to rebuild the indicator,
+   *  independent of the token count (0 at effort high). */
+  reasoned?: boolean;
+  /** Verbatim reasoning prose (BRO-1608) when a deployment provides it; absent
+   *  under subscription auth (redacted) → falls back to the indicator note. */
+  reasoning?: string;
 }
 
-/** The thinking INDICATOR note (BRO-1574) — kept in sync with the engine's
- *  `thinkingNote` (apps/api/src/server.ts). The prose is redacted under the VPS
- *  subscription auth, so a reloaded turn shows the same token-based summary. */
-function thinkingNote(tokens: number): string {
-  return `Extended thinking · ~${tokens} tokens (reasoning content is private on this deployment)`;
+/** The reasoning content on reload (BRO-1608) — matches the engine's
+ *  `reasoningNote` (apps/api/src/server.ts) for every turn it produces (prose →
+ *  `~N tokens` → token-less indicator), so live ≡ reload. The extra tokens-only
+ *  clause is reload-ONLY leniency: legacy BRO-1607 rows persisted `thinkingTokens`
+ *  but not `reasoned`, and for any real turn tokens>0 implies the model reasoned,
+ *  so it can never diverge from live (where `reasoned` is always set). */
+function reasoningNote(
+  reasoned: boolean | undefined,
+  tokens: number | undefined,
+  prose: string | undefined,
+): string | undefined {
+  if (prose && prose.trim().length > 0) return prose.trim();
+  if (!reasoned && !(tokens && tokens > 0)) return undefined;
+  return tokens && tokens > 0
+    ? `Extended thinking · ~${tokens} tokens (content private on this deployment)`
+    : "Extended thinking (content private on this deployment)";
 }
 
 /** A persisted tool part → an AI SDK dynamic-tool UIMessagePart (BRO-1607). The
@@ -112,8 +129,9 @@ export async function fetchThreadMessages(
     // reloaded thread shows tool blocks + interleaving, not just the final text.
     // Pre-1607 rows (no `parts`) fall back to a single text part.
     const parts: UIMessage["parts"] = [];
-    if (t.role === "agent" && t.thinkingTokens && t.thinkingTokens > 0) {
-      parts.push({ type: "reasoning", text: thinkingNote(t.thinkingTokens) });
+    if (t.role === "agent") {
+      const note = reasoningNote(t.reasoned, t.thinkingTokens, t.reasoning);
+      if (note) parts.push({ type: "reasoning", text: note });
     }
     let hasBody = false;
     if (t.parts && t.parts.length > 0) {

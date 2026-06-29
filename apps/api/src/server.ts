@@ -11,14 +11,23 @@ import { PAGE } from "./ui";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
-/** Build the thinking INDICATOR note from the token estimate (BRO-1574). The
- *  reasoning prose is redacted under subscription/OAuth auth, so the honest
- *  surface is "the model did extended thinking, ~N tokens worth". Undefined when
- *  no thinking happened (effort off / low). */
-function thinkingNote(tokens: number | undefined): string | undefined {
+/** Build the reasoning INDICATOR note (BRO-1574, hardened BRO-1608). Order:
+ *  1) verbatim prose if the deployment ever provides it (the real streamed
+ *     reasoning) — redacted to "" under subscription/OAuth auth, so usually skipped;
+ *  2) else, if the model thought (`reasoned` — set by a signature_delta / thinking
+ *     block even when no token estimate exists at effort high), the honest
+ *     indicator, with the `~N tokens` budget when the CLI reported it (effort max).
+ *  Undefined only when no extended thinking happened at all (effort off / low). */
+function reasoningNote(
+  reasoned: boolean | undefined,
+  tokens: number | undefined,
+  prose: string | undefined,
+): string | undefined {
+  if (prose && prose.trim().length > 0) return prose.trim();
+  if (!reasoned) return undefined;
   return tokens && tokens > 0
-    ? `Extended thinking · ~${tokens} tokens (reasoning content is private on this deployment)`
-    : undefined;
+    ? `Extended thinking · ~${tokens} tokens (content private on this deployment)`
+    : "Extended thinking (content private on this deployment)";
 }
 
 export interface BuildOpts {
@@ -194,7 +203,7 @@ export function build(opts: BuildOpts) {
             kind: "phase",
             phase: state.phase,
             text: state.lastText,
-            reasoning: thinkingNote(state.thinkingTokens),
+            reasoning: reasoningNote(state.reasoned, state.thinkingTokens, state.reasoning),
           });
           // Surface new/advanced tool parts as dynamic-tool stream parts (BRO-1607)
           // — the connector closes the open text part first, so tools render in

@@ -52,9 +52,14 @@ export const turns = pgTable(
     costUsd: doublePrecision("cost_usd"),
     // Ordered text+tool timeline (BRO-1607), JSON-encoded so a reloaded thread
     // rebuilds tool blocks + interleaving. `thinkingTokens` reloads the reasoning
-    // indicator. Both additive + nullable — see the ALTER block in MIGRATE_SQL.
+    // indicator's `~N tokens`; `reasoned` (BRO-1608) decides whether it shows at
+    // all (token-less at effort high). All additive + nullable — see MIGRATE_SQL.
     parts: text("parts"),
     thinkingTokens: integer("thinking_tokens"),
+    reasoned: boolean("reasoned"),
+    // Verbatim reasoning prose (BRO-1608) — persisted so a reload matches the live
+    // turn whenever a deployment provides it; redacted to "" (→ null) on subscription.
+    reasoning: text("reasoning"),
   },
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
@@ -98,4 +103,6 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_creation_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cost_usd double precision;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS parts text;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS thinking_tokens integer;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoned boolean;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoning text;
 `;
