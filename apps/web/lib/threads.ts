@@ -34,6 +34,18 @@ export interface ThreadSummary {
   archived?: boolean;
 }
 
+/** Mirror of the engine's TurnPart (packages/projection) — the persisted ordered
+ *  timeline (BRO-1607). Tool calls rebuild as AI SDK dynamic-tool parts on reload. */
+type StoredToolPart = {
+  type: "tool";
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output?: unknown;
+  state: "input-available" | "output-available" | "output-error";
+};
+type StoredPart = { type: "text"; text: string } | StoredToolPart;
+
 interface Turn {
   id: string;
   role: "user" | "agent";
@@ -41,6 +53,35 @@ interface Turn {
   createdAt: string;
   usage?: TokenUsage;
   costUsd?: number;
+  /** Ordered text+tool timeline (BRO-1607). Absent on user turns / pre-1607 rows. */
+  parts?: StoredPart[];
+  /** Extended-thinking estimate (BRO-1607) → rebuilds the reasoning indicator. */
+  thinkingTokens?: number;
+}
+
+/** The thinking INDICATOR note (BRO-1574) — kept in sync with the engine's
+ *  `thinkingNote` (apps/api/src/server.ts). The prose is redacted under the VPS
+ *  subscription auth, so a reloaded turn shows the same token-based summary. */
+function thinkingNote(tokens: number): string {
+  return `Extended thinking · ~${tokens} tokens (reasoning content is private on this deployment)`;
+}
+
+/** A persisted tool part → an AI SDK dynamic-tool UIMessagePart (BRO-1607). The
+ *  part union is wide and state-discriminated; build the right shape per state. */
+function toDynamicToolPart(p: StoredToolPart): UIMessage["parts"][number] {
+  const base = { type: "dynamic-tool" as const, toolName: p.toolName, toolCallId: p.toolCallId };
+  if (p.state === "output-available") {
+    return { ...base, state: "output-available", input: p.input, output: p.output };
+  }
+  if (p.state === "output-error") {
+    return {
+      ...base,
+      state: "output-error",
+      input: p.input,
+      errorText: typeof p.output === "string" ? p.output : "Tool failed",
+    };
+  }
+  return { ...base, state: "input-available", input: p.input };
 }
 
 /** Fetch the thread list for the drawer. Returns [] on any non-OK / error so the
@@ -66,10 +107,37 @@ export async function fetchThreadMessages(
       t.usage !== undefined || t.costUsd !== undefined
         ? { usage: t.usage, costUsd: t.costUsd }
         : undefined;
+    // Rebuild the ordered parts (BRO-1607): reasoning indicator first (if the
+    // turn did extended thinking), then the persisted text+tool timeline — so a
+    // reloaded thread shows tool blocks + interleaving, not just the final text.
+    // Pre-1607 rows (no `parts`) fall back to a single text part.
+    const parts: UIMessage["parts"] = [];
+    if (t.role === "agent" && t.thinkingTokens && t.thinkingTokens > 0) {
+      parts.push({ type: "reasoning", text: thinkingNote(t.thinkingTokens) });
+    }
+    let hasBody = false;
+    if (t.parts && t.parts.length > 0) {
+      for (const p of t.parts) {
+        if (p.type === "text") {
+          if (p.text) {
+            parts.push({ type: "text", text: p.text });
+            hasBody = true;
+          }
+        } else {
+          parts.push(toDynamicToolPart(p));
+          hasBody = true;
+        }
+      }
+    }
+    if (!hasBody) {
+      // No text/tool parts rebuilt (pre-1607 row, or a text-less timeline) — keep
+      // the final text so the message is never empty.
+      parts.push({ type: "text", text: t.text });
+    }
     return {
       id: t.id,
       role: t.role === "agent" ? "assistant" : "user",
-      parts: [{ type: "text", text: t.text }],
+      parts,
       // Hydrate usage/cost (BRO-1597) so a reloaded thread keeps its running
       // total + latest context-window fill, not just live turns.
       ...(metadata ? { metadata } : {}),

@@ -12,6 +12,8 @@
 
 import {
   type AgentEvent,
+  type AgentMessage,
+  contentBlocksOf,
   sessionIdOf,
   streamBlockStart,
   streamTextDelta,
@@ -22,6 +24,81 @@ import {
 } from "./parser";
 
 export type RunPhase = "idle" | "running" | "awaiting" | "blocked" | "done";
+
+/** Lifecycle of a tool part: issued (input known) → result filled (ok | error).
+ *  Mirrors the AI SDK v6 dynamic-tool states the UI renders. */
+export type ToolPartState = "input-available" | "output-available" | "output-error";
+
+/** One executed tool call in the turn timeline (BRO-1607). `output` is undefined
+ *  until the matching `tool_result` arrives; `state` advances input → output. */
+export interface ToolPart {
+  type: "tool";
+  /** The tool_use id — the join key to its tool_result. */
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output?: unknown;
+  state: ToolPartState;
+}
+
+/** An ordered fragment of an assistant turn. Text and tool calls interleave in
+ *  the exact order the agent produced them, so the chat renders (and a reload
+ *  rebuilds) "say X · run tool · say Y" faithfully instead of collapsing to the
+ *  final answer text. Reasoning is tracked separately (redacted prose →
+ *  `thinkingTokens`), not as a part. */
+export type TurnPart = { type: "text"; text: string } | ToolPart;
+
+/** Tool names that are HITL gates, not renderable tool calls — kept out of the
+ *  parts timeline (the `awaiting` phase + question UI handle them). */
+const TIMELINE_SKIP_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
+
+/** Append a complete assistant message's text + tool_use blocks to the timeline,
+ *  in content order (BRO-1607). */
+function appendAssistantParts(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
+  const out = prev.slice();
+  for (const b of contentBlocksOf(msg)) {
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
+      out.push({ type: "text", text: b.text });
+    } else if (
+      b.type === "tool_use" &&
+      typeof b.name === "string" &&
+      typeof b.id === "string" &&
+      !TIMELINE_SKIP_TOOLS.has(b.name)
+    ) {
+      out.push({
+        type: "tool",
+        toolCallId: b.id,
+        toolName: b.name,
+        input: b.input,
+        state: "input-available",
+      });
+    }
+  }
+  return out;
+}
+
+/** Fold a complete user message's tool_result blocks into their tool parts —
+ *  matched by tool_use id, advancing each to output-available / output-error. */
+function applyToolResults(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
+  const results = contentBlocksOf(msg).filter(
+    (b) => b.type === "tool_result" && typeof b.tool_use_id === "string",
+  );
+  if (results.length === 0) return prev;
+  const out = prev.slice();
+  for (const r of results) {
+    const idx = out.findIndex(
+      (p) => p.type === "tool" && p.toolCallId === r.tool_use_id && p.state === "input-available",
+    );
+    if (idx < 0) continue;
+    const tp = out[idx] as ToolPart;
+    out[idx] = {
+      ...tp,
+      output: r.content,
+      state: r.is_error === true ? "output-error" : "output-available",
+    };
+  }
+  return out;
+}
 
 /** Clean per-turn token usage (BRO-1597) — the reducer's projection of the CLI's
  *  RawUsage. `input` excludes cache; cache tokens are tracked separately so the
@@ -62,12 +139,17 @@ export interface RunState {
    *  extended thinking, even when the prose is redacted. The basis for the
    *  client's "Thought · ~N tokens" indicator. */
   thinkingTokens?: number;
+  /** Ordered text+tool timeline for the turn (BRO-1607), built from the COMPLETE
+   *  assistant/user events. Drives live tool rendering + faithful reload; the
+   *  live answer text still streams via `lastText` (partial deltas). Optional so
+   *  partial RunState literals (tests, other engines) stay valid — read `?? []`. */
+  parts?: TurnPart[];
   turns: number;
   pendingQuestion?: string;
   error?: string;
 }
 
-export const initialState: RunState = { phase: "running", turns: 0 };
+export const initialState: RunState = { phase: "running", turns: 0, parts: [] };
 
 /** Tool names that pause the run for human input (Phase 3 HITL seam). */
 const AWAIT_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
@@ -102,6 +184,8 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
     case "assistant": {
       const texts = textBlocks(event.message);
       const lastText = texts.length > 0 ? texts[texts.length - 1] : state.lastText;
+      // Fold this step's text + tool_use blocks into the ordered timeline (BRO-1607).
+      const parts = appendAssistantParts(state.parts ?? [], event.message);
       const awaiting = toolUses(event.message).find((t) => AWAIT_TOOLS.has(t.name));
       if (awaiting) {
         return {
@@ -109,11 +193,12 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           sessionId,
           phase: "awaiting",
           lastText,
+          parts,
           turns: state.turns + 1,
           pendingQuestion: extractQuestion(awaiting.input) ?? lastText,
         };
       }
-      return { ...state, sessionId, phase: "running", lastText, turns: state.turns + 1 };
+      return { ...state, sessionId, phase: "running", lastText, parts, turns: state.turns + 1 };
     }
 
     case "stream_event": {
@@ -159,8 +244,15 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
     }
 
     case "user":
-      // A tool_result returned — the agent resumes; clear any awaiting gate.
-      return { ...state, sessionId, phase: "running", pendingQuestion: undefined };
+      // A tool_result returned — the agent resumes; clear any awaiting gate and
+      // fold the result into its tool part (BRO-1607).
+      return {
+        ...state,
+        sessionId,
+        phase: "running",
+        parts: applyToolResults(state.parts ?? [], event.message),
+        pendingQuestion: undefined,
+      };
 
     case "result": {
       // Usage + cost ride EVERY terminal result (BRO-1597), captured before the

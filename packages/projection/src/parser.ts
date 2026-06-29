@@ -9,10 +9,12 @@
 
 /** A single content block inside an assistant/user message. */
 export interface ContentBlock {
-  type: string; // "text" | "tool_use" | "tool_result"
+  type: string; // "text" | "tool_use" | "tool_result" | "thinking"
   text?: string;
+  id?: string; // tool_use call id — links a tool_use to its later tool_result
   name?: string; // tool name (tool_use)
   input?: unknown; // tool args (tool_use)
+  tool_use_id?: string; // tool_result → the id of the tool_use it answers
   content?: unknown; // tool output (tool_result)
   is_error?: boolean;
 }
@@ -122,6 +124,17 @@ export function toolUses(msg: AgentMessage): Array<{ name: string; input: unknow
   return blocks(msg)
     .filter((b) => b.type === "tool_use" && typeof b.name === "string")
     .map((b) => ({ name: b.name as string, input: b.input }));
+}
+
+/** The ordered content blocks of a COMPLETE assistant/user message, with a plain
+ *  string body normalized to a single text block. The reducer folds these into
+ *  the ordered per-turn parts timeline (text · tool), so interleaving (text →
+ *  tool_use → tool_result → text) is preserved for both render and persistence
+ *  (BRO-1607). `stream_event` partials drive live text separately and are not
+ *  part of this — the timeline is built only from complete messages. */
+export function contentBlocksOf(msg: AgentMessage): ContentBlock[] {
+  if (typeof msg.content === "string") return [{ type: "text", text: msg.content }];
+  return blocks(msg);
 }
 
 // ── Partial-message (stream_event) accessors (BRO-1571) ──

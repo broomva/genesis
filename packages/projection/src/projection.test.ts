@@ -317,6 +317,79 @@ describe("projection reducer — token streaming (BRO-1571)", () => {
   });
 });
 
+describe("projection reducer — parts timeline (BRO-1607)", () => {
+  test("tool round-trip builds an ordered text · tool · text timeline with matched output", () => {
+    const s = reduceAll(fixture("tool.ndjson"));
+    expect(s.parts).toEqual([
+      { type: "text", text: "Let me check the files." },
+      {
+        type: "tool",
+        toolCallId: "tu1",
+        toolName: "Bash",
+        input: { command: "ls" },
+        output: "README.md",
+        state: "output-available",
+      },
+      { type: "text", text: "Found README.md." },
+    ]);
+  });
+
+  test("a simple turn yields a single text part", () => {
+    const s = reduceAll(fixture("success.ndjson"));
+    expect(s.parts).toEqual([{ type: "text", text: "Hello, I'll help with that." }]);
+  });
+
+  test("an errored tool_result marks the tool part output-error", () => {
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "x" } }] },
+    });
+    s = reduce(s, {
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "t1", content: "boom", is_error: true }],
+      },
+    });
+    expect(s.parts).toEqual([
+      {
+        type: "tool",
+        toolCallId: "t1",
+        toolName: "Bash",
+        input: { command: "x" },
+        output: "boom",
+        state: "output-error",
+      },
+    ]);
+  });
+
+  test("AskUserQuestion is a HITL gate, not a timeline tool part", () => {
+    const s = reduce(initialState, {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "q1", name: "AskUserQuestion", input: { questions: [] } },
+        ],
+      },
+    });
+    expect(s.phase).toBe("awaiting");
+    expect(s.parts).toEqual([]); // excluded from the renderable timeline
+  });
+
+  test("a tool_result with no matching tool_use is ignored (no orphan part)", () => {
+    const s = reduce(initialState, {
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "ghost", content: "x" }] },
+    });
+    expect(s.parts).toEqual([]);
+  });
+
+  test("parts survive folding through to the terminal result", () => {
+    const s = reduceAll(fixture("tool.ndjson"));
+    expect(s.phase).toBe("done");
+    expect(s.parts?.filter((p) => p.type === "tool")).toHaveLength(1);
+  });
+});
+
 describe("projection reducer — usage + cost (BRO-1597)", () => {
   test("result usage + total_cost_usd fold into RunState", () => {
     const s = reduce(

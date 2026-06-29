@@ -50,6 +50,11 @@ export const turns = pgTable(
     cacheReadTokens: integer("cache_read_tokens"),
     cacheCreationTokens: integer("cache_creation_tokens"),
     costUsd: doublePrecision("cost_usd"),
+    // Ordered text+tool timeline (BRO-1607), JSON-encoded so a reloaded thread
+    // rebuilds tool blocks + interleaving. `thinkingTokens` reloads the reasoning
+    // indicator. Both additive + nullable — see the ALTER block in MIGRATE_SQL.
+    parts: text("parts"),
+    thinkingTokens: integer("thinking_tokens"),
   },
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
@@ -91,4 +96,6 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_creation_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cost_usd double precision;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS parts text;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS thinking_tokens integer;
 `;

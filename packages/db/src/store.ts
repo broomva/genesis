@@ -2,7 +2,15 @@
 // drizzle db handle, so the same code backs pglite (tests / local FS-as-truth)
 // and postgres-js (Railway Postgres in prod).
 
-import { type Session, type Store, type Turn, type Workspace, isoNow, newId } from "@genesis/core";
+import {
+  type Session,
+  type Store,
+  type Turn,
+  type TurnPart,
+  type Workspace,
+  isoNow,
+  newId,
+} from "@genesis/core";
 import { eq, inArray } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
@@ -31,6 +39,20 @@ interface TurnRow {
   cacheReadTokens?: number | null;
   cacheCreationTokens?: number | null;
   costUsd?: number | null;
+  parts?: string | null;
+  thinkingTokens?: number | null;
+}
+
+/** Parse the JSON-encoded parts timeline (BRO-1607); tolerate malformed/legacy
+ *  data by dropping it (the reload then falls back to the plain `text`). */
+function parseParts(raw: string | null | undefined): TurnPart[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) && v.length > 0 ? (v as TurnPart[]) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function toSession(r: SessionRow): Session {
@@ -139,6 +161,9 @@ export class DrizzleStore implements Store {
       cacheReadTokens: turn.usage?.cacheRead ?? null,
       cacheCreationTokens: turn.usage?.cacheCreation ?? null,
       costUsd: turn.costUsd ?? null,
+      // Ordered timeline + thinking estimate (BRO-1607) — JSON for parts.
+      parts: turn.parts && turn.parts.length > 0 ? JSON.stringify(turn.parts) : null,
+      thinkingTokens: turn.thinkingTokens ?? null,
     });
     return turn;
   }
@@ -170,6 +195,8 @@ export class DrizzleStore implements Store {
             }
           : undefined,
         costUsd: x.costUsd ?? undefined,
+        parts: parseParts(x.parts),
+        thinkingTokens: x.thinkingTokens ?? undefined,
       };
     });
   }

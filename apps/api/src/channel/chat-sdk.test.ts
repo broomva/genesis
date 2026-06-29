@@ -254,6 +254,81 @@ describe("toUiStreamParts — canonical events → UI message stream", () => {
   });
 });
 
+describe("toUiStreamParts — dynamic tool parts (BRO-1607)", () => {
+  const toolEvent = (
+    state: "input-available" | "output-available" | "output-error",
+    extra: Record<string, unknown> = {},
+  ): OutgoingEvent => ({
+    kind: "tool",
+    part: {
+      type: "tool",
+      toolCallId: "tu1",
+      toolName: "Bash",
+      input: { command: "ls" },
+      state,
+      ...extra,
+    },
+  });
+
+  test("text → tool → text renders the tool as its own part, between closed text parts", async () => {
+    const parts = await collect([
+      { kind: "phase", phase: "running", text: "Let me check the files." },
+      toolEvent("input-available"),
+      toolEvent("output-available", { output: "README.md" }),
+      { kind: "reply", phase: "done", text: "Found README.md." },
+    ]);
+    expect(parts).toEqual([
+      { type: "start", messageId: "m1" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Let me check the files." },
+      { type: "text-end", id: "t1" }, // closed BEFORE the tool
+      {
+        type: "tool-input-available",
+        toolCallId: "tu1",
+        toolName: "Bash",
+        input: { command: "ls" },
+        dynamic: true,
+      },
+      { type: "tool-output-available", toolCallId: "tu1", output: "README.md", dynamic: true },
+      { type: "text-start", id: "t2" },
+      { type: "text-delta", id: "t2", delta: "Found README.md." },
+      { type: "text-end", id: "t2" },
+      { type: "finish" },
+    ]);
+  });
+
+  test("a failed tool emits tool-output-error with the error text", async () => {
+    const parts = await collect([
+      toolEvent("input-available"),
+      toolEvent("output-error", { output: "command not found" }),
+      { kind: "reply", phase: "done", text: "That failed." },
+    ]);
+    expect(parts).toContainEqual({
+      type: "tool-output-error",
+      toolCallId: "tu1",
+      errorText: "command not found",
+      dynamic: true,
+    });
+    // no tool-output-available for a failed tool
+    expect(parts.some((p) => p.type === "tool-output-available")).toBe(false);
+  });
+
+  test("a tool before any text still flushes reasoning first", async () => {
+    const parts = await collect([
+      { kind: "phase", phase: "running", reasoning: "Extended thinking · ~50 tokens" },
+      toolEvent("input-available"),
+      { kind: "reply", phase: "done", text: "done" },
+    ]);
+    expect(parts.slice(0, 5).map((p) => p.type)).toEqual([
+      "start",
+      "reasoning-start",
+      "reasoning-delta",
+      "reasoning-end",
+      "tool-input-available",
+    ]);
+  });
+});
+
 describe("uiMessageStreamResponse — full SSE wire output", () => {
   test("produces the exact SSE byte stream ending in [DONE]", async () => {
     async function* gen() {
