@@ -297,6 +297,39 @@ describe("toUiStreamParts — dynamic tool parts (BRO-1607)", () => {
     ]);
   });
 
+  test("the STALE phase re-emit between tool-in and tool-out does NOT duplicate text (BRO-1607 regression)", async () => {
+    // Faithful to server.ts: onState fires per reduced event and emits a `phase`
+    // carrying state.lastText BEFORE draining tool parts. The tool_result `user`
+    // event re-sends the unchanged lastText — which previously reopened a fresh
+    // text part and re-streamed the whole sentence.
+    const parts = await collect([
+      { kind: "phase", phase: "running", text: "Let me check the files." },
+      toolEvent("input-available"),
+      { kind: "phase", phase: "running", text: "Let me check the files." }, // STALE re-emit
+      toolEvent("output-available", { output: "README.md" }),
+      { kind: "phase", phase: "running", text: "Found README.md." },
+      { kind: "reply", phase: "done", text: "Found README.md." },
+    ]);
+    const deltas = parts
+      .filter((p) => p.type === "text-delta")
+      .map((p) => (p as { delta: string }).delta);
+    // exactly two text blocks — the pre-tool sentence is NOT repeated
+    expect(deltas).toEqual(["Let me check the files.", "Found README.md."]);
+    // structurally: one text part for each, the tool between them
+    expect(parts.map((p) => p.type)).toEqual([
+      "start",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "tool-input-available",
+      "tool-output-available",
+      "text-start",
+      "text-delta",
+      "text-end",
+      "finish",
+    ]);
+  });
+
   test("a failed tool emits tool-output-error with the error text", async () => {
     const parts = await collect([
       toolEvent("input-available"),

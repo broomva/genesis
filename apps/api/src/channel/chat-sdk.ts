@@ -162,6 +162,11 @@ export async function* toUiStreamParts(
   yield { type: "start", messageId: ids.messageId };
   let currentId: string | null = null;
   let emitted = "";
+  // The text of the most-recently CLOSED text part (BRO-1607). After a tool closes
+  // its bracketing text part, the tool_result `user` event re-sends the SAME
+  // `lastText` (the reducer spreads it unchanged) — reopening a part for it would
+  // duplicate the text. We remember the closed text and skip that stale re-emit.
+  let closedText: string | null = null;
   let errored: string | undefined;
   // Reasoning is a ONE-SHOT indicator (BRO-1574): the latest note is captured from
   // phase events (which carry it while thinking, before any answer text) and
@@ -197,6 +202,7 @@ export async function* toUiStreamParts(
         if (currentId === null) yield* flushReasoning();
         if (currentId !== null) {
           yield { type: "text-end", id: currentId };
+          closedText = emitted;
           currentId = null;
           emitted = "";
         }
@@ -238,6 +244,13 @@ export async function* toUiStreamParts(
       const text = ev.text;
       if (typeof text !== "string" || text.length === 0) continue;
 
+      // Stale re-emit (BRO-1607): a tool already closed this exact text into its own
+      // part; the tool_result phase event carries the unchanged `lastText`. The part
+      // is closed + fully streamed, so skip rather than reopen + duplicate it. (A
+      // genuine next block carries different text; the parts timeline — built from
+      // complete events — keeps the faithful record for reload.)
+      if (currentId === null && text === closedText) continue;
+
       // Thinking precedes the answer → flush the reasoning part before the first
       // text part opens.
       if (currentId === null) yield* flushReasoning();
@@ -245,6 +258,7 @@ export async function* toUiStreamParts(
       // A non-prefix block can't extend the open part → close it, start fresh.
       if (currentId !== null && !text.startsWith(emitted)) {
         yield { type: "text-end", id: currentId };
+        closedText = emitted;
         currentId = null;
         emitted = "";
       }

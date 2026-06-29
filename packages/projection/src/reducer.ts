@@ -52,8 +52,22 @@ export type TurnPart = { type: "text"; text: string } | ToolPart;
  *  parts timeline (the `awaiting` phase + question UI handle them). */
 const TIMELINE_SKIP_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
 
+/** Cap a tool output we keep (BRO-1607). A noisy Bash / large Read could otherwise
+ *  store + re-transmit multiple MB per turn; the client only displays the head
+ *  anyway. Strings are truncated with a marker; structured results pass through. */
+const MAX_TOOL_OUTPUT = 32_000;
+function capOutput(content: unknown): unknown {
+  if (typeof content === "string" && content.length > MAX_TOOL_OUTPUT) {
+    return `${content.slice(0, MAX_TOOL_OUTPUT)}\n… [truncated]`;
+  }
+  return content;
+}
+
 /** Append a complete assistant message's text + tool_use blocks to the timeline,
- *  in content order (BRO-1607). */
+ *  in content order (BRO-1607). Idempotent on tool id: a re-emitted identical
+ *  assistant message (e.g. a mid-stream `--resume` replay) can't append a second
+ *  copy of a tool that's already in the timeline (which would strand the dup
+ *  permanently "running", since applyToolResults fills only the first by id). */
 function appendAssistantParts(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
   const out = prev.slice();
   for (const b of contentBlocksOf(msg)) {
@@ -63,7 +77,8 @@ function appendAssistantParts(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
       b.type === "tool_use" &&
       typeof b.name === "string" &&
       typeof b.id === "string" &&
-      !TIMELINE_SKIP_TOOLS.has(b.name)
+      !TIMELINE_SKIP_TOOLS.has(b.name) &&
+      !out.some((p) => p.type === "tool" && p.toolCallId === b.id)
     ) {
       out.push({
         type: "tool",
@@ -93,7 +108,7 @@ function applyToolResults(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
     const tp = out[idx] as ToolPart;
     out[idx] = {
       ...tp,
-      output: r.content,
+      output: capOutput(r.content),
       state: r.is_error === true ? "output-error" : "output-available",
     };
   }

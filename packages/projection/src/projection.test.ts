@@ -375,6 +375,18 @@ describe("projection reducer — parts timeline (BRO-1607)", () => {
     expect(s.parts).toEqual([]); // excluded from the renderable timeline
   });
 
+  test("a re-emitted identical assistant message does not double-append a tool (idempotent by id)", () => {
+    const assistant: AgentEvent = {
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }],
+      },
+    };
+    let s = reduce(initialState, assistant);
+    s = reduce(s, assistant); // mid-stream replay of the SAME message
+    expect(s.parts?.filter((p) => p.type === "tool")).toHaveLength(1);
+  });
+
   test("a tool_result with no matching tool_use is ignored (no orphan part)", () => {
     const s = reduce(initialState, {
       type: "user",
