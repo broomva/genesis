@@ -16,7 +16,6 @@ import {
   PromptInputActionMenuTrigger,
   PromptInputBody,
   PromptInputFooter,
-  PromptInputHeader,
   type PromptInputMessage,
   PromptInputProvider,
   PromptInputSelect,
@@ -294,6 +293,8 @@ export function ChatView({
     let costUsd = 0;
     let sessionInput = 0;
     let sessionOutput = 0;
+    let sessionCacheRead = 0;
+    let sessionCacheWrite = 0;
     let latest: MessageMetadata["usage"];
     for (const m of messages) {
       if (m.role !== "assistant") continue;
@@ -303,6 +304,8 @@ export function ChatView({
       if (meta.usage) {
         sessionInput += meta.usage.input;
         sessionOutput += meta.usage.output;
+        sessionCacheRead += meta.usage.cacheRead;
+        sessionCacheWrite += meta.usage.cacheCreation;
         latest = meta.usage;
       }
     }
@@ -313,6 +316,8 @@ export function ChatView({
       costUsd,
       sessionInput,
       sessionOutput,
+      sessionCacheRead,
+      sessionCacheWrite,
     };
   }, [messages, model]);
 
@@ -493,14 +498,6 @@ export function ChatView({
                   onError={(e) => setNotice(e.message)}
                   className="bv-composer w-full"
                 >
-                  {/* Context meter (BRO-1597) — a quiet usage gauge in the composer
-                      header; only once a turn has reported usage (fresh threads stay
-                      clean). */}
-                  {meterData.contextTokens > 0 || meterData.costUsd > 0 ? (
-                    <PromptInputHeader className="justify-end">
-                      <ContextMeter data={meterData} />
-                    </PromptInputHeader>
-                  ) : null}
                   <PromptInputBody>
                     <RecallTextarea history={userHistory} />
                   </PromptInputBody>
@@ -539,21 +536,26 @@ export function ChatView({
                         </PromptInputSelectContent>
                       </PromptInputSelect>
                     </PromptInputTools>
-                    {/* DS send — a circular primary-fill button with the DS up-arrow at
-                  rest (the button inherits the ink-hover lighten from the default
-                  variant). The component swaps in its own spinner/stop/error glyphs
+                    {/* Right group: the context meter (BRO-1604) sits next to the
+                        send button — a compact usage trigger that opens the breakdown
+                        popover, off the top of the composer where it crowded spacing. */}
+                    <div className="flex items-center gap-1.5">
+                      <ContextMeter data={meterData} />
+                      {/* DS send — a circular primary-fill button with the DS up-arrow
+                  at rest. The component swaps in its own spinner/stop/error glyphs
                   for the in-flight states, so only the idle icon is overridden.
                   onStop → during a stream the button becomes type=button and aborts
                   directly (no form submit/reset), so text typed mid-stream isn't
                   wiped (P20 BRO-1573). handleSubmit's busy-guard is the Enter-key
                   fallback. */}
-                    <PromptInputSubmit
-                      status={status}
-                      onStop={stop}
-                      className="size-9 rounded-full"
-                    >
-                      {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
-                    </PromptInputSubmit>
+                      <PromptInputSubmit
+                        status={status}
+                        onStop={stop}
+                        className="size-9 rounded-full"
+                      >
+                        {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
+                      </PromptInputSubmit>
+                    </div>
                   </PromptInputFooter>
                 </PromptInput>
               </PromptInputProvider>

@@ -2,33 +2,30 @@
 
 import { TriangleAlert } from "lucide-react";
 
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-// The composer context meter (BRO-1597). A QUIET resource gauge, not a progress
-// bar — the DS bans progress percentages on agent work ("presence, not progress
-// — show receipts"). So the readout is absolute token counts + claude's exact
-// cost in a mono receipt chip; a thin track carries the context-window fraction
-// visually, shifting hue at thresholds so colour stays signal (the status ladder
-// — ai-blue → warning → danger). No emoji, no percentages in the text.
-//
-// SCOPE: fed by the PRINT engine (claude -p), which emits usage + total_cost_usd
-// on its terminal result — the production default on the VPS. Under the exempt
-// INTERACTIVE engine (GENESIS_ENGINE=interactive) the synthesized result carries
-// no usage yet, so the meter stays hidden there; wiring the statusline usage is a
-// tracked follow-up. The meter degrades gracefully (renders nothing without data).
+// The composer context meter (BRO-1597, redesigned BRO-1604). A compact trigger
+// in the composer FOOTER (a thin context-fill bar + the session cost, quiet at
+// rest) opens a usage popover with the full breakdown — moving it off the top of
+// the composer (which added awkward spacing) into the toolbar. Still DS-true: the
+// readout is absolute token counts + claude's exact cost (no bare progress %);
+// the thin track carries the context-window fraction visually and shifts hue at
+// thresholds so colour stays signal (the status ladder — ai-blue → warning →
+// danger). Popovers earn glass.
 
 export interface ContextMeterData {
-  /** Latest-turn prompt size = input + cacheRead + cacheCreation (the real
-   *  context-window fill right now). */
+  /** Latest-turn prompt size = input + cacheRead + cacheCreation (current fill). */
   contextTokens: number;
   /** Selected model's max context window. */
   contextWindow: number;
   /** Cumulative session cost (USD) — claude's exact numbers summed. */
   costUsd: number;
-  /** Cumulative session input/output tokens (for the breakdown tooltip). */
+  /** Cumulative session token sums for the breakdown. */
   sessionInput: number;
   sessionOutput: number;
+  sessionCacheRead: number;
+  sessionCacheWrite: number;
 }
 
 function formatTokens(n: number): string {
@@ -39,79 +36,104 @@ function formatTokens(n: number): string {
 
 function formatUsd(n: number): string {
   if (n <= 0) return "$0.00";
-  // Preserve the exact-cost signal for sub-cent amounts (BRO-1597) — collapsing
-  // every small turn to "<$0.01" defeats the point; show real digits, only
-  // bottoming out below a tenth of a cent.
   if (n < 0.001) return "<$0.001";
   if (n < 0.01) return `$${n.toFixed(4).replace(/0+$/, "")}`;
   return `$${n.toFixed(2)}`;
 }
 
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="text-foreground">{value}</span>
+    </div>
+  );
+}
+
 export function ContextMeter({ data, className }: { data: ContextMeterData; className?: string }) {
-  const { contextTokens, contextWindow, costUsd, sessionInput, sessionOutput } = data;
+  const {
+    contextTokens,
+    contextWindow,
+    costUsd,
+    sessionInput,
+    sessionOutput,
+    sessionCacheRead,
+    sessionCacheWrite,
+  } = data;
   // Nothing to show until a turn has reported usage (a fresh thread is silent).
   if (contextTokens === 0 && costUsd === 0) return null;
 
   const frac = contextWindow > 0 ? Math.min(contextTokens / contextWindow, 1) : 0;
   const fill =
     frac >= 0.92 ? "var(--bv-danger)" : frac >= 0.8 ? "var(--bv-warning)" : "var(--bv-blue)";
-  // Threshold status carried by SHAPE + WORD, never colour alone (WCAG 1.4.1):
-  // the alert glyph + the aria-label word appear/disappear at the same points
-  // the track changes hue, so colourblind + screen-reader users get the cue too.
   const status = frac >= 0.92 ? "over limit" : frac >= 0.8 ? "near limit" : undefined;
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        {/* A real <button> (not a div) — keyboard-focusable so the breakdown
-            tooltip is reachable without a pointer, gives the aria-label a role
-            that announces it, and skips the composer addon's click-to-focus
-            steal (P20 a11y). type=button so it never submits the composer form. */}
+    <Popover>
+      <PopoverTrigger asChild>
         <button
           type="button"
+          aria-label={`Session usage — context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, cost ${formatUsd(costUsd)}. Open breakdown.`}
           className={cn(
-            // A receipt carries no resting surface (BRO-1599) — transparent at
-            // rest on the glass composer, the soft-canvas fill revealed only on
-            // hover/focus (the quiet-until-interaction pattern the row ⋯ uses).
-            "flex items-center gap-2 rounded-[5px] bg-transparent px-2 py-1 transition-colors",
-            "hover:bg-[var(--bv-canvas-soft)] focus-visible:bg-[var(--bv-canvas-soft)]",
-            "text-muted-foreground font-mono text-[11px] [font-variant-numeric:tabular-nums]",
+            "flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted-foreground transition-colors",
+            "hover:bg-[var(--bv-frost-8)] hover:text-foreground",
+            "data-[state=open]:bg-[var(--bv-frost-8)] data-[state=open]:text-foreground",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
             className,
           )}
-          // Describe the gauge for screen readers — counts + threshold word, no %.
-          aria-label={`Context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, session cost ${formatUsd(costUsd)}`}
         >
-          <span>
-            {formatTokens(contextTokens)} / {formatTokens(contextWindow)}
-          </span>
           <span
             aria-hidden
-            className="h-[3px] w-10 overflow-hidden rounded-full bg-[var(--bv-border-5)]"
+            className="h-[3px] w-8 overflow-hidden rounded-full bg-[var(--bv-border-5)]"
           >
             <span
               className="block h-full rounded-full transition-[width] duration-300"
-              style={{ width: `${Math.max(frac * 100, 2)}%`, background: fill }}
+              style={{ width: `${Math.max(frac * 100, 4)}%`, background: fill }}
             />
           </span>
           {status ? <TriangleAlert aria-hidden className="size-3" style={{ color: fill }} /> : null}
-          <span>{formatUsd(costUsd)}</span>
+          <span className="font-mono text-[11px] [font-variant-numeric:tabular-nums]">
+            {formatUsd(costUsd)}
+          </span>
         </button>
-      </TooltipTrigger>
-      <TooltipContent
-        side="top"
-        className="font-mono text-[11px] [font-variant-numeric:tabular-nums]"
-      >
-        <div className="space-y-0.5">
+      </PopoverTrigger>
+      <PopoverContent align="end" side="top" className="w-64">
+        <div className="space-y-2.5">
+          <div className="text-foreground text-sm font-medium">Session usage</div>
+
           <div>
-            context {contextTokens.toLocaleString()} / {contextWindow.toLocaleString()}
+            <div className="flex items-baseline justify-between font-mono text-xs [font-variant-numeric:tabular-nums]">
+              <span className="text-muted-foreground">Context</span>
+              <span className="text-foreground">
+                {formatTokens(contextTokens)} / {formatTokens(contextWindow)}
+              </span>
+            </div>
+            <span
+              aria-hidden
+              className="mt-1.5 block h-[5px] w-full overflow-hidden rounded-full bg-[var(--bv-border-5)]"
+            >
+              <span
+                className="block h-full rounded-full transition-[width] duration-300"
+                style={{ width: `${Math.max(frac * 100, 2)}%`, background: fill }}
+              />
+            </span>
           </div>
-          <div>
-            session in {sessionInput.toLocaleString()} · out {sessionOutput.toLocaleString()}
+
+          <div className="flex items-baseline justify-between font-mono text-xs [font-variant-numeric:tabular-nums]">
+            <span className="text-muted-foreground">Cost</span>
+            <span className="text-foreground">{formatUsd(costUsd)}</span>
           </div>
-          <div>cost {formatUsd(costUsd)}</div>
+
+          <div className="border-border border-t" />
+
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 font-mono text-[11px] [font-variant-numeric:tabular-nums]">
+            <Stat label="Input" value={formatTokens(sessionInput)} />
+            <Stat label="Output" value={formatTokens(sessionOutput)} />
+            <Stat label="Cache read" value={formatTokens(sessionCacheRead)} />
+            <Stat label="Cache write" value={formatTokens(sessionCacheWrite)} />
+          </div>
         </div>
-      </TooltipContent>
-    </Tooltip>
+      </PopoverContent>
+    </Popover>
   );
 }
