@@ -402,6 +402,59 @@ describe("projection reducer — parts timeline (BRO-1607)", () => {
   });
 });
 
+describe("projection reducer — reasoning detection (BRO-1608)", () => {
+  const sd = (event: PartialStreamEvent): AgentEvent => ({
+    type: "stream_event",
+    event,
+    session_id: "s",
+  });
+
+  test("signature_delta alone marks reasoned (effort high: no thinking_delta, no tokens)", () => {
+    const s = reduce(
+      { phase: "running", turns: 0 },
+      sd({ type: "content_block_delta", index: 0, delta: { type: "signature_delta" } }),
+    );
+    expect(s.reasoned).toBe(true);
+    expect(s.thinkingTokens ?? 0).toBe(0); // no estimate at effort high — reasoned is the signal
+  });
+
+  test("content_block_start thinking marks reasoned", () => {
+    const s = reduce(
+      initialState,
+      sd({ type: "content_block_start", index: 0, content_block: { type: "thinking" } }),
+    );
+    expect(s.reasoned).toBe(true);
+  });
+
+  test("a complete (signature-only, redacted) thinking block marks reasoned", () => {
+    const s = reduce(initialState, {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          { type: "text", text: "The answer." },
+        ],
+      },
+    });
+    expect(s.reasoned).toBe(true);
+    expect(s.reasoning ?? "").toBe(""); // prose redacted, but we know it thought
+  });
+
+  test("verbatim thinking prose is captured when the deployment provides it", () => {
+    const s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "let me reason about X" }] },
+    });
+    expect(s.reasoning).toBe("let me reason about X");
+    expect(s.reasoned).toBe(true);
+  });
+
+  test("a turn with no thinking leaves reasoned falsy", () => {
+    expect(reduceAll(fixture("success.ndjson")).reasoned).toBeFalsy();
+    expect(reduceAll(fixture("tool.ndjson")).reasoned).toBeFalsy();
+  });
+});
+
 describe("projection reducer — usage + cost (BRO-1597)", () => {
   test("result usage + total_cost_usd fold into RunState", () => {
     const s = reduce(

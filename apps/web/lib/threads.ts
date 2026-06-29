@@ -55,15 +55,25 @@ interface Turn {
   costUsd?: number;
   /** Ordered text+tool timeline (BRO-1607). Absent on user turns / pre-1607 rows. */
   parts?: StoredPart[];
-  /** Extended-thinking estimate (BRO-1607) → rebuilds the reasoning indicator. */
+  /** Extended-thinking estimate (BRO-1607) → the `~N tokens` on the indicator. */
   thinkingTokens?: number;
+  /** The model reasoned this turn (BRO-1608) → whether to rebuild the indicator,
+   *  independent of the token count (0 at effort high). */
+  reasoned?: boolean;
 }
 
-/** The thinking INDICATOR note (BRO-1574) — kept in sync with the engine's
- *  `thinkingNote` (apps/api/src/server.ts). The prose is redacted under the VPS
- *  subscription auth, so a reloaded turn shows the same token-based summary. */
-function thinkingNote(tokens: number): string {
-  return `Extended thinking · ~${tokens} tokens (reasoning content is private on this deployment)`;
+/** The reasoning INDICATOR note on reload (BRO-1608) — kept in sync with the
+ *  engine's `reasoningNote` (apps/api/src/server.ts). Prose is redacted under the
+ *  VPS subscription auth (not persisted), so a reloaded turn shows the same
+ *  token-based / token-less indicator the live turn did. Undefined → no indicator. */
+function reasoningNote(
+  reasoned: boolean | undefined,
+  tokens: number | undefined,
+): string | undefined {
+  if (!reasoned && !(tokens && tokens > 0)) return undefined;
+  return tokens && tokens > 0
+    ? `Extended thinking · ~${tokens} tokens (content private on this deployment)`
+    : "Extended thinking (content private on this deployment)";
 }
 
 /** A persisted tool part → an AI SDK dynamic-tool UIMessagePart (BRO-1607). The
@@ -112,8 +122,9 @@ export async function fetchThreadMessages(
     // reloaded thread shows tool blocks + interleaving, not just the final text.
     // Pre-1607 rows (no `parts`) fall back to a single text part.
     const parts: UIMessage["parts"] = [];
-    if (t.role === "agent" && t.thinkingTokens && t.thinkingTokens > 0) {
-      parts.push({ type: "reasoning", text: thinkingNote(t.thinkingTokens) });
+    if (t.role === "agent") {
+      const note = reasoningNote(t.reasoned, t.thinkingTokens);
+      if (note) parts.push({ type: "reasoning", text: note });
     }
     let hasBody = false;
     if (t.parts && t.parts.length > 0) {

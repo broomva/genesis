@@ -11,6 +11,8 @@
 export interface ContentBlock {
   type: string; // "text" | "tool_use" | "tool_result" | "thinking"
   text?: string;
+  thinking?: string; // extended-thinking prose (redacted to "" under subscription auth)
+  signature?: string; // cryptographic signature on a thinking block — proof it thought
   id?: string; // tool_use call id — links a tool_use to its later tool_result
   name?: string; // tool name (tool_use)
   input?: unknown; // tool args (tool_use)
@@ -167,4 +169,16 @@ export function streamThinkingTokens(ev: PartialStreamEvent): number | undefined
  *  else undefined. A new block is the reset boundary for its accumulator. */
 export function streamBlockStart(ev: PartialStreamEvent): string | undefined {
   return ev.type === "content_block_start" ? ev.content_block?.type : undefined;
+}
+
+/** True when a stream_event signals extended thinking by ANY channel (BRO-1608):
+ *  a thinking block opening, a thinking_delta, or a `signature_delta`. The robust
+ *  is-thinking detector — at `--effort high` the CLI emits ONLY a signature_delta
+ *  (no thinking_delta, no estimated_tokens), so `thinkingTokens > 0` alone misses
+ *  it. The thinking PROSE is redacted regardless; this only detects *that* the
+ *  model thought, so the indicator can show. */
+export function streamThinkingSignal(ev: PartialStreamEvent): boolean {
+  if (ev.type === "content_block_start" && ev.content_block?.type === "thinking") return true;
+  const d = ev.delta?.type;
+  return d === "thinking_delta" || d === "signature_delta";
 }

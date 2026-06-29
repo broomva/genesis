@@ -45,7 +45,12 @@ export interface Turn {
    *  thread rebuilds tool blocks + interleaving, not just the final text. Absent
    *  on user turns and pre-1607 historical rows (reload falls back to `text`). */
   parts?: TurnPart[];
-  /** Extended-thinking token estimate (BRO-1607 reload of BRO-1574) — drives the
-   *  reasoning indicator on a reloaded turn. Absent → no thinking / pre-1607 row. */
+  /** Extended-thinking token estimate (BRO-1607 reload of BRO-1574) — the `~N
+   *  tokens` budget on the reloaded reasoning indicator. Absent / 0 at effort high
+   *  (the CLI reports no estimate) — does NOT mean "no thinking"; see `reasoned`. */
   thinkingTokens?: number;
+  /** The model used extended thinking this turn (BRO-1608) — drives WHETHER the
+   *  reasoning indicator shows on a reloaded turn, independent of the token count
+   *  (which is 0 at effort high). Absent on user turns / pre-1608 rows. */
+  reasoned?: boolean;
 }

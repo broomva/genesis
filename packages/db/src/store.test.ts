@@ -268,10 +268,21 @@ describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
       text: "Found it.",
       parts,
       thinkingTokens: 150,
+      reasoned: true,
     });
     const [t] = await store.turnsForSession("sP");
     expect(t?.parts).toEqual(parts); // exact ordered timeline survives the reload
     expect(t?.thinkingTokens).toBe(150);
+    expect(t?.reasoned).toBe(true);
+    await store.close();
+  });
+
+  test("reasoned round-trips with NO token estimate (effort-high indicator survives reload, BRO-1608)", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({ sessionId: "sR", role: "agent", text: "ok", reasoned: true });
+    const [t] = await store.turnsForSession("sR");
+    expect(t?.reasoned).toBe(true);
+    expect(t?.thinkingTokens).toBeUndefined(); // no count, but the indicator still shows
     await store.close();
   });
 
@@ -281,6 +292,7 @@ describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
     const [t] = await store.turnsForSession("sQ");
     expect(t?.parts).toBeUndefined();
     expect(t?.thinkingTokens).toBeUndefined();
+    expect(t?.reasoned).toBeUndefined();
     await store.close();
   });
 });

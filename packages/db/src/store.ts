@@ -41,6 +41,7 @@ interface TurnRow {
   costUsd?: number | null;
   parts?: string | null;
   thinkingTokens?: number | null;
+  reasoned?: boolean | null;
 }
 
 /** Parse the JSON-encoded parts timeline (BRO-1607); tolerate malformed/legacy
@@ -164,6 +165,8 @@ export class DrizzleStore implements Store {
       // Ordered timeline + thinking estimate (BRO-1607) — JSON for parts.
       parts: turn.parts && turn.parts.length > 0 ? JSON.stringify(turn.parts) : null,
       thinkingTokens: turn.thinkingTokens ?? null,
+      // Did the model reason this turn (BRO-1608) — token-independent indicator.
+      reasoned: turn.reasoned ?? null,
     });
     return turn;
   }
@@ -197,6 +200,7 @@ export class DrizzleStore implements Store {
         costUsd: x.costUsd ?? undefined,
         parts: parseParts(x.parts),
         thinkingTokens: x.thinkingTokens ?? undefined,
+        reasoned: x.reasoned ?? undefined,
       };
     });
   }

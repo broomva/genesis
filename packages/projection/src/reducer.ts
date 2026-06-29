@@ -18,6 +18,7 @@ import {
   streamBlockStart,
   streamTextDelta,
   streamThinkingDelta,
+  streamThinkingSignal,
   streamThinkingTokens,
   textBlocks,
   toolUses,
@@ -152,8 +153,15 @@ export interface RunState {
   reasoning?: string;
   /** Max thinking-token estimate seen this turn (BRO-1574). >0 ⇒ the model did
    *  extended thinking, even when the prose is redacted. The basis for the
-   *  client's "Thought · ~N tokens" indicator. */
+   *  client's "Thought · ~N tokens" indicator. NOTE: 0 does NOT mean "no thinking"
+   *  — at `--effort high` the CLI emits no estimated_tokens; use `reasoned`. */
   thinkingTokens?: number;
+  /** The robust "the model used extended thinking this turn" signal (BRO-1608),
+   *  set by ANY thinking channel: a signature_delta, a thinking content block, or
+   *  a thinking_delta. Independent of `thinkingTokens` (which is 0 at effort high)
+   *  and `reasoning` (redacted to "" under subscription auth) — it's what decides
+   *  whether the reasoning indicator shows at all. */
+  reasoned?: boolean;
   /** Ordered text+tool timeline for the turn (BRO-1607), built from the COMPLETE
    *  assistant/user events. Drives live tool rendering + faithful reload; the
    *  live answer text still streams via `lastText` (partial deltas). Optional so
@@ -201,6 +209,16 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       const lastText = texts.length > 0 ? texts[texts.length - 1] : state.lastText;
       // Fold this step's text + tool_use blocks into the ordered timeline (BRO-1607).
       const parts = appendAssistantParts(state.parts ?? [], event.message);
+      // A complete `thinking` block proves the model reasoned (BRO-1608) even when
+      // the partial channel emitted no thinking_delta; capture its prose if the
+      // deployment ever provides it (redacted to "" under subscription auth).
+      const thinkingBlocks = contentBlocksOf(event.message).filter((b) => b.type === "thinking");
+      const reasoned = state.reasoned || thinkingBlocks.length > 0;
+      const prose = thinkingBlocks
+        .map((b) => b.thinking ?? "")
+        .join("")
+        .trim();
+      const reasoning = prose.length > 0 ? prose : state.reasoning;
       const awaiting = toolUses(event.message).find((t) => AWAIT_TOOLS.has(t.name));
       if (awaiting) {
         return {
@@ -209,11 +227,22 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           phase: "awaiting",
           lastText,
           parts,
+          reasoned,
+          reasoning,
           turns: state.turns + 1,
           pendingQuestion: extractQuestion(awaiting.input) ?? lastText,
         };
       }
-      return { ...state, sessionId, phase: "running", lastText, parts, turns: state.turns + 1 };
+      return {
+        ...state,
+        sessionId,
+        phase: "running",
+        lastText,
+        parts,
+        reasoned,
+        reasoning,
+        turns: state.turns + 1,
+      };
     }
 
     case "stream_event": {
@@ -228,7 +257,9 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       const blockStart = streamBlockStart(ev);
       if (blockStart === "text") return { ...state, sessionId, phase: "running", lastText: "" };
       if (blockStart === "thinking")
-        return { ...state, sessionId, phase: "running", reasoning: "" };
+        // The model started thinking — reset the prose accumulator AND mark reasoned
+        // (BRO-1608), so the indicator shows even if no thinking_delta follows.
+        return { ...state, sessionId, phase: "running", reasoning: "", reasoned: true };
       const textDelta = streamTextDelta(ev);
       if (textDelta !== undefined) {
         return {
@@ -249,13 +280,17 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           ...state,
           sessionId,
           phase: "running",
+          reasoned: true,
           reasoning: (state.reasoning ?? "") + (thinkingDelta ?? ""),
           thinkingTokens: Math.max(state.thinkingTokens ?? 0, thinkingTokens ?? 0),
         };
       }
-      // message_start / content_block_stop / message_delta / message_stop — keep
-      // the run alive, capture any session id, no text change.
-      return { ...state, sessionId };
+      // message_start / content_block_stop / message_delta / message_stop — keep the
+      // run alive, capture any session id. A `signature_delta` (the ONLY thinking
+      // signal at effort high) lands here too → mark reasoned (BRO-1608).
+      return streamThinkingSignal(ev)
+        ? { ...state, sessionId, reasoned: true }
+        : { ...state, sessionId };
     }
 
     case "user":

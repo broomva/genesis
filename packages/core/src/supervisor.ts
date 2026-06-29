@@ -278,6 +278,7 @@ export class Supervisor {
         costUsd,
         parts: parts && parts.length > 0 ? parts : undefined,
         thinkingTokens: result.state.thinkingTokens,
+        reasoned: result.state.reasoned,
       });
 
       // Keep a per-session worktree across turns (resume continuity); only
