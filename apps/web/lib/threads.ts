@@ -20,6 +20,8 @@ export interface TokenUsage {
 export interface MessageMetadata {
   usage?: TokenUsage;
   costUsd?: number;
+  /** Server-measured agent run time in ms (BRO-1610) — shown as "5m 24s" per turn. */
+  durationMs?: number;
 }
 
 /** Mirror of the engine's ThreadSummary (packages/core Supervisor.listThreads). */
@@ -63,6 +65,8 @@ interface Turn {
   /** Verbatim reasoning prose (BRO-1608) when a deployment provides it; absent
    *  under subscription auth (redacted) → falls back to the indicator note. */
   reasoning?: string;
+  /** Server-measured run time in ms (BRO-1610). */
+  durationMs?: number;
 }
 
 /** The reasoning content on reload (BRO-1608) — matches the engine's
@@ -121,8 +125,8 @@ export async function fetchThreadMessages(
   const data = (await res.json()) as { turns?: Turn[] };
   return (data.turns ?? []).map((t) => {
     const metadata: MessageMetadata | undefined =
-      t.usage !== undefined || t.costUsd !== undefined
-        ? { usage: t.usage, costUsd: t.costUsd }
+      t.usage !== undefined || t.costUsd !== undefined || t.durationMs !== undefined
+        ? { usage: t.usage, costUsd: t.costUsd, durationMs: t.durationMs }
         : undefined;
     // Rebuild the ordered parts (BRO-1607): reasoning indicator first (if the
     // turn did extended thinking), then the persisted text+tool timeline — so a

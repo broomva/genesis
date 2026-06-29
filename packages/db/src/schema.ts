@@ -60,6 +60,8 @@ export const turns = pgTable(
     // Verbatim reasoning prose (BRO-1608) — persisted so a reload matches the live
     // turn whenever a deployment provides it; redacted to "" (→ null) on subscription.
     reasoning: text("reasoning"),
+    // Server-measured agent run time in ms (BRO-1610) — "5m 24s" on a reloaded turn.
+    durationMs: integer("duration_ms"),
   },
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
@@ -105,4 +107,5 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS parts text;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS thinking_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoned boolean;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoning text;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS duration_ms integer;
 `;

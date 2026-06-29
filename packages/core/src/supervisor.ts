@@ -92,6 +92,8 @@ export interface DispatchResult {
    *  result. Undefined if the engine/CLI didn't report them. */
   usage?: TokenUsage;
   costUsd?: number;
+  /** Server-measured agent run time in ms (BRO-1610). */
+  durationMs?: number;
 }
 
 /** One row of the thread-list UI (BRO-1567): enough to render + resume a thread
@@ -266,9 +268,10 @@ export class Supervisor {
       const reply = result.state.lastText ?? "(no output)";
       const usage = result.state.usage;
       const costUsd = result.state.costUsd;
+      const durationMs = Date.now() - startedAt; // server-measured run time (BRO-1610)
       // Persist the ordered timeline + thinking estimate (BRO-1607) alongside
-      // usage/cost (BRO-1597) so a reloaded thread rebuilds tool blocks, text
-      // interleaving, and the reasoning indicator — not just the final text.
+      // usage/cost (BRO-1597) + run time (BRO-1610) so a reloaded thread rebuilds
+      // tool blocks, text interleaving, the reasoning indicator, and "Xm Ys".
       const parts = result.state.parts;
       await this.store.addTurn({
         sessionId: session.id,
@@ -276,6 +279,7 @@ export class Supervisor {
         text: reply,
         usage,
         costUsd,
+        durationMs,
         parts: parts && parts.length > 0 ? parts : undefined,
         thinkingTokens: result.state.thinkingTokens,
         reasoned: result.state.reasoned,
@@ -295,13 +299,13 @@ export class Supervisor {
         ).catch((e) => console.error(`[genesis] worktree cleanup failed: ${e}`));
       }
 
-      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const elapsed = (durationMs / 1000).toFixed(1);
       const noOutput = result.state.lastText === undefined ? " NO-OUTPUT" : "";
       console.log(
         `[genesis] dispatch ✓ thread=${threadId} phase=${result.state.phase}${noOutput} ` +
           `reply=${reply.length}c ${elapsed}s`,
       );
-      return { session, reply, phase: result.state.phase, usage, costUsd };
+      return { session, reply, phase: result.state.phase, usage, costUsd, durationMs };
     } catch (e) {
       // Full server-side detail (BRO-1519) — previously the error was swallowed
       // and only a generic "Something went wrong" reached the user.

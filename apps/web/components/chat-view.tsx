@@ -31,6 +31,7 @@ import {
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ToolPart } from "@/components/ai-elements/tool";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
+import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Button } from "@/components/ui/button";
@@ -150,10 +151,12 @@ function AssistantBody({
   message,
   streaming,
   busy,
+  onRetry,
 }: {
   message: UIMessage;
   streaming: boolean;
   busy: boolean;
+  onRetry?: () => void;
 }) {
   const parts = message.parts;
   let lastTextIdx = -1;
@@ -194,10 +197,20 @@ function AssistantBody({
     }
     return null;
   });
+  // Run time (persisted, BRO-1610) + copy/retry, revealed on hover via the `group`.
+  const meta = message.metadata as MessageMetadata | undefined;
   return (
-    <div className="min-w-0 max-w-full">
+    <div className="group min-w-0 max-w-full">
       {nodes}
       {rendered === 0 && busy ? <ChatLoader /> : null}
+      {rendered > 0 ? (
+        <MessageActions
+          text={messageText(message)}
+          durationMs={meta?.durationMs}
+          onRetry={onRetry}
+          canRetry={!busy}
+        />
+      ) : null}
     </div>
   );
 }
@@ -221,6 +234,8 @@ function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"
       <span className="shimmer text-[var(--bv-blue-text)]">
         {status === "streaming" ? "Responding" : "Thinking"}
       </span>
+      {/* Live run-time (BRO-1610) — ticks from the moment the turn is in flight. */}
+      <RunTimer active={busy} />
     </span>
   );
 }
@@ -299,6 +314,13 @@ function RecallTextarea({ history }: { history: readonly string[] }) {
   );
 }
 
+// Copy the current composer text (BRO-1610). Reads the live value from the
+// PromptInput controller; disabled (via CopyButton) when the input is empty.
+function ComposerCopyButton() {
+  const { textInput } = usePromptInputController();
+  return <CopyButton text={textInput.value} label="Copy input" />;
+}
+
 /** One chat thread. Remounted by the parent with a `key={threadId}`, so `useChat`
  *  is constructed fresh per thread with the right `id` (→ engine threadId routing)
  *  and hydrated `initialMessages`. `onActivity` fires when a turn finishes so the
@@ -329,7 +351,7 @@ export function ChatView({
   onEffortChange: (value: string) => void;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
-  const { messages, sendMessage, status, error, stop } = useChat({
+  const { messages, sendMessage, status, error, stop, regenerate } = useChat({
     id: threadId,
     messages: initialMessages,
     transport,
@@ -489,6 +511,12 @@ export function ChatView({
                           message={message}
                           streaming={status === "streaming"}
                           busy={busy}
+                          onRetry={() =>
+                            regenerate({
+                              messageId: message.id,
+                              body: { model: modelToBody(model), effort: effortToBody(effort) },
+                            })
+                          }
                         />
                       )}
                     </MessageScrollerItem>
@@ -552,6 +580,8 @@ export function ChatView({
                           <PromptInputActionAddAttachments label="Attach text files" />
                         </PromptInputActionMenuContent>
                       </PromptInputActionMenu>
+                      {/* Copy the current input (BRO-1610). */}
+                      <ComposerCopyButton />
                       <PromptInputSelect value={model} onValueChange={onModelChange}>
                         <PromptInputSelectTrigger aria-label="Model">
                           <PromptInputSelectValue />

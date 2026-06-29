@@ -58,4 +58,8 @@ export interface Turn {
    *  (e.g. ANTHROPIC_API_KEY auth). Absent under subscription auth (redacted to "")
    *  and on user / pre-1608 rows → reload falls back to the indicator note. */
   reasoning?: string;
+  /** Server-measured agent run time in ms (BRO-1610) — set on the agent turn, so a
+   *  reloaded thread shows each turn's total run time ("5m 24s"). Absent on user /
+   *  pre-1610 rows. */
+  durationMs?: number;
 }

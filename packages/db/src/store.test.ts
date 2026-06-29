@@ -318,6 +318,15 @@ describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
     expect(t?.parts).toBeUndefined();
     expect(t?.thinkingTokens).toBeUndefined();
     expect(t?.reasoned).toBeUndefined();
+    expect(t?.durationMs).toBeUndefined();
+    await store.close();
+  });
+
+  test("run time (durationMs) round-trips so a reloaded turn shows '5m 24s' (BRO-1610)", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({ sessionId: "sD", role: "agent", text: "done", durationMs: 324_000 });
+    const [t] = await store.turnsForSession("sD");
+    expect(t?.durationMs).toBe(324_000);
     await store.close();
   });
 });
