@@ -1,7 +1,5 @@
 "use client";
 
-import { TriangleAlert } from "lucide-react";
-
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +66,15 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
     frac >= 0.92 ? "var(--bv-danger)" : frac >= 0.8 ? "var(--bv-warning)" : "var(--bv-blue)";
   const status = frac >= 0.92 ? "over limit" : frac >= 0.8 ? "near limit" : undefined;
 
+  // Ring geometry (BRO-1606): a small donut gauge whose arc fills clockwise from
+  // the top with the context fraction. The fill LEVEL itself is the non-colour
+  // cue (a fuller ring = more usage, WCAG 1.4.1); the threshold hue + the
+  // aria-label word reinforce it.
+  const RING = 16;
+  const STROKE = 2.5;
+  const radius = (RING - STROKE) / 2;
+  const circ = 2 * Math.PI * radius;
+
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -75,26 +82,44 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
           type="button"
           aria-label={`Session usage — context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, cost ${formatUsd(costUsd)}. Open breakdown.`}
           className={cn(
-            "flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted-foreground transition-colors",
+            "flex items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors",
             "hover:bg-[var(--bv-frost-8)] hover:text-foreground",
             "data-[state=open]:bg-[var(--bv-frost-8)] data-[state=open]:text-foreground",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
             className,
           )}
         >
-          <span
-            aria-hidden
-            className="h-[3px] w-8 overflow-hidden rounded-full bg-[var(--bv-border-5)]"
+          <svg
+            width={RING}
+            height={RING}
+            viewBox={`0 0 ${RING} ${RING}`}
+            className="-rotate-90"
+            aria-hidden="true"
+            role="presentation"
           >
-            <span
-              className="block h-full rounded-full transition-[width] duration-300"
-              style={{ width: `${Math.max(frac * 100, 4)}%`, background: fill }}
+            {/* Track — the faint full circle. */}
+            <circle
+              cx={RING / 2}
+              cy={RING / 2}
+              r={radius}
+              fill="none"
+              stroke="var(--bv-border-15)"
+              strokeWidth={STROKE}
             />
-          </span>
-          {status ? <TriangleAlert aria-hidden className="size-3" style={{ color: fill }} /> : null}
-          <span className="font-mono text-[11px] [font-variant-numeric:tabular-nums]">
-            {formatUsd(costUsd)}
-          </span>
+            {/* Fill — the arc that grows with the context fraction. */}
+            <circle
+              cx={RING / 2}
+              cy={RING / 2}
+              r={radius}
+              fill="none"
+              stroke={fill}
+              strokeWidth={STROKE}
+              strokeLinecap="round"
+              strokeDasharray={circ}
+              strokeDashoffset={circ * (1 - frac)}
+              className="transition-[stroke-dashoffset] duration-300"
+            />
+          </svg>
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" side="top" className="w-64">
