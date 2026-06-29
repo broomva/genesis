@@ -357,4 +357,21 @@ describe("projection reducer — usage + cost (BRO-1597)", () => {
     expect(s.usage).toEqual({ input: 7, output: 0, cacheRead: 0, cacheCreation: 0 });
     expect(s.costUsd).toBe(0.001);
   });
+
+  test("an errored result still captures usage + cost (failed turns bill tokens)", () => {
+    const s = reduce(
+      { phase: "running", turns: 1 },
+      {
+        type: "result",
+        subtype: "error_max_turns",
+        is_error: true,
+        usage: { input_tokens: 50, output_tokens: 5 },
+        total_cost_usd: 0.002,
+      },
+    );
+    expect(s.phase).toBe("blocked"); // still terminal-error
+    expect(s.error).toBe("error_max_turns");
+    expect(s.usage).toEqual({ input: 50, output: 5, cacheRead: 0, cacheCreation: 0 });
+    expect(s.costUsd).toBe(0.002);
+  });
 });

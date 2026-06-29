@@ -1,5 +1,7 @@
 "use client";
 
+import { TriangleAlert } from "lucide-react";
+
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +11,12 @@ import { cn } from "@/lib/utils";
 // cost in a mono receipt chip; a thin track carries the context-window fraction
 // visually, shifting hue at thresholds so colour stays signal (the status ladder
 // — ai-blue → warning → danger). No emoji, no percentages in the text.
+//
+// SCOPE: fed by the PRINT engine (claude -p), which emits usage + total_cost_usd
+// on its terminal result — the production default on the VPS. Under the exempt
+// INTERACTIVE engine (GENESIS_ENGINE=interactive) the synthesized result carries
+// no usage yet, so the meter stays hidden there; wiring the statusline usage is a
+// tracked follow-up. The meter degrades gracefully (renders nothing without data).
 
 export interface ContextMeterData {
   /** Latest-turn prompt size = input + cacheRead + cacheCreation (the real
@@ -31,7 +39,11 @@ function formatTokens(n: number): string {
 
 function formatUsd(n: number): string {
   if (n <= 0) return "$0.00";
-  if (n < 0.01) return "<$0.01";
+  // Preserve the exact-cost signal for sub-cent amounts (BRO-1597) — collapsing
+  // every small turn to "<$0.01" defeats the point; show real digits, only
+  // bottoming out below a tenth of a cent.
+  if (n < 0.001) return "<$0.001";
+  if (n < 0.01) return `$${n.toFixed(4).replace(/0+$/, "")}`;
   return `$${n.toFixed(2)}`;
 }
 
@@ -43,18 +55,28 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
   const frac = contextWindow > 0 ? Math.min(contextTokens / contextWindow, 1) : 0;
   const fill =
     frac >= 0.92 ? "var(--bv-danger)" : frac >= 0.8 ? "var(--bv-warning)" : "var(--bv-blue)";
+  // Threshold status carried by SHAPE + WORD, never colour alone (WCAG 1.4.1):
+  // the alert glyph + the aria-label word appear/disappear at the same points
+  // the track changes hue, so colourblind + screen-reader users get the cue too.
+  const status = frac >= 0.92 ? "over limit" : frac >= 0.8 ? "near limit" : undefined;
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div
+        {/* A real <button> (not a div) — keyboard-focusable so the breakdown
+            tooltip is reachable without a pointer, gives the aria-label a role
+            that announces it, and skips the composer addon's click-to-focus
+            steal (P20 a11y). type=button so it never submits the composer form. */}
+        <button
+          type="button"
           className={cn(
             "flex items-center gap-2 rounded-[5px] bg-[var(--bv-canvas-soft)] px-2 py-1",
             "text-muted-foreground font-mono text-[11px] [font-variant-numeric:tabular-nums]",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
             className,
           )}
-          // Describe the gauge for screen readers without a bare percentage.
-          aria-label={`Context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens, session cost ${formatUsd(costUsd)}`}
+          // Describe the gauge for screen readers — counts + threshold word, no %.
+          aria-label={`Context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, session cost ${formatUsd(costUsd)}`}
         >
           <span>
             {formatTokens(contextTokens)} / {formatTokens(contextWindow)}
@@ -68,8 +90,9 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
               style={{ width: `${Math.max(frac * 100, 2)}%`, background: fill }}
             />
           </span>
+          {status ? <TriangleAlert aria-hidden className="size-3" style={{ color: fill }} /> : null}
           <span>{formatUsd(costUsd)}</span>
-        </div>
+        </button>
       </TooltipTrigger>
       <TooltipContent
         side="top"

@@ -163,6 +163,11 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       return { ...state, sessionId, phase: "running", pendingQuestion: undefined };
 
     case "result": {
+      // Usage + cost ride EVERY terminal result (BRO-1597), captured before the
+      // branch — an errored turn still bills the tokens it consumed (and an
+      // awaiting/HITL turn still records its spend), so all three exits fold them.
+      const usage = toTokenUsage(event.usage) ?? state.usage;
+      const costUsd = event.total_cost_usd ?? state.costUsd;
       const errored =
         event.is_error === true || (event.subtype !== undefined && event.subtype !== "success");
       if (errored) {
@@ -172,12 +177,10 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           phase: "blocked",
           error: event.subtype ?? "error",
           pendingQuestion: undefined,
+          usage,
+          costUsd,
         };
       }
-      // Usage + cost ride the terminal result (BRO-1597). Captured even on the
-      // awaiting branch so a HITL-gated turn still records what it spent.
-      const usage = toTokenUsage(event.usage) ?? state.usage;
-      const costUsd = event.total_cost_usd ?? state.costUsd;
       // A turn-ending result while gated on a human keeps the run awaiting (F4).
       if (state.phase === "awaiting") {
         return { ...state, sessionId, usage, costUsd };
