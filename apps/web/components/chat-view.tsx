@@ -381,7 +381,7 @@ export function ChatView({
           <PanelLeft className="size-4" />
         </Button>
         <span className="text-foreground text-[0.95rem] font-medium tracking-tight">Genesis</span>
-        <span className="text-muted-foreground hidden text-sm sm:inline">agent chat</span>
+        <span className="text-muted-foreground hidden text-sm sm:inline">Agent chat</span>
         <div className="ml-auto flex items-center gap-2">
           <RunningStatus status={status} />
           <ThemeToggle />

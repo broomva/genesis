@@ -48,10 +48,15 @@ const PHASE_LABEL: Record<ThreadPhase, string> = {
   done: "Done",
 };
 
+// Colour carries SIGNAL only (DS: "monochrome by default"). The actionable
+// phases get a hue — running (tidepool), awaiting (accent-blue), blocked
+// (warning) — while the two RESTING states (idle + done) share one quiet neutral
+// dot. A saturated green on every finished row was decoration, not signal, and
+// made the loudest hue the most frequent mark (BRO-1599 visual pass).
 const PHASE_DOT: Record<Exclude<ThreadPhase, "running">, string> = {
   awaiting: "bg-[var(--bv-blue-accent)]",
   blocked: "bg-[var(--bv-warning)]",
-  done: "bg-[var(--bv-success)]",
+  done: "bg-muted-foreground/40",
   idle: "bg-muted-foreground/40",
 };
 
@@ -100,7 +105,11 @@ function ThreadRow({
         aria-current={isActive ? "true" : undefined}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm",
-          isActive ? "text-sidebar-accent-foreground" : "text-foreground",
+          // Active = MORE prominent (full ink + weight-500), per DS sidebar.html.
+          // --sidebar-accent-foreground resolves to gray-700 (lighter than the ink
+          // foreground), which read as de-emphasized — the inverse of selected
+          // (BRO-1599). The frosted bg-sidebar-accent already carries the fill.
+          isActive ? "text-foreground font-medium" : "text-foreground",
         )}
       >
         {/* The dot carries phase by color — give it an accessible name so status
