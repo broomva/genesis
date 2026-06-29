@@ -1,5 +1,33 @@
 import { describe, expect, test } from "bun:test";
-import { recallStep } from "./input-history";
+import { recallDirection, recallStep } from "./input-history";
+
+describe("recallDirection — the caret/recall gate (BRO-1598)", () => {
+  test("ArrowUp at caret-start ENTERS recall", () => {
+    expect(recallDirection("ArrowUp", true, false)).toBe("older");
+  });
+
+  test("ArrowUp not-at-start and not recalling passes through (moves caret in a draft)", () => {
+    expect(recallDirection("ArrowUp", false, false)).toBeNull();
+  });
+
+  // The regression guard: once recalling, ArrowUp must CONTINUE older even though
+  // the caret jumped to the end (atStart=false). The old atStart-only gate failed
+  // here, degrading multi-step recall to a double-press per step.
+  test("ArrowUp while recalling continues regardless of caret (multi-step)", () => {
+    expect(recallDirection("ArrowUp", false, true)).toBe("older");
+  });
+
+  test("ArrowDown navigates only while recalling", () => {
+    expect(recallDirection("ArrowDown", false, true)).toBe("newer");
+    expect(recallDirection("ArrowDown", true, false)).toBeNull();
+    expect(recallDirection("ArrowDown", false, false)).toBeNull();
+  });
+
+  test("other keys never navigate", () => {
+    expect(recallDirection("Enter", true, true)).toBeNull();
+    expect(recallDirection("a", true, true)).toBeNull();
+  });
+});
 
 describe("recallStep — composer input-history navigation (BRO-1598)", () => {
   const hist = ["first", "second", "third"]; // oldest → newest

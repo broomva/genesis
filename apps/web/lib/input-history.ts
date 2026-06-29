@@ -26,3 +26,21 @@ export function recallStep(
   const next = index - 1;
   return { index: next, text: next < 0 ? "" : at(next) };
 }
+
+/** Decide whether a key press navigates history, given the caret + recall state.
+ *  ArrowUp ENTERS recall only at caret-start (so it still moves the caret inside a
+ *  draft), but CONTINUES while already recalling — a programmatic value change
+ *  drops the caret to the END, so a caret gate would stop multi-step recall after
+ *  one step (BRO-1598, confirmed by P20: React skips selection restoration while
+ *  the textarea stays focused). Returns the direction, or null to pass the key
+ *  through. This is the gate the unit tests must cover (the arithmetic alone is
+ *  false-green — it passes for both the broken and fixed gate). */
+export function recallDirection(
+  key: string,
+  atStart: boolean,
+  recalling: boolean,
+): "older" | "newer" | null {
+  if (key === "ArrowUp" && (recalling || atStart)) return "older";
+  if (key === "ArrowDown" && recalling) return "newer";
+  return null;
+}

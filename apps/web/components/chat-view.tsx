@@ -50,7 +50,7 @@ import {
   effortToBody,
   modelToBody,
 } from "@/lib/chat-options";
-import { recallStep } from "@/lib/input-history";
+import { recallDirection, recallStep } from "@/lib/input-history";
 import { parseSlash, slashHelpText } from "@/lib/slash";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
 
@@ -172,17 +172,22 @@ function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"
 }
 
 // Terminal-style input-history recall (BRO-1598). ArrowUp at caret-start recalls
-// the previous user message into the composer; ArrowDown (at caret-end) walks
-// back toward the live draft. Recall writes through the PromptInput controller,
-// so it only works inside a PromptInputProvider. The index resets when the user
-// types (onChange) or when a new turn is sent / the thread switches (history
-// length changes). The caret-start gate means ArrowUp still moves the caret in
-// the middle of multi-line text — recall only fires at the top.
+// the previous user message into the composer; once recalling, ArrowUp/ArrowDown
+// walk the history (Down off the top restores the saved draft). Recall writes
+// through the PromptInput controller, so it only works inside a PromptInputProvider.
+// The index resets when the user types (onChange) or when a NEW turn is sent in
+// this thread (history.length grows). Switching THREADS resets via ChatView's
+// key={activeThreadId} remount — this hook is reconstructed fresh — NOT the
+// length effect (lengths can coincide across threads).
 function useInputHistory(history: readonly string[], setInput: (v: string) => void) {
   const idxRef = useRef(-1); // -1 = live draft (not recalling)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys on length, not array identity
+  const draftRef = useRef(""); // the in-progress draft, saved on entering recall
+  const [announce, setAnnounce] = useState(""); // aria-live cue for screen readers
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on length, not array identity
   useEffect(() => {
     idxRef.current = -1;
+    setAnnounce("");
   }, [history.length]);
 
   const onKeyDown = useCallback(
@@ -190,17 +195,20 @@ function useInputHistory(history: readonly string[], setInput: (v: string) => vo
       if (e.nativeEvent.isComposing || history.length === 0) return;
       const ta = e.currentTarget;
       const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
-      const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
-      if (e.key === "ArrowUp" && atStart) {
-        e.preventDefault();
-        const { index, text } = recallStep(history, idxRef.current, "older");
-        idxRef.current = index;
+      const recalling = idxRef.current >= 0;
+      const dir = recallDirection(e.key, atStart, recalling);
+      if (!dir) return;
+      e.preventDefault();
+      if (!recalling) draftRef.current = ta.value; // entering recall: save the draft
+      const { index, text } = recallStep(history, idxRef.current, dir);
+      idxRef.current = index;
+      if (index < 0) {
+        setInput(draftRef.current); // exited recall: restore the in-progress draft
+        setAnnounce("Returned to draft");
+      } else {
         setInput(text);
-      } else if (e.key === "ArrowDown" && idxRef.current >= 0 && atEnd) {
-        e.preventDefault();
-        const { index, text } = recallStep(history, idxRef.current, "newer");
-        idxRef.current = index;
-        setInput(text);
+        // index 0 = most recent → numbered newest-last for a human ("3 of 3").
+        setAnnounce(`Recalled message ${history.length - index} of ${history.length}`);
       }
     },
     [history, setInput],
@@ -208,9 +216,10 @@ function useInputHistory(history: readonly string[], setInput: (v: string) => vo
 
   const onChange = useCallback(() => {
     idxRef.current = -1; // any real edit drops out of recall
+    setAnnounce("");
   }, []);
 
-  return { onKeyDown, onChange };
+  return { onKeyDown, onChange, announce };
 }
 
 // The composer textarea wired for input-history recall (BRO-1598). Renders inside
@@ -218,16 +227,21 @@ function useInputHistory(history: readonly string[], setInput: (v: string) => vo
 // `history` is the thread's user-message texts, oldest → newest.
 function RecallTextarea({ history }: { history: readonly string[] }) {
   const { textInput } = usePromptInputController();
-  const { onKeyDown, onChange } = useInputHistory(history, textInput.setInput);
+  const { onKeyDown, onChange, announce } = useInputHistory(history, textInput.setInput);
   return (
-    <PromptInputTextarea
-      // px-2.5 aligns the text with the toolbar (clear of the 28px corners, BRO-1589).
-      className="px-2.5"
-      placeholder="Message the agent… (/help for commands)"
-      aria-label="Message the agent"
-      onKeyDown={onKeyDown}
-      onChange={onChange}
-    />
+    <>
+      <PromptInputTextarea
+        // px-2.5 aligns the text with the toolbar (clear of the 28px corners, BRO-1589).
+        className="px-2.5"
+        placeholder="Message the agent… (/help for commands)"
+        aria-label="Message the agent"
+        onKeyDown={onKeyDown}
+        onChange={onChange}
+      />
+      {/* Announce recall to assistive tech — a programmatic value swap isn't
+          reliably read otherwise. <output> is an implicit aria-live=polite status. */}
+      <output className="sr-only">{announce}</output>
+    </>
   );
 }
 
