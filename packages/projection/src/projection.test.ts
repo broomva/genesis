@@ -362,17 +362,25 @@ describe("projection reducer — parts timeline (BRO-1607)", () => {
     ]);
   });
 
-  test("AskUserQuestion is a HITL gate, not a timeline tool part", () => {
+  test("AskUserQuestion flows as a tool part (answer card) AND gates awaiting (BRO-1611)", () => {
     const s = reduce(initialState, {
       type: "assistant",
       message: {
         content: [
-          { type: "tool_use", id: "q1", name: "AskUserQuestion", input: { questions: [] } },
+          {
+            type: "tool_use",
+            id: "q1",
+            name: "AskUserQuestion",
+            input: {
+              questions: [{ question: "Railway or AWS?", options: [{ label: "Railway" }] }],
+            },
+          },
         ],
       },
     });
-    expect(s.phase).toBe("awaiting");
-    expect(s.parts).toEqual([]); // excluded from the renderable timeline
+    expect(s.phase).toBe("awaiting"); // still gates HITL via AWAIT_TOOLS
+    expect(s.parts).toHaveLength(1); // now appears in the timeline so the client can render a card
+    expect(s.parts?.[0]).toMatchObject({ type: "tool", toolName: "AskUserQuestion" });
   });
 
   test("a re-emitted identical assistant message does not double-append a tool (idempotent by id)", () => {
