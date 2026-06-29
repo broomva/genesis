@@ -30,6 +30,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ToolPart } from "@/components/ai-elements/tool";
+import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
 import { QuestionCard } from "@/components/question-card";
@@ -218,10 +219,13 @@ function AssistantBody({
   });
   // Run time (persisted, BRO-1610) + copy/retry, revealed on hover via the `group`.
   const meta = message.metadata as MessageMetadata | undefined;
+  // Files the turn's Edit/Write tools touched (BRO-1612) — the agent's work, legible.
+  const files = filesChangedFromParts(message.parts);
   return (
     <div className="group min-w-0 max-w-full">
       {nodes}
       {rendered === 0 && busy ? <ChatLoader /> : null}
+      {files.length > 0 ? <FilesChanged files={files} /> : null}
       {rendered > 0 ? (
         <MessageActions
           text={messageText(message)}

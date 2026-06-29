@@ -14,12 +14,11 @@ import {
   WrenchIcon,
 } from "lucide-react";
 
-// A collapsible tool-call block (BRO-1607). DS-true: monochrome at rest — the
-// only colour that carries signal is the ai-blue running pulse and the danger
-// hue on failure; a completed tool is silent (calm is load-bearing). No progress
-// %. Renders the agent's own tools (Bash, Read, …) AND skills/subagents (Skill,
-// Task) through one path — they arrive as dynamic-tool parts, distinguished only
-// by name. Light enough to stay off the shiki/WASM highlighter: plain <pre>.
+// A collapsible tool-call block (BRO-1607, per-tool rendering BRO-1612). DS-true:
+// monochrome at rest — the only colour that carries signal is the ai-blue running
+// pulse, the danger hue on failure, and green/red INSIDE a diff (a diff IS signal).
+// No progress %. Bash → terminal, Edit/Write/MultiEdit → diff, Read/Grep/Glob →
+// code/list, default → generic JSON. Light: plain <pre>/<div>, no shiki/WASM.
 
 type AnyToolPart = ToolUIPart | DynamicToolUIPart;
 
@@ -30,20 +29,18 @@ function toolNameOf(part: AnyToolPart): string {
   return part.type.split("-").slice(1).join("-");
 }
 
-/** Per-family icon so Bash/Read/Skill/Task read at a glance (skills + subagents
- *  get the sparkle/bot, not a generic wrench). */
 function iconFor(name: string): LucideIcon {
   const n = name.toLowerCase();
   if (n === "skill" || n.startsWith("mcp__")) return SparklesIcon;
   if (n === "task" || n === "agent") return BotIcon;
   if (n === "bash" || n === "shell" || n.includes("terminal")) return TerminalIcon;
   if (n.startsWith("web") || n === "fetch") return GlobeIcon;
-  if (["read", "write", "edit", "glob", "grep", "ls", "notebookedit"].includes(n)) return FileIcon;
+  if (["read", "write", "edit", "multiedit", "glob", "grep", "ls", "notebookedit"].includes(n))
+    return FileIcon;
   return WrenchIcon;
 }
 
-/** A one-line preview of the call (the command / path / query) for the closed
- *  header — the most useful field per tool, else the first string arg. */
+/** A one-line preview of the call for the closed header. */
 function previewOf(input: unknown): string | undefined {
   if (typeof input === "string") return input;
   if (typeof input !== "object" || input === null) return undefined;
@@ -65,9 +62,15 @@ function previewOf(input: unknown): string | undefined {
   return typeof first === "string" ? first : undefined;
 }
 
-/** Stringify a tool payload for a <pre> block, capped so a huge command output
- *  can't blow the DOM. Strings pass through; everything else is pretty JSON. */
-function toBlockText(value: unknown, cap = 6000): string {
+/** Safely read a string field from a tool input object. */
+function str(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const v = (input as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+const CAP = 6000;
+function toBlockText(value: unknown, cap = CAP): string {
   let s: string;
   if (typeof value === "string") s = value;
   else {
@@ -80,22 +83,271 @@ function toBlockText(value: unknown, cap = 6000): string {
   return s.length > cap ? `${s.slice(0, cap)}\n… [truncated]` : s;
 }
 
+/** A tool output → display text (string passthrough, else pretty JSON). */
+function outText(output: unknown, errored: boolean, errorText?: string): string | undefined {
+  if (errored) {
+    if (errorText && errorText.trim().length > 0) return capStr(errorText);
+    return output !== undefined ? toBlockText(output) : "Tool failed";
+  }
+  if (output === undefined) return undefined;
+  return typeof output === "string" ? capStr(output) : toBlockText(output);
+}
+function capStr(s: string, cap = CAP): string {
+  return s.length > cap ? `${s.slice(0, cap)}\n… [truncated]` : s;
+}
+
+// ── presentational primitives ──
+
+function PathHeader({ path, badge }: { path?: string; badge?: string }) {
+  if (!path) return null;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-foreground truncate font-mono text-xs">{path}</span>
+      {badge ? (
+        <span className="text-muted-foreground shrink-0 text-[0.65rem] uppercase tracking-wide">
+          {badge}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function Mono({ text, tone }: { text: string; tone?: "danger" | "muted" }) {
+  return (
+    <pre
+      className={cn(
+        "max-h-72 overflow-auto rounded-md border px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words",
+        tone === "danger"
+          ? "border-[var(--bv-danger)]/30 bg-[var(--bv-danger)]/5 text-[var(--bv-danger)]"
+          : tone === "muted"
+            ? "border-border bg-[var(--bv-canvas-soft-2)] text-muted-foreground"
+            : "border-border bg-[var(--bv-canvas-soft-2)] text-foreground",
+      )}
+    >
+      {text}
+    </pre>
+  );
+}
+
 function Block({ label, text, tone }: { label: string; text: string; tone?: "danger" }) {
   return (
     <div className="space-y-1">
       <div className="text-muted-foreground text-[0.7rem] font-medium uppercase tracking-wide">
         {label}
       </div>
-      <pre
-        className={cn(
-          "max-h-72 overflow-auto rounded-md border px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words",
-          tone === "danger"
-            ? "border-[var(--bv-danger)]/30 bg-[var(--bv-danger)]/5 text-[var(--bv-danger)]"
-            : "border-border bg-[var(--bv-canvas-soft-2)] text-foreground",
-        )}
-      >
-        {text}
-      </pre>
+      <Mono text={text} tone={tone} />
+    </div>
+  );
+}
+
+function Running() {
+  return <div className="text-muted-foreground text-xs">Running…</div>;
+}
+
+function Terminal({
+  command,
+  output,
+  errored,
+  running,
+}: {
+  command?: string;
+  output?: string;
+  errored: boolean;
+  running: boolean;
+}) {
+  return (
+    <div className="border-border max-h-80 overflow-auto rounded-md border bg-[var(--bv-canvas-soft-2)] font-mono text-xs leading-relaxed">
+      {command ? (
+        <div className="border-border text-foreground border-b px-3 py-1.5 whitespace-pre-wrap break-words">
+          <span className="text-muted-foreground select-none">$ </span>
+          {command}
+        </div>
+      ) : null}
+      {output ? (
+        <pre
+          className={cn(
+            "px-3 py-2 whitespace-pre-wrap break-words",
+            errored ? "text-[var(--bv-danger)]" : "text-muted-foreground",
+          )}
+        >
+          {output}
+        </pre>
+      ) : running ? (
+        <div className="text-muted-foreground px-3 py-2">Running…</div>
+      ) : null}
+    </div>
+  );
+}
+
+const DIFF_MAX_LINES = 240;
+const DIFF_MAX_LINE_LEN = 2000;
+
+/** Cap a side of a diff PER SIDE (so additions always show even when removals are
+ *  huge), cap each line's length, and append a truncation marker (BRO-1612 P20). */
+function diffSide(
+  text: string | undefined,
+  sign: "+" | "-",
+): Array<{ sign: "+" | "-"; t: string }> {
+  if (!text) return [];
+  const all = text.split("\n");
+  const out = all.slice(0, DIFF_MAX_LINES).map((t) => ({
+    sign,
+    t: t.length > DIFF_MAX_LINE_LEN ? `${t.slice(0, DIFF_MAX_LINE_LEN)}…` : t,
+  }));
+  if (all.length > DIFF_MAX_LINES) {
+    out.push({ sign, t: `… [+${all.length - DIFF_MAX_LINES} more lines]` });
+  }
+  return out;
+}
+
+function DiffBlock({ oldText, newText }: { oldText?: string; newText?: string }) {
+  const lines = [...diffSide(oldText, "-"), ...diffSide(newText, "+")];
+  if (lines.length === 0) return null;
+  return (
+    <div className="border-border max-h-72 overflow-auto rounded-md border font-mono text-xs leading-relaxed">
+      {lines.map((l, i) => (
+        <div
+          key={`${l.sign}-${i}-${l.t.slice(0, 24)}`}
+          className={cn(
+            "flex px-2 whitespace-pre-wrap break-words",
+            // green/red are the one place colour is signal (a diff). DS tokens.
+            l.sign === "+"
+              ? "bg-[color-mix(in_oklch,var(--bv-success)_12%,transparent)] text-[var(--bv-success)]"
+              : "bg-[color-mix(in_oklch,var(--bv-danger)_8%,transparent)] text-[var(--bv-danger)]",
+          )}
+        >
+          <span aria-hidden className="select-none pr-2 opacity-60">
+            {l.sign}
+          </span>
+          <span>{l.t || " "}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Per-tool body — the heart of BRO-1612. */
+function ToolBody({
+  name,
+  input,
+  output,
+  errored,
+  errorText,
+  running,
+}: {
+  name: string;
+  input: unknown;
+  output: unknown;
+  errored: boolean;
+  errorText?: string;
+  running: boolean;
+}) {
+  const n = name.toLowerCase();
+  const out = outText(output, errored, errorText);
+
+  if (n === "bash" || n === "shell") {
+    return (
+      <Terminal command={str(input, "command")} output={out} errored={errored} running={running} />
+    );
+  }
+
+  if (n === "edit") {
+    return (
+      <div className="space-y-2">
+        <PathHeader path={str(input, "file_path")} badge="edit" />
+        <DiffBlock oldText={str(input, "old_string")} newText={str(input, "new_string")} />
+        {errored && out ? <Block label="Error" text={out} tone="danger" /> : null}
+      </div>
+    );
+  }
+
+  if (n === "multiedit") {
+    const editsRaw = (input as { edits?: unknown })?.edits;
+    const edits = Array.isArray(editsRaw) ? editsRaw : [];
+    const shown = edits.slice(0, 12);
+    return (
+      <div className="space-y-2">
+        <PathHeader
+          path={str(input, "file_path")}
+          badge={`${edits.length} edit${edits.length === 1 ? "" : "s"}`}
+        />
+        {shown.map((e, i) => (
+          <DiffBlock
+            key={`edit-${i}-${(str(e, "old_string") ?? "").slice(0, 24)}`}
+            oldText={str(e, "old_string")}
+            newText={str(e, "new_string")}
+          />
+        ))}
+        {edits.length > shown.length ? (
+          <div className="text-muted-foreground text-xs">
+            … +{edits.length - shown.length} more edits
+          </div>
+        ) : null}
+        {errored && out ? <Block label="Error" text={out} tone="danger" /> : null}
+      </div>
+    );
+  }
+
+  if (n === "write") {
+    return (
+      <div className="space-y-2">
+        <PathHeader path={str(input, "file_path")} badge="write" />
+        <DiffBlock newText={str(input, "content")} />
+        {errored && out ? <Block label="Error" text={out} tone="danger" /> : null}
+      </div>
+    );
+  }
+
+  if (n === "read" || n === "notebookedit") {
+    return (
+      <div className="space-y-2">
+        <PathHeader path={str(input, "file_path")} />
+        {out !== undefined ? (
+          <Mono text={out} tone={errored ? "danger" : "muted"} />
+        ) : running ? (
+          <Running />
+        ) : null}
+      </div>
+    );
+  }
+
+  if (n === "grep" || n === "glob" || n === "ls") {
+    return (
+      <div className="space-y-2">
+        <PathHeader path={str(input, "pattern") ?? str(input, "path")} />
+        {out !== undefined ? (
+          <Mono text={out} tone={errored ? "danger" : "muted"} />
+        ) : running ? (
+          <Running />
+        ) : null}
+      </div>
+    );
+  }
+
+  if (n.startsWith("web") || n === "fetch") {
+    return (
+      <div className="space-y-2">
+        <PathHeader path={str(input, "query") ?? str(input, "url")} />
+        {out !== undefined ? (
+          <Mono text={out} tone={errored ? "danger" : undefined} />
+        ) : running ? (
+          <Running />
+        ) : null}
+      </div>
+    );
+  }
+
+  // default — the generic input + output block (BRO-1607 behavior).
+  return (
+    <div className="space-y-2.5">
+      {input !== undefined ? <Block label="Input" text={toBlockText(input)} /> : null}
+      {errored && out ? (
+        <Block label="Error" text={out} tone="danger" />
+      ) : out !== undefined ? (
+        <Block label="Result" text={out} />
+      ) : running ? (
+        <Running />
+      ) : null}
     </div>
   );
 }
@@ -147,19 +399,15 @@ export function ToolPart({ part }: { part: AnyToolPart }) {
           className="text-muted-foreground size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]:rotate-180"
         />
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-2.5 px-3 pb-3 pt-1">
-        {part.input !== undefined ? <Block label="Input" text={toBlockText(part.input)} /> : null}
-        {errored ? (
-          <Block
-            label="Error"
-            text={errorText ?? toBlockText(output) ?? "Tool failed"}
-            tone="danger"
-          />
-        ) : output !== undefined ? (
-          <Block label="Result" text={toBlockText(output)} />
-        ) : running ? (
-          <div className="text-muted-foreground text-xs">Running…</div>
-        ) : null}
+      <CollapsibleContent className="px-3 pb-3 pt-1">
+        <ToolBody
+          name={name}
+          input={part.input}
+          output={output}
+          errored={errored}
+          errorText={typeof errorText === "string" ? errorText : undefined}
+          running={running}
+        />
       </CollapsibleContent>
     </Collapsible>
   );
