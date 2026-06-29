@@ -406,6 +406,66 @@
     var(--bv-frost-12);
 }
 
+/* ── Composer Undertow aura (BRO-1590) ──────────────────────
+   While a turn is in flight, the Undertow weather breathes behind the glass
+   composer and spills a soft halo around it — the DS running signal applied as
+   a composer microinteraction (presence, not urgency). Two layers on the
+   undertow rhythms (pools 4.2s · tide 3.4s), reusing the shared keyframes +
+   glow palette. Fades in/out via the data-streaming flag, so it's invisible at
+   rest. Absolutely positioned (no layout shift); blurred so it reads as light,
+   not shapes. The composer's own backdrop-filter softens the part behind it. */
+.bv-composer-aura {
+  position: relative;
+  isolation: isolate;
+}
+.bv-composer-aura::before,
+.bv-composer-aura::after {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  z-index: -1;
+  border-radius: calc(var(--bv-radius-composer) + 12px);
+  opacity: 0;
+  transition: opacity var(--bv-dur-slow) var(--bv-ease-standard);
+  pointer-events: none;
+}
+.bv-composer-aura::before {
+  background: radial-gradient(40% 60% at 26% 32%, var(--bv-glow-blue), transparent 70%),
+    radial-gradient(38% 54% at 74% 68%, var(--bv-glow-cyan), transparent 70%);
+  filter: blur(18px);
+}
+.bv-composer-aura::after {
+  background: linear-gradient(
+    180deg,
+    transparent 28%,
+    oklch(0.62 0.18 258 / 0.22) 50%,
+    var(--bv-glow-ice) 60%,
+    transparent 74%
+  );
+  filter: blur(16px);
+}
+.bv-composer-aura[data-streaming="true"]::before {
+  opacity: 0.42;
+  animation: bv-aura-breathe 4.6s ease-in-out infinite alternate;
+}
+.bv-composer-aura[data-streaming="true"]::after {
+  opacity: 0.34;
+  animation: bv-undertow-tide 3.4s ease-in-out infinite alternate;
+}
+/* Transform-only breathe (a gentler pools drift) so the tuned 0.42 opacity holds
+   constant — the shared bv-undertow-pools animates opacity 0.5→0.95, which would
+   override it and read brighter than "calm". Keeping opacity off the keyframe also
+   lets the opacity transition handle fade-in/out cleanly. bv-undertow-tide already
+   animates transform only, so ::after's 0.34 holds. */
+@keyframes bv-aura-breathe {
+  from {
+    transform: translateY(-10%) scale(1);
+  }
+  to {
+    transform: translateY(10%) scale(1.12);
+  }
+}
+
 /* ============================================================
    Motion — live signals. The Undertow is THE running treatment:
    a contained halo of breathing pools, a counter-phase tide, and
@@ -594,7 +654,10 @@
   .bv-undertow::after,
   .bv-undertow-orbit,
   .bv-dot-live::before,
-  .bv-dot--pulse {
+  .bv-dot--pulse,
+  .bv-composer-aura[data-streaming="true"]::before,
+  .bv-composer-aura[data-streaming="true"]::after {
+    /* Keep the static glow (still a presence cue) but stop the breathing. */
     animation: none;
   }
   .shimmer {

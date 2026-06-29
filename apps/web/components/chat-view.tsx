@@ -356,57 +356,61 @@ export function ChatView({
             </div>
           ) : null}
           <TooltipProvider>
-            <PromptInput
-              onSubmit={handleSubmit}
-              multiple
-              onError={(e) => setNotice(e.message)}
-              className="bv-composer w-full"
-            >
-              <PromptInputBody>
-                <PromptInputTextarea
-                  // px-2.5 aligns the text with the toolbar (both sit ~18px from
-                  // the capsule edge, clear of the 28px rounded corners) — BRO-1589.
-                  className="px-2.5"
-                  placeholder="Message the agent… (/help for commands)"
-                  aria-label="Message the agent"
-                />
-              </PromptInputBody>
-              <PromptInputFooter>
-                <PromptInputTools>
-                  <PromptInputActionMenu>
-                    <PromptInputActionMenuTrigger aria-label="Attach files">
-                      <Paperclip className="size-4" />
-                    </PromptInputActionMenuTrigger>
-                    <PromptInputActionMenuContent>
-                      <PromptInputActionAddAttachments label="Attach text files" />
-                    </PromptInputActionMenuContent>
-                  </PromptInputActionMenu>
-                  <PromptInputSelect value={model} onValueChange={onModelChange}>
-                    <PromptInputSelectTrigger aria-label="Model">
-                      <PromptInputSelectValue />
-                    </PromptInputSelectTrigger>
-                    <PromptInputSelectContent>
-                      {MODEL_OPTIONS.map((o) => (
-                        <PromptInputSelectItem key={o.value} value={o.value}>
-                          {o.label}
-                        </PromptInputSelectItem>
-                      ))}
-                    </PromptInputSelectContent>
-                  </PromptInputSelect>
-                  <PromptInputSelect value={effort} onValueChange={onEffortChange}>
-                    <PromptInputSelectTrigger aria-label="Effort">
-                      <PromptInputSelectValue />
-                    </PromptInputSelectTrigger>
-                    <PromptInputSelectContent>
-                      {EFFORT_OPTIONS.map((o) => (
-                        <PromptInputSelectItem key={o.value} value={o.value}>
-                          {o.label}
-                        </PromptInputSelectItem>
-                      ))}
-                    </PromptInputSelectContent>
-                  </PromptInputSelect>
-                </PromptInputTools>
-                {/* DS send — a circular primary-fill button with the DS up-arrow at
+            {/* The Undertow breathes behind the glass composer while a turn is in
+                flight (BRO-1590) — the DS running signal as a composer
+                microinteraction. data-streaming gates the aura; idle is silent. */}
+            <div className="bv-composer-aura" data-streaming={busy ? "true" : undefined}>
+              <PromptInput
+                onSubmit={handleSubmit}
+                multiple
+                onError={(e) => setNotice(e.message)}
+                className="bv-composer w-full"
+              >
+                <PromptInputBody>
+                  <PromptInputTextarea
+                    // px-2.5 aligns the text with the toolbar (both sit ~18px from
+                    // the capsule edge, clear of the 28px rounded corners) — BRO-1589.
+                    className="px-2.5"
+                    placeholder="Message the agent… (/help for commands)"
+                    aria-label="Message the agent"
+                  />
+                </PromptInputBody>
+                <PromptInputFooter>
+                  <PromptInputTools>
+                    <PromptInputActionMenu>
+                      <PromptInputActionMenuTrigger aria-label="Attach files">
+                        <Paperclip className="size-4" />
+                      </PromptInputActionMenuTrigger>
+                      <PromptInputActionMenuContent>
+                        <PromptInputActionAddAttachments label="Attach text files" />
+                      </PromptInputActionMenuContent>
+                    </PromptInputActionMenu>
+                    <PromptInputSelect value={model} onValueChange={onModelChange}>
+                      <PromptInputSelectTrigger aria-label="Model">
+                        <PromptInputSelectValue />
+                      </PromptInputSelectTrigger>
+                      <PromptInputSelectContent>
+                        {MODEL_OPTIONS.map((o) => (
+                          <PromptInputSelectItem key={o.value} value={o.value}>
+                            {o.label}
+                          </PromptInputSelectItem>
+                        ))}
+                      </PromptInputSelectContent>
+                    </PromptInputSelect>
+                    <PromptInputSelect value={effort} onValueChange={onEffortChange}>
+                      <PromptInputSelectTrigger aria-label="Effort">
+                        <PromptInputSelectValue />
+                      </PromptInputSelectTrigger>
+                      <PromptInputSelectContent>
+                        {EFFORT_OPTIONS.map((o) => (
+                          <PromptInputSelectItem key={o.value} value={o.value}>
+                            {o.label}
+                          </PromptInputSelectItem>
+                        ))}
+                      </PromptInputSelectContent>
+                    </PromptInputSelect>
+                  </PromptInputTools>
+                  {/* DS send — a circular primary-fill button with the DS up-arrow at
                   rest (the button inherits the ink-hover lighten from the default
                   variant). The component swaps in its own spinner/stop/error glyphs
                   for the in-flight states, so only the idle icon is overridden.
@@ -414,11 +418,12 @@ export function ChatView({
                   directly (no form submit/reset), so text typed mid-stream isn't
                   wiped (P20 BRO-1573). handleSubmit's busy-guard is the Enter-key
                   fallback. */}
-                <PromptInputSubmit status={status} onStop={stop} className="size-9 rounded-full">
-                  {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
-                </PromptInputSubmit>
-              </PromptInputFooter>
-            </PromptInput>
+                  <PromptInputSubmit status={status} onStop={stop} className="size-9 rounded-full">
+                    {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
+                  </PromptInputSubmit>
+                </PromptInputFooter>
+              </PromptInput>
+            </div>
           </TooltipProvider>
         </div>
       </footer>
