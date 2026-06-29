@@ -29,7 +29,14 @@ export function useElapsed(active: boolean): number {
 export function RunTimer({ active }: { active: boolean }) {
   const elapsed = useElapsed(active);
   if (!active) return null;
-  return <span className="[font-variant-numeric:tabular-nums]">{formatClock(elapsed)}</span>;
+  // Not aria-live — the ticking value shouldn't re-announce every second; the
+  // running label ("Thinking"/"Responding") already conveys state. Labelled so
+  // it's identifiable when navigated.
+  return (
+    <span aria-label="Elapsed time" className="[font-variant-numeric:tabular-nums]">
+      {formatClock(elapsed)}
+    </span>
+  );
 }
 
 /** Copy-to-clipboard with a 1.5s "copied" tick. */
@@ -104,7 +111,11 @@ export function MessageActions({
   return (
     <div className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-xs">
       {runtime ? (
-        <span className="[font-variant-numeric:tabular-nums]" title="Run time">
+        <span
+          aria-label={`Run time ${runtime}`}
+          className="[font-variant-numeric:tabular-nums]"
+          title="Run time"
+        >
           {runtime}
         </span>
       ) : null}
