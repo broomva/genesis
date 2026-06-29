@@ -26,6 +26,7 @@ import {
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Button } from "@/components/ui/button";
@@ -96,6 +97,14 @@ function messageReasoning(message: UIMessage): string {
     .map((part) => (part as { text: string }).text)
     .join("");
 }
+
+// Render streamdown's external-link confirmation through our DS Dialog so it
+// portals to document.body and escapes the scroller's fixed-positioning
+// containing blocks (BRO-1589). Module-level so the config object is stable.
+const LINK_SAFETY = {
+  enabled: true,
+  renderModal: (props: LinkSafetyDialogProps) => <LinkSafetyDialog {...props} />,
+};
 
 // Empty-state starter prompts (BRO-1577) — tappable, send immediately.
 const STARTERS: readonly string[] = [
@@ -305,6 +314,7 @@ export function ChatView({
                               className="text-foreground text-[0.95rem] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                               isAnimating={status === "streaming"}
                               animated
+                              linkSafety={LINK_SAFETY}
                             >
                               {text}
                             </Streamdown>
@@ -354,6 +364,9 @@ export function ChatView({
             >
               <PromptInputBody>
                 <PromptInputTextarea
+                  // px-2.5 aligns the text with the toolbar (both sit ~18px from
+                  // the capsule edge, clear of the 28px rounded corners) — BRO-1589.
+                  className="px-2.5"
                   placeholder="Message the agent… (/help for commands)"
                   aria-label="Message the agent"
                 />

@@ -396,6 +396,9 @@
   -webkit-backdrop-filter: blur(16px) saturate(1.3);
   box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer);
   transition: box-shadow var(--bv-dur-common) var(--bv-ease-standard);
+  /* Inset the contents so the text + toolbar clear the 28px rounded corners
+     (the DS composer pads the capsule, then the input pads again) — BRO-1589. */
+  padding: 0.5rem;
 }
 .bv-composer [data-slot="input-group"]:focus-within {
   border-color: var(--glass-border);
