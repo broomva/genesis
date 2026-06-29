@@ -3,7 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import { ArrowUp, PanelLeft, Paperclip, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 
@@ -18,6 +18,7 @@ import {
   PromptInputFooter,
   PromptInputHeader,
   type PromptInputMessage,
+  PromptInputProvider,
   PromptInputSelect,
   PromptInputSelectContent,
   PromptInputSelectItem,
@@ -26,6 +27,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
+  usePromptInputController,
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
@@ -48,6 +50,7 @@ import {
   effortToBody,
   modelToBody,
 } from "@/lib/chat-options";
+import { recallDirection, recallStep } from "@/lib/input-history";
 import { parseSlash, slashHelpText } from "@/lib/slash";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
 
@@ -168,6 +171,80 @@ function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"
   );
 }
 
+// Terminal-style input-history recall (BRO-1598). ArrowUp at caret-start recalls
+// the previous user message into the composer; once recalling, ArrowUp/ArrowDown
+// walk the history (Down off the top restores the saved draft). Recall writes
+// through the PromptInput controller, so it only works inside a PromptInputProvider.
+// The index resets when the user types (onChange) or when a NEW turn is sent in
+// this thread (history.length grows). Switching THREADS resets via ChatView's
+// key={activeThreadId} remount — this hook is reconstructed fresh — NOT the
+// length effect (lengths can coincide across threads).
+function useInputHistory(history: readonly string[], setInput: (v: string) => void) {
+  const idxRef = useRef(-1); // -1 = live draft (not recalling)
+  const draftRef = useRef(""); // the in-progress draft, saved on entering recall
+  const [announce, setAnnounce] = useState(""); // aria-live cue for screen readers
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on length, not array identity
+  useEffect(() => {
+    idxRef.current = -1;
+    setAnnounce("");
+  }, [history.length]);
+
+  const onKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.nativeEvent.isComposing || history.length === 0) return;
+      const ta = e.currentTarget;
+      const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+      const recalling = idxRef.current >= 0;
+      const dir = recallDirection(e.key, atStart, recalling);
+      if (!dir) return;
+      e.preventDefault();
+      if (!recalling) draftRef.current = ta.value; // entering recall: save the draft
+      const { index, text } = recallStep(history, idxRef.current, dir);
+      idxRef.current = index;
+      if (index < 0) {
+        setInput(draftRef.current); // exited recall: restore the in-progress draft
+        setAnnounce("Returned to draft");
+      } else {
+        setInput(text);
+        // index 0 = most recent → numbered newest-last for a human ("3 of 3").
+        setAnnounce(`Recalled message ${history.length - index} of ${history.length}`);
+      }
+    },
+    [history, setInput],
+  );
+
+  const onChange = useCallback(() => {
+    idxRef.current = -1; // any real edit drops out of recall
+    setAnnounce("");
+  }, []);
+
+  return { onKeyDown, onChange, announce };
+}
+
+// The composer textarea wired for input-history recall (BRO-1598). Renders inside
+// a PromptInputProvider so it can write recalled text through the controller.
+// `history` is the thread's user-message texts, oldest → newest.
+function RecallTextarea({ history }: { history: readonly string[] }) {
+  const { textInput } = usePromptInputController();
+  const { onKeyDown, onChange, announce } = useInputHistory(history, textInput.setInput);
+  return (
+    <>
+      <PromptInputTextarea
+        // px-2.5 aligns the text with the toolbar (clear of the 28px corners, BRO-1589).
+        className="px-2.5"
+        placeholder="Message the agent… (/help for commands)"
+        aria-label="Message the agent"
+        onKeyDown={onKeyDown}
+        onChange={onChange}
+      />
+      {/* Announce recall to assistive tech — a programmatic value swap isn't
+          reliably read otherwise. <output> is an implicit aria-live=polite status. */}
+      <output className="sr-only">{announce}</output>
+    </>
+  );
+}
+
 /** One chat thread. Remounted by the parent with a `key={threadId}`, so `useChat`
  *  is constructed fresh per thread with the right `id` (→ engine threadId routing)
  *  and hydrated `initialMessages`. `onActivity` fires when a turn finishes so the
@@ -238,6 +315,13 @@ export function ChatView({
       sessionOutput,
     };
   }, [messages, model]);
+
+  // The thread's user-message texts (oldest → newest) for input-history recall
+  // (BRO-1598) — the ArrowUp/ArrowDown stack in the composer.
+  const userHistory = useMemo(
+    () => messages.filter((m) => m.role === "user").map(messageText),
+    [messages],
+  );
 
   // Send a turn with the current model/effort selection. Shared by the composer
   // and the empty-state suggestion chips (BRO-1577).
@@ -398,65 +482,64 @@ export function ChatView({
                 flight (BRO-1590) — the DS running signal as a composer
                 microinteraction. data-streaming gates the aura; idle is silent. */}
             <div className="bv-composer-aura" data-streaming={busy ? "true" : undefined}>
-              <PromptInput
-                onSubmit={handleSubmit}
-                multiple
-                onError={(e) => setNotice(e.message)}
-                className="bv-composer w-full"
-              >
-                {/* Context meter (BRO-1597) — a quiet usage gauge in the composer
-                    header; only once a turn has reported usage (fresh threads stay
-                    clean). */}
-                {meterData.contextTokens > 0 || meterData.costUsd > 0 ? (
-                  <PromptInputHeader className="justify-end">
-                    <ContextMeter data={meterData} />
-                  </PromptInputHeader>
-                ) : null}
-                <PromptInputBody>
-                  <PromptInputTextarea
-                    // px-2.5 aligns the text with the toolbar (both sit ~18px from
-                    // the capsule edge, clear of the 28px rounded corners) — BRO-1589.
-                    className="px-2.5"
-                    placeholder="Message the agent… (/help for commands)"
-                    aria-label="Message the agent"
-                  />
-                </PromptInputBody>
-                <PromptInputFooter>
-                  <PromptInputTools>
-                    <PromptInputActionMenu>
-                      <PromptInputActionMenuTrigger aria-label="Attach files">
-                        <Paperclip className="size-4" />
-                      </PromptInputActionMenuTrigger>
-                      <PromptInputActionMenuContent>
-                        <PromptInputActionAddAttachments label="Attach text files" />
-                      </PromptInputActionMenuContent>
-                    </PromptInputActionMenu>
-                    <PromptInputSelect value={model} onValueChange={onModelChange}>
-                      <PromptInputSelectTrigger aria-label="Model">
-                        <PromptInputSelectValue />
-                      </PromptInputSelectTrigger>
-                      <PromptInputSelectContent>
-                        {MODEL_OPTIONS.map((o) => (
-                          <PromptInputSelectItem key={o.value} value={o.value}>
-                            {o.label}
-                          </PromptInputSelectItem>
-                        ))}
-                      </PromptInputSelectContent>
-                    </PromptInputSelect>
-                    <PromptInputSelect value={effort} onValueChange={onEffortChange}>
-                      <PromptInputSelectTrigger aria-label="Effort">
-                        <PromptInputSelectValue />
-                      </PromptInputSelectTrigger>
-                      <PromptInputSelectContent>
-                        {EFFORT_OPTIONS.map((o) => (
-                          <PromptInputSelectItem key={o.value} value={o.value}>
-                            {o.label}
-                          </PromptInputSelectItem>
-                        ))}
-                      </PromptInputSelectContent>
-                    </PromptInputSelect>
-                  </PromptInputTools>
-                  {/* DS send — a circular primary-fill button with the DS up-arrow at
+              {/* PromptInputProvider lifts the textarea state so input-history
+                  recall (BRO-1598) can write recalled text back through the
+                  controller. Without it PromptInput stays self-managed and recall
+                  can't reach the value. */}
+              <PromptInputProvider>
+                <PromptInput
+                  onSubmit={handleSubmit}
+                  multiple
+                  onError={(e) => setNotice(e.message)}
+                  className="bv-composer w-full"
+                >
+                  {/* Context meter (BRO-1597) — a quiet usage gauge in the composer
+                      header; only once a turn has reported usage (fresh threads stay
+                      clean). */}
+                  {meterData.contextTokens > 0 || meterData.costUsd > 0 ? (
+                    <PromptInputHeader className="justify-end">
+                      <ContextMeter data={meterData} />
+                    </PromptInputHeader>
+                  ) : null}
+                  <PromptInputBody>
+                    <RecallTextarea history={userHistory} />
+                  </PromptInputBody>
+                  <PromptInputFooter>
+                    <PromptInputTools>
+                      <PromptInputActionMenu>
+                        <PromptInputActionMenuTrigger aria-label="Attach files">
+                          <Paperclip className="size-4" />
+                        </PromptInputActionMenuTrigger>
+                        <PromptInputActionMenuContent>
+                          <PromptInputActionAddAttachments label="Attach text files" />
+                        </PromptInputActionMenuContent>
+                      </PromptInputActionMenu>
+                      <PromptInputSelect value={model} onValueChange={onModelChange}>
+                        <PromptInputSelectTrigger aria-label="Model">
+                          <PromptInputSelectValue />
+                        </PromptInputSelectTrigger>
+                        <PromptInputSelectContent>
+                          {MODEL_OPTIONS.map((o) => (
+                            <PromptInputSelectItem key={o.value} value={o.value}>
+                              {o.label}
+                            </PromptInputSelectItem>
+                          ))}
+                        </PromptInputSelectContent>
+                      </PromptInputSelect>
+                      <PromptInputSelect value={effort} onValueChange={onEffortChange}>
+                        <PromptInputSelectTrigger aria-label="Effort">
+                          <PromptInputSelectValue />
+                        </PromptInputSelectTrigger>
+                        <PromptInputSelectContent>
+                          {EFFORT_OPTIONS.map((o) => (
+                            <PromptInputSelectItem key={o.value} value={o.value}>
+                              {o.label}
+                            </PromptInputSelectItem>
+                          ))}
+                        </PromptInputSelectContent>
+                      </PromptInputSelect>
+                    </PromptInputTools>
+                    {/* DS send — a circular primary-fill button with the DS up-arrow at
                   rest (the button inherits the ink-hover lighten from the default
                   variant). The component swaps in its own spinner/stop/error glyphs
                   for the in-flight states, so only the idle icon is overridden.
@@ -464,11 +547,16 @@ export function ChatView({
                   directly (no form submit/reset), so text typed mid-stream isn't
                   wiped (P20 BRO-1573). handleSubmit's busy-guard is the Enter-key
                   fallback. */}
-                  <PromptInputSubmit status={status} onStop={stop} className="size-9 rounded-full">
-                    {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
-                  </PromptInputSubmit>
-                </PromptInputFooter>
-              </PromptInput>
+                    <PromptInputSubmit
+                      status={status}
+                      onStop={stop}
+                      className="size-9 rounded-full"
+                    >
+                      {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
+                    </PromptInputSubmit>
+                  </PromptInputFooter>
+                </PromptInput>
+              </PromptInputProvider>
             </div>
           </TooltipProvider>
         </div>
