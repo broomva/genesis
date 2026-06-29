@@ -90,6 +90,7 @@ export function build(opts: BuildOpts) {
     const body = (await c.req.json().catch(() => ({}))) as {
       threadId?: string;
       action?: string;
+      title?: string;
     };
     const threadId = body.threadId;
     if (!threadId) return c.json({ error: "threadId required" }, 400);
@@ -100,6 +101,17 @@ export function build(opts: BuildOpts) {
         return c.json(await supervisor.interrupt(threadId));
       case "status":
         return c.json(await supervisor.status(threadId));
+      // Session management (BRO-1592) — archive/rename ride /control so the
+      // existing /api/control BFF forwards them verbatim (no new BFF family).
+      case "archive":
+        return c.json(await supervisor.archiveThread(threadId, true));
+      case "unarchive":
+        return c.json(await supervisor.archiveThread(threadId, false));
+      case "rename":
+        // Validate at the boundary — body is only type-cast, so a non-string
+        // title (e.g. {title: 1}) would otherwise reach setTitle().trim() and throw.
+        if (typeof body.title !== "string") return c.json({ error: "title must be a string" }, 400);
+        return c.json(await supervisor.setTitle(threadId, body.title));
       default:
         return c.json({ error: `unknown action: ${body.action ?? "(none)"}` }, 400);
     }
@@ -117,6 +129,13 @@ export function build(opts: BuildOpts) {
   app.get("/threads/:id", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     return c.json({ turns: await supervisor.history(c.req.param("id")) });
+  });
+
+  // Hard-delete a thread + its transcript (BRO-1592). First DELETE route; the
+  // BFF /api/threads/:id grows a matching DELETE handler. Same bearer gate.
+  app.delete("/threads/:id", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    return c.json(await supervisor.deleteThread(c.req.param("id")));
   });
 
   app.post("/message", async (c) => {

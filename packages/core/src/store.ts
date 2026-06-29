@@ -12,10 +12,14 @@ export interface Store {
    *  reconciliation of turns interrupted by a process crash (BRO-1530). */
   findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
   /** Every session, for the thread-list UI (BRO-1567). Order is unspecified —
-   *  callers (Supervisor.listThreads) sort for display. */
+   *  callers (Supervisor.listThreads) sort for display. Includes archived
+   *  sessions; the drawer filters them (BRO-1592). */
   listSessions(): Promise<Session[]>;
   addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
   turnsForSession(sessionId: string): Promise<Turn[]>;
+  /** Hard-delete a session and all its turns (BRO-1592). No FK cascade exists
+   *  (session_id is plain text), so turns are removed first, then the session. */
+  deleteSession(id: string): Promise<void>;
 }
 
 // Collision-safe across restarts, PIDs, and instances — required now that IDs
@@ -57,6 +61,10 @@ export class InMemoryStore implements Store {
   }
   async turnsForSession(sessionId: string) {
     return this.turns.filter((t) => t.sessionId === sessionId);
+  }
+  async deleteSession(sessionId: string) {
+    this.sessions.delete(sessionId);
+    this.turns = this.turns.filter((t) => t.sessionId !== sessionId);
   }
 }
 

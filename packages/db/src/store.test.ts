@@ -172,3 +172,51 @@ describe("DrizzleStore (pglite) — deterministic ordering (P20 #4)", () => {
     await store.close();
   });
 });
+
+describe("DrizzleStore (pglite) — session management (BRO-1592)", () => {
+  const base = { workspaceId: "ws-1", phase: "idle" as const, createdAt: "2026-01-01T00:00:00Z" };
+
+  test("archived + title round-trip through upsertSession (set-clause fix)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    await store.upsertSession({ id: "sA", threadId: "t-a", ...base });
+    // Defaults on a fresh row.
+    let got = await store.findSessionByThread("t-a");
+    expect(got?.archived).toBe(false);
+    expect(got?.title).toBeUndefined();
+    // Update must persist archived + title — the regression the set-clause fix guards.
+    await store.upsertSession({
+      id: "sA",
+      threadId: "t-a",
+      ...base,
+      archived: true,
+      title: "My thread",
+    });
+    got = await store.findSessionByThread("t-a");
+    expect(got?.archived).toBe(true);
+    expect(got?.title).toBe("My thread");
+    await store.close();
+  });
+
+  test("listSessions includes archived rows (drawer filters, not the store)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    await store.upsertSession({ id: "s1", threadId: "t-1", ...base, archived: true });
+    await store.upsertSession({ id: "s2", threadId: "t-2", ...base });
+    expect((await store.listSessions()).map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+    await store.close();
+  });
+
+  test("deleteSession removes the session AND its turns (no orphans)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    await store.upsertSession({ id: "sDel", threadId: "t-del", ...base });
+    await store.addTurn({ sessionId: "sDel", role: "user", text: "bye" });
+    await store.addTurn({ sessionId: "sDel", role: "agent", text: "ok" });
+    expect(await store.turnsForSession("sDel")).toHaveLength(2);
+    await store.deleteSession("sDel");
+    expect(await store.findSessionByThread("t-del")).toBeUndefined();
+    expect(await store.turnsForSession("sDel")).toHaveLength(0);
+    await store.close();
+  });
+});

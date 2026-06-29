@@ -64,6 +64,28 @@ export async function proxyGenesisPostJson(
   }
 }
 
+/** DELETE a resource on the genesis engine and pass the body + status through
+ *  (BRO-1592 thread delete). `path` must start with "/". The caller's
+ *  authorizePrincipal must already have run; this only adds the server→engine
+ *  bearer. */
+export async function proxyGenesisDelete(path: string, req: Request): Promise<Response> {
+  try {
+    const upstream = await fetch(`${GENESIS_URL}${path}`, {
+      method: "DELETE",
+      headers: { ...(GENESIS_TOKEN ? { authorization: `Bearer ${GENESIS_TOKEN}` } : {}) },
+      signal: req.signal,
+    });
+    return new Response(await upstream.text(), {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+      },
+    });
+  } catch (err) {
+    return upstreamError(err);
+  }
+}
+
 /** Shared error mapping: a client-disconnect AbortError → 499 (no alarm); any
  *  other failure logs the address server-side only and returns a generic 502. */
 function upstreamError(err: unknown): Response {

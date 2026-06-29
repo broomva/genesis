@@ -16,6 +16,8 @@ interface SessionRow {
   agentSessionId: string | null;
   phase: string;
   createdAt: string;
+  archived?: boolean | null;
+  title?: string | null;
 }
 
 function toSession(r: SessionRow): Session {
@@ -26,6 +28,8 @@ function toSession(r: SessionRow): Session {
     agentSessionId: r.agentSessionId ?? undefined,
     phase: r.phase as Session["phase"],
     createdAt: r.createdAt,
+    archived: r.archived ?? false,
+    title: r.title ?? undefined,
   };
 }
 
@@ -75,15 +79,36 @@ export class DrizzleStore implements Store {
       agentSessionId: s.agentSessionId ?? null,
       phase: s.phase,
       createdAt: s.createdAt,
+      archived: s.archived ?? false,
+      title: s.title ?? null,
     };
     await this.db
       .insert(sessions)
       .values(row)
       .onConflictDoUpdate({
         target: sessions.id,
-        set: { agentSessionId: row.agentSessionId, phase: row.phase, workspaceId: row.workspaceId },
+        // The set-clause must list EVERY mutable column — anything omitted is
+        // silently dropped on update. archived/title (BRO-1592) join phase +
+        // agentSessionId here, or an archive/rename write would no-op.
+        set: {
+          agentSessionId: row.agentSessionId,
+          phase: row.phase,
+          workspaceId: row.workspaceId,
+          archived: row.archived,
+          title: row.title,
+        },
       });
     return s;
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    // No FK cascade (session_id is plain text) — remove turns then the session,
+    // atomically in one transaction so a crash mid-delete can't leave a session
+    // with 0 turns (or orphaned turns). pglite + postgres-js both support it.
+    await this.db.transaction(async (tx: DrizzleDb) => {
+      await tx.delete(turns).where(eq(turns.sessionId, id));
+      await tx.delete(sessions).where(eq(sessions.id, id));
+    });
   }
 
   async addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn> {

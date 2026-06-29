@@ -22,6 +22,12 @@ export interface Session {
   agentSessionId?: string;
   phase: RunPhase;
   createdAt: string;
+  /** Soft-archived → hidden from the default drawer list, reversible (BRO-1592).
+   *  Optional for back-compat; treat absent as false. */
+  archived?: boolean;
+  /** Human-readable thread title — auto-derived from the first user turn, or
+   *  renamed (BRO-1592). Absent → the drawer falls back to a last-text preview. */
+  title?: string;
 }
 
 export interface Turn {

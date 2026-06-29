@@ -1,0 +1,229 @@
+<!doctype html>
+<!--
+name: genesis-session-mgmt-composer-instrumentation
+linear: BRO-1592 (epic) → BRO-1593..1599
+status: design-locked
+date: 2026-06-29
+audience: human (architecture + decision record) — Category C per P18
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Genesis — Session management + composer instrumentation</title>
+<style>
+  /* Broomva DS tokens (subset, lifted from tokens/colors.css + globals.css) */
+  :root{
+    --ink: oklch(0.175 0.022 265); --canvas:#fff; --canvas-soft: oklch(0.985 0.003 265);
+    --canvas-soft-2: oklch(0.965 0.005 265); --gray-200: oklch(0.92 0.006 265);
+    --gray-400: oklch(0.76 0.008 265); --gray-500: oklch(0.62 0.01 265); --gray-700: oklch(0.44 0.014 265);
+    --blue: oklch(0.60 0.12 260); --blue-text: oklch(0.50 0.13 260); --blue-accent: oklch(0.65 0.14 235);
+    --frost-8: oklch(0.60 0.12 260 / 0.09); --frost-4: oklch(0.60 0.12 260 / 0.045);
+    --success: oklch(0.62 0.17 152); --warning: oklch(0.76 0.15 85); --danger: oklch(0.56 0.21 27);
+    --border-15: oklch(0.6 0.05 265 / 0.13); --radius-lg:.5rem; --radius-xl:.75rem; --radius-composer:28px;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --sys: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--canvas);color:var(--ink);font-family:var(--sys);line-height:1.55;
+    -webkit-font-smoothing:antialiased;font-size:15px}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 28px 120px}
+  header.hd{margin-bottom:8px}
+  .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--blue-text);font-weight:600}
+  h1{font-size:30px;line-height:1.15;letter-spacing:-.02em;margin:.3em 0 .15em;font-weight:680}
+  h2{font-size:21px;letter-spacing:-.01em;margin:2.4em 0 .6em;font-weight:640;
+    padding-bottom:.3em;border-bottom:1px solid var(--border-15)}
+  h3{font-size:16px;margin:1.6em 0 .4em;font-weight:620}
+  p{margin:.5em 0;max-width:74ch} .lede{font-size:16.5px;color:#2b2b33;max-width:78ch}
+  code,.k{font-family:var(--mono);font-size:.86em;background:var(--canvas-soft-2);
+    border:1px solid var(--border-15);border-radius:5px;padding:1px 5px}
+  a{color:var(--blue-text);text-decoration:none;border-bottom:1px solid var(--frost-8)}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 4px}
+  .chip{display:inline-flex;align-items:center;gap:7px;height:27px;padding:0 11px;border-radius:9999px;
+    background:var(--canvas-soft);border:1px solid var(--border-15);font-size:12px;font-weight:500}
+  .dot{width:8px;height:8px;border-radius:99px;flex:0 0 auto}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--border-15)}
+  th{font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--gray-500);font-weight:600}
+  td.k-col{white-space:nowrap;font-family:var(--mono);font-size:12px;color:var(--gray-700)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:18px 0}
+  .card{border:1px solid var(--border-15);border-radius:var(--radius-xl);padding:18px 18px 16px;background:linear-gradient(180deg,#fff, oklch(0.99 0.004 265))}
+  .card h3{margin-top:0}
+  .pr{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--blue-text);
+    background:var(--frost-4);border:1px solid var(--frost-8);border-radius:6px;padding:2px 8px;font-family:var(--mono)}
+  .verdict{font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:5px;border:1px solid var(--border-15)}
+  .v-ready{color:var(--success)} .v-be{color:var(--warning)} .v-ne{color:var(--blue-accent)} .v-co{color:var(--blue-text)}
+  .receipt{font-family:var(--mono);font-size:11px;color:var(--gray-500);background:var(--canvas-soft);
+    border-radius:5px;padding:2px 8px;font-variant-numeric:tabular-nums;display:inline-block}
+  ul.tight{margin:.4em 0;padding-left:1.15em} ul.tight li{margin:.22em 0}
+  .note{font-size:13px;color:var(--gray-700);background:var(--canvas-soft);border-left:3px solid var(--blue);
+    border-radius:0 8px 8px 0;padding:10px 14px;margin:12px 0;max-width:80ch}
+  .flow{width:100%;max-width:960px;margin:8px 0 4px;border:1px solid var(--border-15);border-radius:var(--radius-xl);background:#fff}
+  .mono-s{font-family:var(--mono);font-size:11px}
+  .dep{font-size:13px}
+  .dep b{font-weight:600}
+  .up{color:var(--gray-700)} .down{color:var(--blue-text)}
+  footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--border-15);font-size:12.5px;color:var(--gray-500)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hd">
+  <div class="eyebrow">Genesis · design-locked spec · BRO-1592</div>
+  <h1>Session management + composer instrumentation</h1>
+  <p class="lede">The thread drawer becomes a real session manager (search · archive · delete · live status),
+  and the composer gains live instrumentation (a token/cost context gauge + human input-history navigation).
+  Everything grounded in the Broomva Design System — Houston-monochrome on the Arcan-blue OKLCH axis.</p>
+  <div class="chips">
+    <span class="chip"><span class="dot" style="background:var(--gray-400)"></span>light-first</span>
+    <span class="chip"><span class="dot" style="background:var(--blue)"></span>one accent: ai-blue</span>
+    <span class="chip">glass earned, not ambient</span>
+    <span class="chip">presence, not progress — <b>no %</b></span>
+    <span class="chip">sentence case · no emoji · no em-dash</span>
+  </div>
+</header>
+
+<h2>1 · Locked decisions</h2>
+<p>From the <code>genesis-understand</code> mapping workflow (4 parallel readers: backend · usage · DS · frontend).
+Each call is grounded; the rationale column cites the constraint that forced it.</p>
+<table>
+  <thead><tr><th>Decision</th><th>Choice</th><th>Why (grounded)</th></tr></thead>
+  <tbody>
+  <tr><td>Schema migration</td><td class="k-col">ALTER TABLE … ADD&nbsp;COLUMN&nbsp;IF&nbsp;NOT&nbsp;EXISTS</td>
+    <td>No drizzle-kit wired; <code>MIGRATE_SQL</code> is create-if-not-exists only. Idempotent ALTER matches the existing style and runs on both pglite + postgres. Unblocks archive/title/usage immediately.</td></tr>
+  <tr><td>Mutation surface</td><td class="k-col">DELETE /threads/:id<br>+ /control actions</td>
+    <td>Engine has zero PATCH/DELETE today. Delete earns a real REST verb (the BFF <code>[id]/route.ts</code> just adds a DELETE export); archive/unarchive/rename ride the existing <code>POST /control</code> switch so the <code>/api/control</code> BFF forwards verbatim — zero new BFF families for the toggles.</td></tr>
+  <tr><td>Token usage</td><td class="k-col">real, model-reported</td>
+    <td>"token and cost of the session" demands accuracy. Ground truth (<code>result.usage</code> + <code>total_cost_usd</code>) already on the wire; it is only dropped at the parser type. Surface it — don't estimate.</td></tr>
+  <tr><td>Cost number</td><td class="k-col">claude's total_cost_usd</td>
+    <td>claude computes exact cost. <b>No pricing table</b> to maintain (it would drift on every Anthropic price change). Zero-maintenance + more accurate.</td></tr>
+  <tr><td>Context-window meter</td><td class="k-col">absolute counts + thin track</td>
+    <td>DS bans progress % on agent work (<code>SKILL.md</code>: "show receipts", <code>motion-undertow</code>: "no percentages"). Render as a receipt gauge <span class="receipt">ctx 18k / 200k · $0.04</span> with an optional 3px track that shifts hue at thresholds — reusing the status ladder so colour stays signal.</td></tr>
+  <tr><td>Session usage totals</td><td class="k-col">durable (turns columns)</td>
+    <td>Survives thread reload / restart, so "session cost" is correct after a refresh. Per-turn usage persisted on <code>turns</code>; summed in <code>listThreads</code>/<code>history</code>.</td></tr>
+  <tr><td>Status hue canon</td><td class="k-col">awaiting → blue-accent</td>
+    <td>Fix the drift: app maps <code>awaiting→warning</code>, <code>blocked→danger</code>. SKILL.md (authoritative) — "mark halts in accent-blue, never red". New map: idle gray · running tidepool · awaiting <b>blue-accent</b> · blocked <b>warning</b> · done success · error danger.</td></tr>
+  <tr><td>Search scope</td><td class="k-col">client-side filter (v1)</td>
+    <td>List is already fetched; single-user scale. Filter over <code>lastText</code>/title in the drawer — no endpoint. Server <code>?q=</code> deferred until history size demands it.</td></tr>
+  <tr><td>History navigation</td><td class="k-col">prev/next jump + ↑ recall</td>
+    <td>Both: prev/next user-turn jump via <code>scrollToMessage</code> (scroller already exposes it + <code>currentAnchorId</code>), and ArrowUp-on-empty recalls the last sent message into the composer for edit/resend (needs <code>PromptInputProvider</code>).</td></tr>
+  </tbody>
+</table>
+<div class="note">The DS status specimens themselves disagree (<code>color-status.html</code> puts "Needs you" on warning; <code>work-model.html</code> on accent-blue). <b>SKILL.md is the tiebreaker</b> → accent-blue for halts, red reserved for true failures only.</div>
+
+<h2>2 · The three-PR arc</h2>
+<p>Sequenced — not fanned out — because the PRs share <code>packages/core</code> + <code>apps/api</code> + <code>chat-view.tsx</code>;
+parallel worktrees would conflict. Each lands from a clean tree (P10), redeploys, and is visually verified on the VPS (P11, Interceptor restored).</p>
+
+<div class="grid">
+  <div class="card">
+    <span class="pr">PR&nbsp;1 · session manager</span>
+    <h3>BRO-1593 · 1594 · 1595 · 1596</h3>
+    <p class="dep">Search · archive · delete · status. The drawer becomes a session manager; the backend gains its first mutations.</p>
+    <p class="dep up"><b>Upstream:</b> <code>packages/db/schema.ts</code> (migration), <code>core/store.ts</code> + <code>db/store.ts</code> (deleteSession/setArchived/setTitle/search; <b>fix upsertSession set-clause</b>), <code>core/types.ts</code>, <code>core/supervisor.ts</code> (archive/delete/search/title), <code>api/server.ts</code> (DELETE route + /control actions), BFF <code>api/threads/[id]/route.ts</code> (DELETE), <code>lib/threads.ts</code>.</p>
+    <p class="dep down"><b>Downstream:</b> <code>thread-drawer.tsx</code> (search pill, <b>row → div restructure</b>, persistent ⋯ menu, archive/delete-confirm, archived filter, status hue fix), <code>page.tsx</code> (active-thread fallback on delete, freshness poll).</p>
+  </div>
+  <div class="card">
+    <span class="pr">PR&nbsp;2 · composer instrumentation</span>
+    <h3>BRO-1597 · 1598</h3>
+    <p class="dep">The usage vertical slice + the context gauge + input-history navigation.</p>
+    <p class="dep up"><b>Upstream:</b> <code>projection/parser.ts</code> (usage on result type), <code>projection/reducer.ts</code> (RunState.usage/costUsd), <code>api/channel/types.ts</code>, <code>core/supervisor.ts</code> (DispatchResult.usage; persist per-turn), <code>api/server.ts</code> (emit), <code>api/channel/chat-sdk.ts</code> (<b>message-metadata part</b>), <code>lib/chat-options.ts</code> (MODEL_CONTEXT table).</p>
+    <p class="dep down"><b>Downstream:</b> new <code>ai-elements/context-meter.tsx</code>, <code>chat-view.tsx</code> (read <code>message.metadata</code>, mount meter, prev/next nav, ↑-recall via PromptInputProvider).</p>
+  </div>
+  <div class="card">
+    <span class="pr">PR&nbsp;3 · visual pass</span>
+    <h3>BRO-1599</h3>
+    <p class="dep">Deep subjective <code>/impeccable</code> pass — now that Interceptor screenshots are restored. Matrix: light × dark × mobile × desktop, judged by eye against the DS guideline renders. Covers the new search/meter/status chrome from PR1+PR2.</p>
+  </div>
+</div>
+
+<h2>3 · The usage vertical slice (PR 2)</h2>
+<p>The data exists; it is dropped at the parser type. Six surgical touches re-open the channel, ending at the
+idiomatic AI SDK v6 <code>message-metadata</code> part the web client already knows how to read.</p>
+<svg class="flow" viewBox="0 0 960 188" role="img" aria-label="Usage data flow from claude to the composer meter">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="oklch(0.60 0.12 260)"/>
+    </marker>
+    <style>
+      .box{fill:#fff;stroke:oklch(0.6 0.05 265 / 0.18);stroke-width:1;rx:9}
+      .lbl{font-family:var(--mono);font-size:10.5px;fill:oklch(0.175 0.022 265)}
+      .sub{font-family:var(--mono);font-size:9px;fill:oklch(0.62 0.01 265)}
+      .ln{stroke:oklch(0.60 0.12 260 / 0.55);stroke-width:1.4;fill:none;marker-end:url(#ar)}
+      .drop{fill:oklch(0.56 0.21 27 / 0.07);stroke:oklch(0.56 0.21 27 / 0.4);stroke-dasharray:3 3}
+    </style>
+  </defs>
+  <!-- row of boxes -->
+  <rect class="box" x="8"  y="58" width="118" height="46" rx="9"/>
+  <text class="lbl" x="18" y="78">claude -p</text><text class="sub" x="18" y="92">result.usage + cost</text>
+  <rect class="box drop" x="150" y="58" width="120" height="46" rx="9"/>
+  <text class="lbl" x="160" y="78">parser.ts</text><text class="sub" x="160" y="92">+ usage on type ✎</text>
+  <rect class="box" x="294" y="58" width="120" height="46" rx="9"/>
+  <text class="lbl" x="304" y="78">reducer.ts</text><text class="sub" x="304" y="92">RunState.usage ✎</text>
+  <rect class="box" x="438" y="58" width="132" height="46" rx="9"/>
+  <text class="lbl" x="448" y="78">supervisor</text><text class="sub" x="448" y="92">DispatchResult ✎</text>
+  <rect class="box" x="594" y="58" width="140" height="46" rx="9"/>
+  <text class="lbl" x="604" y="78">chat-sdk.ts</text><text class="sub" x="604" y="92">message-metadata ✎</text>
+  <rect class="box" x="758" y="58" width="120" height="46" rx="9"/>
+  <text class="lbl" x="768" y="78">useChat</text><text class="sub" x="768" y="92">message.metadata</text>
+  <rect class="box" x="820" y="120" width="132" height="44" rx="9" style="fill:oklch(0.60 0.12 260 / 0.06)"/>
+  <text class="lbl" x="830" y="140">context-meter</text><text class="sub" x="830" y="153">ctx 18k / 200k</text>
+  <!-- lines -->
+  <path class="ln" d="M126,81 L150,81"/><path class="ln" d="M270,81 L294,81"/>
+  <path class="ln" d="M414,81 L438,81"/><path class="ln" d="M570,81 L594,81"/>
+  <path class="ln" d="M734,81 L758,81"/><path class="ln" d="M872,104 C886,114 894,114 886,120"/>
+  <text class="sub" x="150" y="40">✎ = file edited · dashed = where the data is dropped today (parser type omits usage)</text>
+</svg>
+<p>Cost rides the same path (<code>result.total_cost_usd</code>) — no pricing table. Context-window % is computed client-side
+as <code>(input + cache_read + cache_creation) ÷ MODEL_CONTEXT[model]</code> (opus default 1M, others 200k), rendered as
+absolute counts, never a bare percentage. BFF <code>api/chat/route.ts</code> streams byte-identical → no proxy change.</p>
+
+<h2>4 · DS token map (every new element)</h2>
+<table>
+  <thead><tr><th>Element</th><th>DS source</th><th>Tokens / classes</th><th>Verdict</th></tr></thead>
+  <tbody>
+  <tr><td>Search pill</td><td class="k-col">inputs.html .search</td>
+    <td>h-9, px-3, rounded-full, <code>bg-[var(--bv-canvas-soft)]</code>, Lucide <code>Search</code> in muted, placeholder "Search conversations" in <code>--bv-gray-500</code>; ai-blue focus ring (app-wide).</td>
+    <td><span class="verdict v-ready">ready</span></td></tr>
+  <tr><td>⋯ row menu</td><td class="k-col">IconButton + .bv-glass</td>
+    <td>persistent 36px ghost trigger (hover <code>--bv-frost-8</code>), <code>DropdownMenu</code> → glass popover; items "Archive" / "Delete"; two-click confirm, <code>--bv-danger</code> as text only on confirm.</td>
+    <td><span class="verdict v-ne">+endpoint</span></td></tr>
+  <tr><td>Context gauge</td><td class="k-col">motion-undertow .receipt</td>
+    <td>mono, <code>text-xs</code>, <code>tabular-nums</code>, <code>bg-[var(--bv-canvas-soft)]</code>, rounded-[5px]; optional 3px track <code>--bv-border-5</code>→fill <code>--bv-blue</code>, →<code>--bv-warning</code> ~80% →<code>--bv-danger</code> ~92%.</td>
+    <td><span class="verdict v-co">client</span></td></tr>
+  <tr><td>Status dot</td><td class="k-col">color-status + work-model</td>
+    <td>idle <code>gray-400</code> · running <code>.bv-dot-live</code> · awaiting <code>--bv-blue-accent</code> · blocked <code>--bv-warning</code> · done <code>--bv-success</code>; keep <code>role=img</code> + aria-label.</td>
+    <td><span class="verdict v-ready">ready</span></td></tr>
+  <tr><td>History nav</td><td class="k-col">IconButton + buttons.html</td>
+    <td>36px ghost prev/next (Lucide chevrons), counter "3 / 12" in tabular-nums muted; matte scroll-to-latest (card bg, not glass).</td>
+    <td><span class="verdict v-ready">ready</span></td></tr>
+  </tbody>
+</table>
+
+<h2>5 · Migration (additive, idempotent)</h2>
+<p>Appended to <code>MIGRATE_SQL</code> in <code>packages/db/src/schema.ts</code> — safe to run repeatedly, on the live VPS DB:</p>
+<pre style="font-family:var(--mono);font-size:12.5px;background:var(--canvas-soft);border:1px solid var(--border-15);border-radius:10px;padding:14px 16px;overflow:auto;line-height:1.5"><code>ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived  boolean NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title     text;
+ALTER TABLE turns    ADD COLUMN IF NOT EXISTS input_tokens         integer;
+ALTER TABLE turns    ADD COLUMN IF NOT EXISTS output_tokens        integer;
+ALTER TABLE turns    ADD COLUMN IF NOT EXISTS cache_read_tokens    integer;
+ALTER TABLE turns    ADD COLUMN IF NOT EXISTS cache_creation_tokens integer;
+ALTER TABLE turns    ADD COLUMN IF NOT EXISTS cost_usd             double precision;</code></pre>
+<div class="note">Hard delete has <b>no FK cascade</b> (session_id is plain text) → <code>deleteSession</code> must delete <code>turns</code> then <code>sessions</code> in that order, and clear the in-flight chains-map entry + call <code>control.reset</code> first to avoid an orphaned live process writing phase back after the row is gone (same race the existing <code>reset()</code> B2 guard handles).</div>
+
+<h2>6 · Gates (every PR)</h2>
+<ul class="tight">
+  <li><b>CI</b> — <code>bunx biome ci .</code> + <code>bun run typecheck</code> + <code>bun test</code> locally with explicit exit codes (never piped through <code>tail</code> — that masked #36/#37 red).</li>
+  <li><b>P20 cross-review</b> — fresh-context adversarial subagents (anti-slop ≥7/10) before merge; verdict logged in the PR.</li>
+  <li><b>P9</b> — <code>gh pr checks --watch</code> in background after every push; never sleep on CI.</li>
+  <li><b>P11</b> — redeploy to the VPS, Interceptor screenshot the live surface, verify by eye (not DOM-eval).</li>
+  <li><b>Review threads</b> — CodeRabbit + any inline threads resolved by fix / accept / reject-with-reason before merge.</li>
+</ul>
+
+<footer>
+  Genesis · BRO-1592 · grounded in the <code>genesis-understand</code> workflow (4 readers, 40 findings, 21 feasibility calls) +
+  the Broomva Design System (<code>~/Downloads/Broomva Design System (2)</code>). Light-first, monochrome by default, ai-blue is the only accent.
+</footer>
+</div>
+</body>
+</html>

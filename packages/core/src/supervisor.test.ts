@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
-import { Supervisor } from "./supervisor";
+import { Supervisor, deriveTitle } from "./supervisor";
 
 const ws = { id: "ws-1", name: "test", rootPath: "/tmp/genesis-test" };
 
@@ -343,5 +343,66 @@ describe("supervisor — per-turn model + effort threading (BRO-1573)", () => {
     });
     await sup.dispatch("t-default", "hi");
     expect(seen).toEqual({ model: undefined, effort: undefined });
+  });
+});
+
+describe("supervisor — session management (BRO-1592)", () => {
+  test("deriveTitle takes the first ~6 words of the first line", () => {
+    expect(deriveTitle("  fix   the   login   bug  ")).toBe("fix the login bug");
+    expect(deriveTitle("one two three four five six seven eight")).toBe(
+      "one two three four five six",
+    );
+    expect(deriveTitle("first line\nsecond line")).toBe("first line");
+    expect(deriveTitle("   \n  ")).toBeUndefined();
+  });
+
+  test("first user turn auto-derives a title; listThreads carries title + archived=false", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    await sup.dispatch("t-title", "summarize the workspace state please");
+    const [row] = await sup.listThreads();
+    expect(row?.title).toBe("summarize the workspace state please");
+    expect(row?.archived).toBe(false);
+  });
+
+  test("title is not overwritten by a later turn", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    await sup.dispatch("t-keep", "original question");
+    await sup.dispatch("t-keep", "a follow up");
+    const [row] = await sup.listThreads();
+    expect(row?.title).toBe("original question");
+  });
+
+  test("archiveThread toggles the archived flag; restore clears it", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    await sup.dispatch("t-arch", "hello");
+    expect((await sup.archiveThread("t-arch", true)).ok).toBe(true);
+    expect((await sup.listThreads())[0]?.archived).toBe(true);
+    await sup.archiveThread("t-arch", false);
+    expect((await sup.listThreads())[0]?.archived).toBe(false);
+  });
+
+  test("setTitle renames; empty title clears back to undefined", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    await sup.dispatch("t-name", "first question here");
+    await sup.setTitle("t-name", "Renamed thread");
+    expect((await sup.listThreads())[0]?.title).toBe("Renamed thread");
+    await sup.setTitle("t-name", "   ");
+    expect((await sup.listThreads())[0]?.title).toBeUndefined();
+  });
+
+  test("deleteThread removes the thread + its transcript", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    await sup.dispatch("t-del", "delete me");
+    expect(await sup.listThreads()).toHaveLength(1);
+    expect((await sup.deleteThread("t-del")).ok).toBe(true);
+    expect(await sup.listThreads()).toHaveLength(0);
+    expect(await sup.history("t-del")).toEqual([]);
+  });
+
+  test("archive/rename/delete on an unknown thread → no-session", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    expect((await sup.archiveThread("nope", true)).reason).toBe("no-session");
+    expect((await sup.setTitle("nope", "x")).reason).toBe("no-session");
+    expect((await sup.deleteThread("nope")).reason).toBe("no-session");
   });
 });
