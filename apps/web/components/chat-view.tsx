@@ -26,10 +26,9 @@ import {
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
-import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
-import { Message, MessageContent } from "@/components/ui/message";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -42,7 +41,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { EFFORT_OPTIONS, MODEL_OPTIONS, effortToBody, modelToBody } from "@/lib/chat-options";
 import { parseSlash, slashHelpText } from "@/lib/slash";
 import { resetThread } from "@/lib/threads";
-import { cn } from "@/lib/utils";
 
 // Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
 // inline images, so only text-ish files are inlined as fenced blocks; anything
@@ -130,26 +128,21 @@ function ChatLoader() {
   );
 }
 
-function StatusPill({ status }: { status: ReturnType<typeof useChat>["status"] }) {
+// The running signal — the DS tidepool dot + a quiet, shimmering label. Idle is
+// silent (calm is load-bearing — motion encodes presence, not urgency). Errors
+// read in the danger hue, no dot.
+function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"] }) {
+  if (status === "error") {
+    return <span className="text-[var(--bv-danger)] text-xs">Something went wrong</span>;
+  }
   const busy = status === "submitted" || status === "streaming";
-  const label =
-    status === "streaming"
-      ? "streaming"
-      : status === "submitted"
-        ? "thinking"
-        : status === "error"
-          ? "error"
-          : "idle";
+  if (!busy) return null;
   return (
-    <span
-      className={cn(
-        "rounded-full border px-2.5 py-0.5 font-mono text-xs",
-        busy && "shimmer border-[var(--ai-blue)]/40 text-[var(--ai-blue)]",
-        status === "error" && "border-destructive/50 text-destructive",
-        !busy && status !== "error" && "border-border text-muted-foreground",
-      )}
-    >
-      {label}
+    <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+      <span className="bv-dot-live" aria-hidden />
+      <span className="shimmer text-[var(--bv-blue-text)]">
+        {status === "streaming" ? "Responding" : "Thinking"}
+      </span>
     </span>
   );
 }
@@ -252,25 +245,27 @@ export function ChatView({
         >
           <PanelLeft className="size-4" />
         </Button>
-        <span className="font-mono text-sm font-semibold tracking-tight text-[var(--ai-blue)]">
-          Genesis
-        </span>
-        <span className="text-muted-foreground hidden font-mono text-xs sm:inline">agent chat</span>
-        <div className="ml-auto">
-          <StatusPill status={status} />
+        <span className="text-foreground text-[0.95rem] font-semibold tracking-tight">Genesis</span>
+        <span className="text-muted-foreground hidden text-sm sm:inline">agent chat</span>
+        <div className="ml-auto flex items-center gap-2">
+          <RunningStatus status={status} />
+          <ThemeToggle />
         </div>
       </header>
 
       <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor">
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport className="px-4">
-            <MessageScrollerContent className="mx-auto w-full max-w-2xl py-6">
+            <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 py-6">
               {messages.length === 0 ? (
-                <div className="message-in flex flex-col items-center gap-4 py-16 text-center">
-                  <p className="text-muted-foreground font-mono text-sm">
-                    Message the agent to begin, or try:
+                <div className="message-in flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
+                  <p className="text-foreground text-[1.375rem] font-semibold">
+                    Start a conversation
                   </p>
-                  <Suggestions className="justify-center">
+                  <p className="text-muted-foreground max-w-sm text-sm">
+                    Message the agent, or pick a starting point.
+                  </p>
+                  <Suggestions className="mt-2 justify-center">
                     {STARTERS.map((s) => (
                       <Suggestion key={s} suggestion={s} onClick={send} />
                     ))}
@@ -286,43 +281,40 @@ export function ChatView({
                       key={message.id}
                       messageId={message.id}
                       scrollAnchor={isUser}
-                      className="message-in"
+                      className="message-in flex flex-col"
                     >
-                      <Message align={isUser ? "end" : "start"}>
-                        <MessageContent>
+                      {isUser ? (
+                        // DS user bubble — soft cool-gray fill, asymmetric radius
+                        // (flat bottom-right corner), right-aligned. Never ink-filled.
+                        <div className="bg-[var(--bv-canvas-soft-2)] text-foreground ml-auto max-w-[78%] self-end rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
+                          {text}
+                        </div>
+                      ) : (
+                        // DS assistant — plain ink text flowing on the canvas, no
+                        // bubble. The reasoning chip (if any) sits above it.
+                        <div className="min-w-0 max-w-full">
                           {reasoning ? <ThinkingIndicator note={reasoning} /> : null}
-                          <Bubble
-                            variant={isUser ? "default" : "muted"}
-                            align={isUser ? "end" : "start"}
-                          >
-                            {isUser ? (
-                              <BubbleContent className="whitespace-pre-wrap">{text}</BubbleContent>
-                            ) : (
-                              <BubbleContent>
-                                {text ? (
-                                  // streamdown parses INCOMPLETE markdown so partial
-                                  // fences/lists/bold don't break mid-stream (BRO-1566).
-                                  <Streamdown
-                                    className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                                    isAnimating={status === "streaming"}
-                                    animated
-                                  >
-                                    {text}
-                                  </Streamdown>
-                                ) : busy ? (
-                                  <ChatLoader />
-                                ) : null}
-                              </BubbleContent>
-                            )}
-                          </Bubble>
-                        </MessageContent>
-                      </Message>
+                          {text ? (
+                            // streamdown parses INCOMPLETE markdown so partial
+                            // fences/lists/bold don't break mid-stream (BRO-1566).
+                            <Streamdown
+                              className="text-foreground text-[0.95rem] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                              isAnimating={status === "streaming"}
+                              animated
+                            >
+                              {text}
+                            </Streamdown>
+                          ) : busy ? (
+                            <ChatLoader />
+                          ) : null}
+                        </div>
+                      )}
                     </MessageScrollerItem>
                   );
                 })
               )}
               {error ? (
-                <div className="text-destructive mt-4 font-mono text-xs">{error.message}</div>
+                <div className="text-[var(--bv-danger)] text-sm">{error.message}</div>
               ) : null}
             </MessageScrollerContent>
           </MessageScrollerViewport>
@@ -330,10 +322,12 @@ export function ChatView({
         </MessageScroller>
       </MessageScrollerProvider>
 
-      <footer className="border-border bg-background shrink-0 border-t px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+      {/* No top divider — the composer floats with its frosted-blue halo, the one
+          dramatic depth cue. Messages blur behind the glass as they scroll under. */}
+      <footer className="shrink-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <div className="mx-auto w-full max-w-2xl">
           {notice ? (
-            <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-lg border px-3 py-2 font-mono text-xs whitespace-pre-line">
+            <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-xl border px-3 py-2 text-xs whitespace-pre-line">
               <span>{notice}</span>
               <button
                 type="button"
@@ -350,7 +344,7 @@ export function ChatView({
               onSubmit={handleSubmit}
               multiple
               onError={(e) => setNotice(e.message)}
-              className="w-full"
+              className="bv-composer w-full"
             >
               <PromptInputBody>
                 <PromptInputTextarea
@@ -393,11 +387,16 @@ export function ChatView({
                     </PromptInputSelectContent>
                   </PromptInputSelect>
                 </PromptInputTools>
-                {/* onStop → during a stream the button becomes type=button and
-                  aborts directly (no form submit/reset), so text typed mid-stream
-                  isn't wiped (P20 BRO-1573). handleSubmit's busy-guard remains the
-                  Enter-key fallback. */}
-                <PromptInputSubmit status={status} onStop={stop} />
+                {/* DS send — a circular primary-fill button (hover lightens one
+                  step to ink-hover). onStop → during a stream the button becomes
+                  type=button and aborts directly (no form submit/reset), so text
+                  typed mid-stream isn't wiped (P20 BRO-1573). handleSubmit's
+                  busy-guard remains the Enter-key fallback. */}
+                <PromptInputSubmit
+                  status={status}
+                  onStop={stop}
+                  className="size-9 rounded-full hover:bg-[var(--bv-ink-hover)]"
+                />
               </PromptInputFooter>
             </PromptInput>
           </TooltipProvider>

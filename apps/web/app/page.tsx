@@ -117,8 +117,8 @@ export default function ChatPage() {
             onEffortChange={onEffortChange}
           />
         ) : (
-          <div className="text-muted-foreground flex flex-1 items-center justify-center font-mono text-sm">
-            loading…
+          <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
+            Loading…
           </div>
         )}
       </div>

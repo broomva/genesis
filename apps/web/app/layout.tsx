@@ -1,17 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ServiceWorker } from "@/components/service-worker";
-
-const geistSans = Geist({
-  variable: "--font-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import { THEME_INIT_SCRIPT } from "@/components/theme-toggle";
 
 export const metadata: Metadata = {
   title: "Genesis",
@@ -19,13 +9,21 @@ export const metadata: Metadata = {
   applicationName: "Genesis",
   appleWebApp: {
     capable: true,
-    statusBarStyle: "black-translucent",
+    // Light is the default canvas, so the status bar shows dark glyphs over an
+    // opaque light bar ("default"). black-translucent would draw white glyphs
+    // that vanish on the white canvas.
+    statusBarStyle: "default",
     title: "Genesis",
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0b0d12",
+  // Tracks the OS scheme for the standalone status-bar tint. The in-app toggle is
+  // class-based and authoritative for the page itself; this is just chrome.
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0c0e16" },
+  ],
   width: "device-width",
   initialScale: 1,
   // No maximumScale clamp — let users pinch-zoom (WCAG 1.4.4).
@@ -38,14 +36,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
+    // suppressHydrationWarning: THEME_INIT_SCRIPT mutates the class on <html>
+    // before React hydrates (no-flash), so the server/client class can differ.
+    <html lang="en" className="h-full antialiased" suppressHydrationWarning>
+      <head>
+        {/* Apply the stored theme before first paint — no light→dark flash. */}
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: tiny static, app-authored theme bootstrap; no user input. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       {/* h-dvh (dynamic viewport) so the chat column reaches the PHYSICAL bottom
-          under viewport-fit=cover — `min-h-full` (= layout viewport, excludes the
-          iOS home-indicator inset) left a dead band below the composer (BRO-1582).
-          overflow-hidden: the chat manages its own scroll regions. */}
+          under viewport-fit=cover. overflow-hidden: the chat manages its own
+          scroll regions. The app shell pins itself with `fixed inset-0` (page.tsx)
+          — the bulletproof full-screen technique for iOS standalone (BRO-1582). */}
       <body className="bg-background text-foreground h-dvh overflow-hidden">
         {children}
         <ServiceWorker />

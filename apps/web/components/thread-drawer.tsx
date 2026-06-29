@@ -6,12 +6,12 @@ import { Button } from "@/components/ui/button";
 import type { ThreadPhase, ThreadSummary } from "@/lib/threads";
 import { cn } from "@/lib/utils";
 
-// Phase → status-dot color (arcan-glass tokens). Mirrors the StatusPill palette.
-const PHASE_DOT: Record<ThreadPhase, string> = {
-  running: "bg-[var(--ai-blue)]",
-  awaiting: "bg-[var(--amber)]",
-  blocked: "bg-destructive",
-  done: "bg-[var(--success)]",
+// Phase → status-dot fill (DS cool-axis status hues). `running` is special-cased
+// to the tidepool dot (bv-dot-live) in the row, so it's omitted here.
+const PHASE_DOT: Record<Exclude<ThreadPhase, "running">, string> = {
+  awaiting: "bg-[var(--bv-warning)]",
+  blocked: "bg-[var(--bv-danger)]",
+  done: "bg-[var(--bv-success)]",
   idle: "bg-muted-foreground/40",
 };
 
@@ -54,13 +54,15 @@ export function ThreadDrawer({
 
       <aside
         className={cn(
-          "bg-panel border-border z-40 flex w-72 shrink-0 flex-col border-r",
+          // Matte sidebar — the DS keeps chrome matte; glass is earned only by the
+          // composer, overlays and popovers.
+          "bg-sidebar border-sidebar-border z-40 flex w-72 shrink-0 flex-col border-r",
           "fixed inset-y-0 left-0 transition-transform duration-200 md:static md:translate-x-0",
           open ? "translate-x-0" : "-translate-x-full",
         )}
       >
-        <div className="border-border flex items-center gap-2 border-b px-3 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:pt-3">
-          <span className="font-mono text-sm font-semibold tracking-tight text-[var(--ai-blue)]">
+        <div className="border-sidebar-border flex items-center gap-2 border-b px-3 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:pt-3">
+          <span className="text-foreground text-[0.95rem] font-semibold tracking-tight">
             Genesis
           </span>
           <Button
@@ -78,7 +80,7 @@ export function ThreadDrawer({
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
           {threads.length === 0 ? (
-            <p className="text-muted-foreground px-2 py-6 text-center font-mono text-xs">
+            <p className="text-muted-foreground px-2 py-6 text-center text-xs">
               No conversations yet.
             </p>
           ) : (
@@ -94,16 +96,24 @@ export function ThreadDrawer({
                       className={cn(
                         "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
                         isActive
-                          ? "bg-accent text-accent-foreground"
-                          : "text-foreground hover:bg-accent/50",
+                          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                          : "text-foreground hover:bg-sidebar-accent/60",
                       )}
                     >
-                      <span
-                        className={cn(
-                          "size-1.5 shrink-0 rounded-full",
-                          PHASE_DOT[t.phase] ?? PHASE_DOT.idle,
-                        )}
-                      />
+                      {/* The dot carries phase by color — give it an accessible
+                          name so status isn't conveyed by color alone (WCAG 1.4.1). */}
+                      {t.phase === "running" ? (
+                        <span className="bv-dot-live shrink-0" role="img" aria-label="running" />
+                      ) : (
+                        <span
+                          role="img"
+                          aria-label={t.phase}
+                          className={cn(
+                            "size-1.5 shrink-0 rounded-full",
+                            PHASE_DOT[t.phase] ?? PHASE_DOT.idle,
+                          )}
+                        />
+                      )}
                       <span className="truncate">{previewLabel(t)}</span>
                     </button>
                   </li>
