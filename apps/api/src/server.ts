@@ -195,7 +195,13 @@ export function build(opts: BuildOpts) {
         },
         { model: incoming.model, effort: incoming.effort },
       );
-      emit({ kind: "reply", phase: result.phase, text: result.reply });
+      emit({
+        kind: "reply",
+        phase: result.phase,
+        text: result.reply,
+        usage: result.usage,
+        costUsd: result.costUsd,
+      });
     });
     return chat.encodeStream(events);
   });

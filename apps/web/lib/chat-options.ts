@@ -23,6 +23,23 @@ export const MODEL_OPTIONS: readonly SelectOption[] = [
 ];
 export const DEFAULT_MODEL = "default";
 
+/** Max context window (tokens) per model selection — the denominator for the
+ *  composer context-window meter (BRO-1597). `default` is the opus 1M-context
+ *  beta; the explicit aliases run the standard 200k window. */
+const MODEL_CONTEXT: Record<string, number> = {
+  default: 1_000_000,
+  opus: 200_000,
+  sonnet: 200_000,
+  haiku: 200_000,
+  fable: 200_000,
+};
+const FALLBACK_CONTEXT_WINDOW = 200_000;
+
+/** Context-window size for the selected model value (BRO-1597). */
+export function contextWindowFor(model: string): number {
+  return MODEL_CONTEXT[model] ?? FALLBACK_CONTEXT_WINDOW;
+}
+
 /** Effort picker → claude's native `--effort` enum (low|medium|high|xhigh|max).
  *  `standard` = omit the flag (engine default). All five native levels are
  *  exposed (BRO-1574); thinking only meaningfully engages at xhigh/max under

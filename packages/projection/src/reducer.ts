@@ -23,10 +23,35 @@ import {
 
 export type RunPhase = "idle" | "running" | "awaiting" | "blocked" | "done";
 
+/** Clean per-turn token usage (BRO-1597) — the reducer's projection of the CLI's
+ *  RawUsage. `input` excludes cache; cache tokens are tracked separately so the
+ *  context-window meter can sum input+cacheRead+cacheCreation (the real prompt
+ *  size) while cost stays claude's exact number. */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+function toTokenUsage(u: import("./parser").RawUsage | undefined): TokenUsage | undefined {
+  if (!u) return undefined;
+  return {
+    input: u.input_tokens ?? 0,
+    output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheCreation: u.cache_creation_input_tokens ?? 0,
+  };
+}
+
 export interface RunState {
   phase: RunPhase;
   sessionId?: string;
   lastText?: string;
+  /** Terminal-turn token usage + exact cost (BRO-1597), folded from the `result`
+   *  event. Undefined until the turn ends (or if the CLI omitted them). */
+  usage?: TokenUsage;
+  costUsd?: number;
   /** Accumulated extended-thinking text from partial `thinking_delta` events
    *  (BRO-1571). Surfaced separately from `lastText` so the UI can render it in a
    *  collapsible Reasoning panel rather than inline with the answer. NOTE: under
@@ -138,6 +163,11 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
       return { ...state, sessionId, phase: "running", pendingQuestion: undefined };
 
     case "result": {
+      // Usage + cost ride EVERY terminal result (BRO-1597), captured before the
+      // branch — an errored turn still bills the tokens it consumed (and an
+      // awaiting/HITL turn still records its spend), so all three exits fold them.
+      const usage = toTokenUsage(event.usage) ?? state.usage;
+      const costUsd = event.total_cost_usd ?? state.costUsd;
       const errored =
         event.is_error === true || (event.subtype !== undefined && event.subtype !== "success");
       if (errored) {
@@ -147,11 +177,13 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           phase: "blocked",
           error: event.subtype ?? "error",
           pendingQuestion: undefined,
+          usage,
+          costUsd,
         };
       }
       // A turn-ending result while gated on a human keeps the run awaiting (F4).
       if (state.phase === "awaiting") {
-        return { ...state, sessionId };
+        return { ...state, sessionId, usage, costUsd };
       }
       return {
         ...state,
@@ -159,6 +191,8 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
         phase: "done",
         lastText: event.result ?? state.lastText,
         pendingQuestion: undefined,
+        usage,
+        costUsd,
       };
     }
 

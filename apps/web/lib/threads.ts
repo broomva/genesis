@@ -5,6 +5,23 @@ import type { UIMessage } from "ai";
 
 export type ThreadPhase = "idle" | "running" | "awaiting" | "blocked" | "done";
 
+/** Mirror of the engine's TokenUsage (packages/projection). Cache tokens are
+ *  separate so the meter can sum input+cacheRead+cacheCreation for the real
+ *  context-window fill (BRO-1597). */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+}
+
+/** Per-message metadata surfaced on `message.metadata` (live via the AI SDK
+ *  message-metadata stream part, or hydrated from a persisted turn). */
+export interface MessageMetadata {
+  usage?: TokenUsage;
+  costUsd?: number;
+}
+
 /** Mirror of the engine's ThreadSummary (packages/core Supervisor.listThreads). */
 export interface ThreadSummary {
   threadId: string;
@@ -22,6 +39,8 @@ interface Turn {
   role: "user" | "agent";
   text: string;
   createdAt: string;
+  usage?: TokenUsage;
+  costUsd?: number;
 }
 
 /** Fetch the thread list for the drawer. Returns [] on any non-OK / error so the
@@ -42,14 +61,20 @@ export async function fetchThreadMessages(
   const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}`, { signal });
   if (!res.ok) return [];
   const data = (await res.json()) as { turns?: Turn[] };
-  return (data.turns ?? []).map(
-    (t) =>
-      ({
-        id: t.id,
-        role: t.role === "agent" ? "assistant" : "user",
-        parts: [{ type: "text", text: t.text }],
-      }) as UIMessage,
-  );
+  return (data.turns ?? []).map((t) => {
+    const metadata: MessageMetadata | undefined =
+      t.usage !== undefined || t.costUsd !== undefined
+        ? { usage: t.usage, costUsd: t.costUsd }
+        : undefined;
+    return {
+      id: t.id,
+      role: t.role === "agent" ? "assistant" : "user",
+      parts: [{ type: "text", text: t.text }],
+      // Hydrate usage/cost (BRO-1597) so a reloaded thread keeps its running
+      // total + latest context-window fill, not just live turns.
+      ...(metadata ? { metadata } : {}),
+    } as UIMessage;
+  });
 }
 
 /** POST a /control action to the BFF (shared by reset/archive/rename, BRO-1592).

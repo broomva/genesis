@@ -406,3 +406,31 @@ describe("supervisor — session management (BRO-1592)", () => {
     expect((await sup.deleteThread("nope")).reason).toBe("no-session");
   });
 });
+
+describe("supervisor — token usage (BRO-1597)", () => {
+  const usage = { input: 500, output: 40, cacheRead: 10, cacheCreation: 2 };
+
+  test("dispatch surfaces usage + cost from the run; the agent turn persists them", async () => {
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: async () => ({
+        state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1, usage, costUsd: 0.005 },
+        events: [],
+        exitCode: 0,
+      }),
+    });
+    const r = await sup.dispatch("t-usage", "hi");
+    expect(r.usage).toEqual(usage);
+    expect(r.costUsd).toBe(0.005);
+    const agentTurn = (await sup.history("t-usage")).find((t) => t.role === "agent");
+    expect(agentTurn?.usage).toEqual(usage);
+    expect(agentTurn?.costUsd).toBe(0.005);
+  });
+
+  test("a run without usage yields undefined usage/cost (not zeroes)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("ok") });
+    const r = await sup.dispatch("t-nousage", "hi");
+    expect(r.usage).toBeUndefined();
+    expect(r.costUsd).toBeUndefined();
+  });
+});

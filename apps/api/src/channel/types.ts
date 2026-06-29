@@ -8,7 +8,7 @@
 //
 // A ChannelConnector is the only place that knows a provider's wire format.
 
-import type { RunPhase } from "@genesis/projection";
+import type { RunPhase, TokenUsage } from "@genesis/projection";
 // EffortLevel lives in @genesis/runner (it owns the claude argv); re-export so
 // channel consumers keep importing it from "./types" (single source of truth).
 export { EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
@@ -33,7 +33,16 @@ export interface IncomingMessage {
  *  emits it once as AI-SDK reasoning parts before the answer text. */
 export type OutgoingEvent =
   | { kind: "phase"; phase: RunPhase; text?: string; reasoning?: string }
-  | { kind: "reply"; phase: RunPhase; text: string; reasoning?: string }
+  | {
+      kind: "reply";
+      phase: RunPhase;
+      text: string;
+      reasoning?: string;
+      // Token usage + exact cost for the turn (BRO-1597) — rides the final reply,
+      // surfaced to the client as AI-SDK message metadata.
+      usage?: TokenUsage;
+      costUsd?: number;
+    }
   | { kind: "error"; message: string };
 
 /** Translates a provider's wire format ↔ the canonical contract. */

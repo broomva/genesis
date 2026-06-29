@@ -316,3 +316,62 @@ describe("projection reducer — token streaming (BRO-1571)", () => {
     expect(s.sessionId).toBe("s");
   });
 });
+
+describe("projection reducer — usage + cost (BRO-1597)", () => {
+  test("result usage + total_cost_usd fold into RunState", () => {
+    const s = reduce(
+      { phase: "running", turns: 1 },
+      {
+        type: "result",
+        subtype: "success",
+        result: "done",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_input_tokens: 5,
+          cache_creation_input_tokens: 3,
+        },
+        total_cost_usd: 0.0123,
+      },
+    );
+    expect(s.phase).toBe("done");
+    expect(s.usage).toEqual({ input: 100, output: 20, cacheRead: 5, cacheCreation: 3 });
+    expect(s.costUsd).toBe(0.0123);
+  });
+
+  test("a result with no usage leaves usage/cost undefined", () => {
+    const s = reduce(
+      { phase: "running", turns: 1 },
+      { type: "result", subtype: "success", result: "x" },
+    );
+    expect(s.usage).toBeUndefined();
+    expect(s.costUsd).toBeUndefined();
+  });
+
+  test("usage is captured even when the turn stays awaiting (HITL)", () => {
+    const s = reduce(
+      { phase: "awaiting", turns: 1 },
+      { type: "result", subtype: "success", usage: { input_tokens: 7 }, total_cost_usd: 0.001 },
+    );
+    expect(s.phase).toBe("awaiting"); // F4 preserved
+    expect(s.usage).toEqual({ input: 7, output: 0, cacheRead: 0, cacheCreation: 0 });
+    expect(s.costUsd).toBe(0.001);
+  });
+
+  test("an errored result still captures usage + cost (failed turns bill tokens)", () => {
+    const s = reduce(
+      { phase: "running", turns: 1 },
+      {
+        type: "result",
+        subtype: "error_max_turns",
+        is_error: true,
+        usage: { input_tokens: 50, output_tokens: 5 },
+        total_cost_usd: 0.002,
+      },
+    );
+    expect(s.phase).toBe("blocked"); // still terminal-error
+    expect(s.error).toBe("error_max_turns");
+    expect(s.usage).toEqual({ input: 50, output: 5, cacheRead: 0, cacheCreation: 0 });
+    expect(s.costUsd).toBe(0.002);
+  });
+});

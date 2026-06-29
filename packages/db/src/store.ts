@@ -20,6 +20,19 @@ interface SessionRow {
   title?: string | null;
 }
 
+interface TurnRow {
+  id: string;
+  sessionId: string;
+  role: string;
+  text: string;
+  createdAt: string;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheCreationTokens?: number | null;
+  costUsd?: number | null;
+}
+
 function toSession(r: SessionRow): Session {
   return {
     id: r.id,
@@ -113,7 +126,20 @@ export class DrizzleStore implements Store {
 
   async addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn> {
     const turn: Turn = { ...t, id: newId("turn"), createdAt: isoNow() };
-    await this.db.insert(turns).values(turn);
+    // Flatten usage (BRO-1597) into the dedicated columns — the nested object
+    // doesn't map to columns automatically.
+    await this.db.insert(turns).values({
+      id: turn.id,
+      sessionId: turn.sessionId,
+      role: turn.role,
+      text: turn.text,
+      createdAt: turn.createdAt,
+      inputTokens: turn.usage?.input ?? null,
+      outputTokens: turn.usage?.output ?? null,
+      cacheReadTokens: turn.usage?.cacheRead ?? null,
+      cacheCreationTokens: turn.usage?.cacheCreation ?? null,
+      costUsd: turn.costUsd ?? null,
+    });
     return turn;
   }
 
@@ -123,13 +149,29 @@ export class DrizzleStore implements Store {
       .from(turns)
       .where(eq(turns.sessionId, sessionId))
       .orderBy(turns.seq); // DB-assigned monotonic order (P20 #4)
-    return r.map((x: Turn) => ({
-      id: x.id,
-      sessionId: x.sessionId,
-      role: x.role,
-      text: x.text,
-      createdAt: x.createdAt,
-    }));
+    return r.map((x: TurnRow) => {
+      const hasUsage =
+        x.inputTokens != null ||
+        x.outputTokens != null ||
+        x.cacheReadTokens != null ||
+        x.cacheCreationTokens != null;
+      return {
+        id: x.id,
+        sessionId: x.sessionId,
+        role: x.role as Turn["role"],
+        text: x.text,
+        createdAt: x.createdAt,
+        usage: hasUsage
+          ? {
+              input: x.inputTokens ?? 0,
+              output: x.outputTokens ?? 0,
+              cacheRead: x.cacheReadTokens ?? 0,
+              cacheCreation: x.cacheCreationTokens ?? 0,
+            }
+          : undefined,
+        costUsd: x.costUsd ?? undefined,
+      };
+    });
   }
 
   /** Release the underlying driver (tests reopen the same data dir). */

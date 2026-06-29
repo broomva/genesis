@@ -294,3 +294,26 @@ describe("uiMessageStreamResponse — full SSE wire output", () => {
     expect(body.endsWith(SSE_DONE)).toBe(true);
   });
 });
+
+describe("toUiStreamParts — usage metadata (BRO-1597)", () => {
+  const usage = { input: 100, output: 20, cacheRead: 5, cacheCreation: 3 };
+
+  test("emits message-metadata before finish when the reply carries usage", async () => {
+    const parts = await collect([
+      { kind: "reply", phase: "done", text: "hi", usage, costUsd: 0.012 },
+    ]);
+    const metaIdx = parts.findIndex((p) => p.type === "message-metadata");
+    const finishIdx = parts.findIndex((p) => p.type === "finish");
+    expect(metaIdx).toBeGreaterThan(-1);
+    expect(parts[metaIdx]).toEqual({
+      type: "message-metadata",
+      messageMetadata: { usage, costUsd: 0.012 },
+    });
+    expect(metaIdx).toBeLessThan(finishIdx); // metadata precedes finish
+  });
+
+  test("no message-metadata part when the reply reports no usage", async () => {
+    const parts = await collect([{ kind: "reply", phase: "done", text: "hi" }]);
+    expect(parts.some((p) => p.type === "message-metadata")).toBe(false);
+  });
+});
