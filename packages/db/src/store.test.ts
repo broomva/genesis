@@ -220,3 +220,29 @@ describe("DrizzleStore (pglite) — session management (BRO-1592)", () => {
     await store.close();
   });
 });
+
+describe("DrizzleStore (pglite) — turn usage (BRO-1597)", () => {
+  test("usage + cost round-trip through the dedicated columns", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({
+      sessionId: "sU",
+      role: "agent",
+      text: "hi",
+      usage: { input: 1200, output: 80, cacheRead: 300, cacheCreation: 50 },
+      costUsd: 0.0042,
+    });
+    const [t] = await store.turnsForSession("sU");
+    expect(t?.usage).toEqual({ input: 1200, output: 80, cacheRead: 300, cacheCreation: 50 });
+    expect(t?.costUsd).toBeCloseTo(0.0042);
+    await store.close();
+  });
+
+  test("a turn with no usage reads back undefined (not zeroes)", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({ sessionId: "sN", role: "user", text: "hi" });
+    const [t] = await store.turnsForSession("sN");
+    expect(t?.usage).toBeUndefined();
+    expect(t?.costUsd).toBeUndefined();
+    await store.close();
+  });
+});

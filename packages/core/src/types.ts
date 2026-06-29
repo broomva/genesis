@@ -2,9 +2,9 @@
 // Workspace/Session object-model *learning*, trimmed to the walking skeleton.
 // Phase 2 (Soul Substrate) promotes these from in-memory to Postgres+Drizzle.
 
-import type { RunPhase } from "@genesis/projection";
+import type { RunPhase, TokenUsage } from "@genesis/projection";
 
-export type { RunPhase };
+export type { RunPhase, TokenUsage };
 
 export interface Workspace {
   id: string;
@@ -36,4 +36,9 @@ export interface Turn {
   role: "user" | "agent";
   text: string;
   createdAt: string;
+  /** Token usage for this turn (BRO-1597) — set on the agent turn from the CLI's
+   *  terminal result. Absent on user turns and on pre-usage historical turns. */
+  usage?: TokenUsage;
+  /** claude's exact cost for the turn (USD). Absent → unknown (e.g. user turn). */
+  costUsd?: number;
 }

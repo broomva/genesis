@@ -40,6 +40,16 @@ export interface PartialStreamEvent {
   content_block?: { type?: string };
 }
 
+/** Raw token usage on a `result` event (and assistant message riders) — the
+ *  CLI's native field names (BRO-1597). Mapped to a clean {@link TokenUsage} in
+ *  the reducer. All fields optional: a turn that errors early may omit them. */
+export interface RawUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 /** A parsed event from a coding-agent CLI stream-json line, tagged by `type`. */
 export type AgentEvent =
   | { type: "system"; subtype?: string; session_id?: string }
@@ -54,6 +64,10 @@ export type AgentEvent =
       session_id?: string;
       is_error?: boolean;
       result?: string;
+      // Token usage + exact cost the CLI computes on the terminal result line
+      // (BRO-1597). `total_cost_usd` is claude's own number — no pricing table.
+      usage?: RawUsage;
+      total_cost_usd?: number;
     };
 
 const KNOWN = new Set(["system", "assistant", "user", "result", "stream_event"]);

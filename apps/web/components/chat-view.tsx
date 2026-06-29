@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 
+import { ContextMeter, type ContextMeterData } from "@/components/ai-elements/context-meter";
 import {
   PromptInput,
   PromptInputActionAddAttachments,
@@ -15,6 +16,7 @@ import {
   PromptInputActionMenuTrigger,
   PromptInputBody,
   PromptInputFooter,
+  PromptInputHeader,
   type PromptInputMessage,
   PromptInputSelect,
   PromptInputSelectContent,
@@ -39,9 +41,15 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { EFFORT_OPTIONS, MODEL_OPTIONS, effortToBody, modelToBody } from "@/lib/chat-options";
+import {
+  EFFORT_OPTIONS,
+  MODEL_OPTIONS,
+  contextWindowFor,
+  effortToBody,
+  modelToBody,
+} from "@/lib/chat-options";
 import { parseSlash, slashHelpText } from "@/lib/slash";
-import { resetThread } from "@/lib/threads";
+import { type MessageMetadata, resetThread } from "@/lib/threads";
 
 // Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
 // inline images, so only text-ish files are inlined as fenced blocks; anything
@@ -200,6 +208,36 @@ export function ChatView({
   const [notice, setNotice] = useState<string | null>(null);
 
   const busy = status === "submitted" || status === "streaming";
+
+  // Session usage for the composer context meter (BRO-1597). Sum cost + tokens
+  // over assistant turns — live message-metadata and hydrated history both land
+  // on `message.metadata` — and take the LATEST assistant usage as the current
+  // context-window fill (input + cache = the real prompt size).
+  const meterData = useMemo<ContextMeterData>(() => {
+    let costUsd = 0;
+    let sessionInput = 0;
+    let sessionOutput = 0;
+    let latest: MessageMetadata["usage"];
+    for (const m of messages) {
+      if (m.role !== "assistant") continue;
+      const meta = m.metadata as MessageMetadata | undefined;
+      if (!meta) continue;
+      if (typeof meta.costUsd === "number") costUsd += meta.costUsd;
+      if (meta.usage) {
+        sessionInput += meta.usage.input;
+        sessionOutput += meta.usage.output;
+        latest = meta.usage;
+      }
+    }
+    const contextTokens = latest ? latest.input + latest.cacheRead + latest.cacheCreation : 0;
+    return {
+      contextTokens,
+      contextWindow: contextWindowFor(model),
+      costUsd,
+      sessionInput,
+      sessionOutput,
+    };
+  }, [messages, model]);
 
   // Send a turn with the current model/effort selection. Shared by the composer
   // and the empty-state suggestion chips (BRO-1577).
@@ -366,6 +404,14 @@ export function ChatView({
                 onError={(e) => setNotice(e.message)}
                 className="bv-composer w-full"
               >
+                {/* Context meter (BRO-1597) — a quiet usage gauge in the composer
+                    header; only once a turn has reported usage (fresh threads stay
+                    clean). */}
+                {meterData.contextTokens > 0 || meterData.costUsd > 0 ? (
+                  <PromptInputHeader className="justify-end">
+                    <ContextMeter data={meterData} />
+                  </PromptInputHeader>
+                ) : null}
                 <PromptInputBody>
                   <PromptInputTextarea
                     // px-2.5 aligns the text with the toolbar (both sit ~18px from

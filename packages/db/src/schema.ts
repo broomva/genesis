@@ -1,6 +1,14 @@
 // Drizzle schema — the durable shape of a Genesis "self".
 // Phase 2 promotes the Phase-1 in-memory Workspace/Session/Turn to Postgres rows.
-import { bigserial, boolean, index, pgTable, text } from "drizzle-orm/pg-core";
+import {
+  bigserial,
+  boolean,
+  doublePrecision,
+  index,
+  integer,
+  pgTable,
+  text,
+} from "drizzle-orm/pg-core";
 
 export const workspaces = pgTable("workspaces", {
   id: text("id").primaryKey(),
@@ -34,6 +42,14 @@ export const turns = pgTable(
     role: text("role").notNull(),
     text: text("text").notNull(),
     createdAt: text("created_at").notNull(),
+    // Per-turn token usage + exact cost (BRO-1597) — set on agent turns from the
+    // CLI's terminal result, so a reloaded thread keeps its running cost + the
+    // latest context-window fill. Nullable (user turns + pre-usage history).
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    cacheCreationTokens: integer("cache_creation_tokens"),
+    costUsd: doublePrecision("cost_usd"),
   },
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
@@ -70,4 +86,9 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE INDEX IF NOT EXISTS turns_session_idx ON turns (session_id);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS input_tokens integer;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_creation_tokens integer;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS cost_usd double precision;
 `;

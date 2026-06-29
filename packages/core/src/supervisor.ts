@@ -23,7 +23,7 @@ import {
   runAgent,
 } from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
-import type { Session, Turn, Workspace } from "./types";
+import type { Session, TokenUsage, Turn, Workspace } from "./types";
 
 export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
 
@@ -88,6 +88,10 @@ export interface DispatchResult {
   session: Session;
   reply: string;
   phase: RunState["phase"];
+  /** Token usage + exact cost for this turn (BRO-1597), from the CLI's terminal
+   *  result. Undefined if the engine/CLI didn't report them. */
+  usage?: TokenUsage;
+  costUsd?: number;
 }
 
 /** One row of the thread-list UI (BRO-1567): enough to render + resume a thread
@@ -260,7 +264,17 @@ export class Supervisor {
       await this.store.upsertSession(session);
 
       const reply = result.state.lastText ?? "(no output)";
-      await this.store.addTurn({ sessionId: session.id, role: "agent", text: reply });
+      const usage = result.state.usage;
+      const costUsd = result.state.costUsd;
+      // Persist usage on the agent turn (BRO-1597) so a reloaded thread keeps its
+      // running cost + the latest context-window fill.
+      await this.store.addTurn({
+        sessionId: session.id,
+        role: "agent",
+        text: reply,
+        usage,
+        costUsd,
+      });
 
       // Keep a per-session worktree across turns (resume continuity); only
       // discard a one-shot per-run worktree.
@@ -279,7 +293,7 @@ export class Supervisor {
         `[genesis] dispatch ✓ thread=${threadId} phase=${result.state.phase}${noOutput} ` +
           `reply=${reply.length}c ${elapsed}s`,
       );
-      return { session, reply, phase: result.state.phase };
+      return { session, reply, phase: result.state.phase, usage, costUsd };
     } catch (e) {
       // Full server-side detail (BRO-1519) — previously the error was swallowed
       // and only a generic "Something went wrong" reached the user.

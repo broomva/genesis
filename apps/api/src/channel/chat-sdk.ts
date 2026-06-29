@@ -7,8 +7,16 @@
 //   body:    `data: {json}\n\n` parts, terminated by `data: [DONE]\n\n`
 //   parts:   start · text-start · text-delta · text-end · error · finish
 
+import type { TokenUsage } from "@genesis/projection";
 import { EFFORT_LEVELS, type EffortLevel } from "./types";
 import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
+
+/** Per-message metadata (BRO-1597) surfaced to `useChat` as `message.metadata`
+ *  via the AI SDK v6 `message-metadata` stream part. */
+export interface MessageMetadata {
+  usage?: TokenUsage;
+  costUsd?: number;
+}
 
 // ───────────────────────────── parsing ─────────────────────────────
 
@@ -81,6 +89,9 @@ export type UiStreamPart =
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
+  // Usage/cost metadata (BRO-1597) — useChat merges `messageMetadata` into
+  // `message.metadata`. Emitted once, just before `finish`.
+  | { type: "message-metadata"; messageMetadata: MessageMetadata }
   | { type: "error"; errorText: string }
   | { type: "finish" };
 
@@ -134,6 +145,9 @@ export async function* toUiStreamParts(
   // so the note is a token-based summary, not verbatim chain-of-thought.
   let pendingReasoning = "";
   let reasoningFlushed = false;
+  // Usage/cost rides the final `reply` event (BRO-1597); captured here and
+  // flushed as a message-metadata part before `finish`.
+  let metadata: MessageMetadata | undefined;
 
   function* flushReasoning(): Generator<UiStreamPart> {
     if (reasoningFlushed || pendingReasoning.length === 0) return;
@@ -154,6 +168,10 @@ export async function* toUiStreamParts(
       // phase|reply here — the error case already broke above).
       if (ev.reasoning && ev.reasoning.length > 0) {
         pendingReasoning = ev.reasoning;
+      }
+      // The terminal reply carries usage/cost (BRO-1597).
+      if (ev.kind === "reply" && (ev.usage !== undefined || ev.costUsd !== undefined)) {
+        metadata = { usage: ev.usage, costUsd: ev.costUsd };
       }
       const text = ev.text;
       if (typeof text !== "string" || text.length === 0) continue;
@@ -185,6 +203,7 @@ export async function* toUiStreamParts(
   // Thinking with no answer text (rare) still surfaces the indicator.
   if (!reasoningFlushed) yield* flushReasoning();
   if (currentId !== null) yield { type: "text-end", id: currentId };
+  if (metadata !== undefined) yield { type: "message-metadata", messageMetadata: metadata };
   if (errored !== undefined) yield { type: "error", errorText: errored };
   yield { type: "finish" };
 }
