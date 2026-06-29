@@ -35,7 +35,12 @@ export const Suggestion = ({
 
   return (
     <Button
-      className={cn("cursor-pointer rounded-full px-4", className)}
+      className={cn(
+        // 44px tap target on touch (the empty-state chips are the first tap on a
+        // new thread); stays compact on desktop.
+        "cursor-pointer rounded-full px-4 [@media(pointer:coarse)]:min-h-11",
+        className,
+      )}
       onClick={handleClick}
       size={size}
       type="button"

@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "@/lib/utils";
 // Single-user passkey login — Broomva DS styled (system fonts, sentence case,
@@ -65,7 +66,7 @@ export default function LoginPage() {
         const detail = await res.json().catch(() => ({}));
         setError(
           res.status === 409
-            ? "An owner already exists — use passkey sign-in."
+            ? "An owner already exists. Use passkey sign-in."
             : res.status === 401
               ? "Invalid bootstrap token."
               : ((detail as { error?: string }).error ?? "Bootstrap failed."),
@@ -90,7 +91,7 @@ export default function LoginPage() {
 
   return (
     <div className="bg-background text-foreground flex min-h-dvh flex-col items-center justify-center px-4">
-      <main className="bg-card border-border w-full max-w-sm rounded-2xl border p-6 shadow-sm">
+      <main className="bg-card border-border w-full max-w-sm rounded-2xl border p-6 shadow-[var(--bv-shadow-edge)]">
         <div className="mb-6 flex items-baseline gap-2">
           <span className="text-foreground text-base font-semibold tracking-tight">Genesis</span>
           <span className="text-muted-foreground text-xs">sign in</span>
@@ -98,12 +99,13 @@ export default function LoginPage() {
 
         <Button
           type="button"
-          className="w-full rounded-full hover:bg-[var(--bv-ink-hover)]"
+          className="w-full rounded-full"
           disabled={busy}
+          aria-busy={busy}
           onClick={onPasskeySignIn}
           aria-label="Sign in with passkey"
         >
-          {busy ? "…" : "Sign in with passkey"}
+          {busy ? <Spinner /> : "Sign in with passkey"}
         </Button>
 
         {error ? (
@@ -119,7 +121,7 @@ export default function LoginPage() {
             onClick={() => setShowBootstrap((v) => !v)}
             aria-expanded={showBootstrap}
           >
-            First run? Set up the owner →
+            First run? Set up the owner
           </button>
 
           {showBootstrap ? (
@@ -135,14 +137,22 @@ export default function LoginPage() {
                 placeholder="AUTH_BOOTSTRAP_TOKEN"
                 autoComplete="off"
                 className={cn(
-                  "bg-background border-border placeholder:text-muted-foreground rounded-lg border px-3 py-2 text-sm",
+                  // 16px on mobile (text-base) so iOS doesn't auto-zoom on focus;
+                  // 14px from sm+ where there's no zoom behavior.
+                  "bg-background border-border placeholder:text-muted-foreground rounded-lg border px-3 py-2 text-base sm:text-sm",
                   "focus-visible:border-ring focus-visible:ring-ring/40 outline-none focus-visible:ring-2",
                 )}
               />
-              <Button type="submit" variant="outline" className="w-full" disabled={busy}>
-                {busy ? "…" : "Create owner and enroll passkey"}
+              <Button
+                type="submit"
+                variant="outline"
+                className="w-full"
+                disabled={busy}
+                aria-busy={busy}
+              >
+                {busy ? <Spinner /> : "Create owner and enroll passkey"}
               </Button>
-              <p className="text-muted-foreground text-[0.7rem] leading-relaxed">
+              <p className="text-muted-foreground text-xs leading-relaxed">
                 One-time only. Creates the single owner and registers this device&apos;s passkey.
               </p>
             </form>

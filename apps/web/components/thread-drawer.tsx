@@ -47,7 +47,7 @@ export function ThreadDrawer({
         <button
           type="button"
           aria-label="Close conversations"
-          className="bg-background/60 fixed inset-0 z-30 backdrop-blur-sm md:hidden"
+          className="bv-scrim fixed inset-0 z-30 md:hidden"
           onClick={onClose}
         />
       ) : null}
@@ -62,14 +62,12 @@ export function ThreadDrawer({
         )}
       >
         <div className="border-sidebar-border flex items-center gap-2 border-b px-3 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:pt-3">
-          <span className="text-foreground text-[0.95rem] font-semibold tracking-tight">
-            Genesis
-          </span>
+          <span className="text-foreground text-[0.95rem] font-medium tracking-tight">Genesis</span>
           <Button
             type="button"
             size="sm"
             variant="outline"
-            className="ml-auto"
+            className="ml-auto [@media(pointer:coarse)]:h-11"
             onClick={onNew}
             aria-label="New conversation"
           >
