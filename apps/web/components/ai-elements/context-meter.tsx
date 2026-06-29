@@ -70,7 +70,11 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
         <button
           type="button"
           className={cn(
-            "flex items-center gap-2 rounded-[5px] bg-[var(--bv-canvas-soft)] px-2 py-1",
+            // A receipt carries no resting surface (BRO-1599) — transparent at
+            // rest on the glass composer, the soft-canvas fill revealed only on
+            // hover/focus (the quiet-until-interaction pattern the row ⋯ uses).
+            "flex items-center gap-2 rounded-[5px] bg-transparent px-2 py-1 transition-colors",
+            "hover:bg-[var(--bv-canvas-soft)] focus-visible:bg-[var(--bv-canvas-soft)]",
             "text-muted-foreground font-mono text-[11px] [font-variant-numeric:tabular-nums]",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
             className,
