@@ -17,6 +17,9 @@ export function filesChangedFromParts(parts: UIMessage["parts"]): string[] {
   const seen = new Set<string>();
   for (const p of parts) {
     if (p.type !== "dynamic-tool") continue;
+    // Only count writes that actually SUCCEEDED — a failed (output-error) or
+    // in-flight (input-available) Edit didn't change the file (BRO-1612 P20).
+    if (p.state !== "output-available") continue;
     if (!WRITE_TOOLS.has(p.toolName.toLowerCase())) continue;
     const input = p.input;
     const fp =

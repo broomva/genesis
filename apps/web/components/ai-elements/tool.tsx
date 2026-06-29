@@ -85,7 +85,10 @@ function toBlockText(value: unknown, cap = CAP): string {
 
 /** A tool output → display text (string passthrough, else pretty JSON). */
 function outText(output: unknown, errored: boolean, errorText?: string): string | undefined {
-  if (errored) return errorText ?? (output !== undefined ? toBlockText(output) : "Tool failed");
+  if (errored) {
+    if (errorText && errorText.trim().length > 0) return capStr(errorText);
+    return output !== undefined ? toBlockText(output) : "Tool failed";
+  }
   if (output === undefined) return undefined;
   return typeof output === "string" ? capStr(output) : toBlockText(output);
 }
@@ -177,23 +180,39 @@ function Terminal({
 }
 
 const DIFF_MAX_LINES = 240;
+const DIFF_MAX_LINE_LEN = 2000;
+
+/** Cap a side of a diff PER SIDE (so additions always show even when removals are
+ *  huge), cap each line's length, and append a truncation marker (BRO-1612 P20). */
+function diffSide(
+  text: string | undefined,
+  sign: "+" | "-",
+): Array<{ sign: "+" | "-"; t: string }> {
+  if (!text) return [];
+  const all = text.split("\n");
+  const out = all.slice(0, DIFF_MAX_LINES).map((t) => ({
+    sign,
+    t: t.length > DIFF_MAX_LINE_LEN ? `${t.slice(0, DIFF_MAX_LINE_LEN)}…` : t,
+  }));
+  if (all.length > DIFF_MAX_LINES) {
+    out.push({ sign, t: `… [+${all.length - DIFF_MAX_LINES} more lines]` });
+  }
+  return out;
+}
+
 function DiffBlock({ oldText, newText }: { oldText?: string; newText?: string }) {
-  const removed = oldText ? oldText.split("\n") : [];
-  const added = newText ? newText.split("\n") : [];
-  const lines = [
-    ...removed.map((t) => ({ sign: "-" as const, t })),
-    ...added.map((t) => ({ sign: "+" as const, t })),
-  ].slice(0, DIFF_MAX_LINES);
+  const lines = [...diffSide(oldText, "-"), ...diffSide(newText, "+")];
   if (lines.length === 0) return null;
   return (
     <div className="border-border max-h-72 overflow-auto rounded-md border font-mono text-xs leading-relaxed">
       {lines.map((l, i) => (
         <div
-          key={`${l.sign}-${i}`}
+          key={`${l.sign}-${i}-${l.t.slice(0, 24)}`}
           className={cn(
             "flex px-2 whitespace-pre-wrap break-words",
+            // green/red are the one place colour is signal (a diff). DS tokens.
             l.sign === "+"
-              ? "bg-[color-mix(in_oklch,oklch(0.7_0.15_150)_10%,transparent)] text-emerald-700 dark:text-emerald-400"
+              ? "bg-[color-mix(in_oklch,var(--bv-success)_12%,transparent)] text-[var(--bv-success)]"
               : "bg-[color-mix(in_oklch,var(--bv-danger)_8%,transparent)] text-[var(--bv-danger)]",
           )}
         >
@@ -245,12 +264,25 @@ function ToolBody({
   if (n === "multiedit") {
     const editsRaw = (input as { edits?: unknown })?.edits;
     const edits = Array.isArray(editsRaw) ? editsRaw : [];
+    const shown = edits.slice(0, 12);
     return (
       <div className="space-y-2">
-        <PathHeader path={str(input, "file_path")} badge={`${edits.length} edits`} />
-        {edits.slice(0, 12).map((e, i) => (
-          <DiffBlock key={`e-${i}`} oldText={str(e, "old_string")} newText={str(e, "new_string")} />
+        <PathHeader
+          path={str(input, "file_path")}
+          badge={`${edits.length} edit${edits.length === 1 ? "" : "s"}`}
+        />
+        {shown.map((e, i) => (
+          <DiffBlock
+            key={`edit-${i}-${(str(e, "old_string") ?? "").slice(0, 24)}`}
+            oldText={str(e, "old_string")}
+            newText={str(e, "new_string")}
+          />
         ))}
+        {edits.length > shown.length ? (
+          <div className="text-muted-foreground text-xs">
+            … +{edits.length - shown.length} more edits
+          </div>
+        ) : null}
         {errored && out ? <Block label="Error" text={out} tone="danger" /> : null}
       </div>
     );
@@ -307,7 +339,7 @@ function ToolBody({
 
   // default — the generic input + output block (BRO-1607 behavior).
   return (
-    <>
+    <div className="space-y-2.5">
       {input !== undefined ? <Block label="Input" text={toBlockText(input)} /> : null}
       {errored && out ? (
         <Block label="Error" text={out} tone="danger" />
@@ -316,7 +348,7 @@ function ToolBody({
       ) : running ? (
         <Running />
       ) : null}
-    </>
+    </div>
   );
 }
 
