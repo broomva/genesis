@@ -283,6 +283,31 @@ describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
     const [t] = await store.turnsForSession("sR");
     expect(t?.reasoned).toBe(true);
     expect(t?.thinkingTokens).toBeUndefined(); // no count, but the indicator still shows
+    expect(t?.reasoning).toBeUndefined(); // no prose under subscription auth
+    await store.close();
+  });
+
+  test("verbatim reasoning prose round-trips (so a non-redacting deployment reloads real reasoning, BRO-1608)", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({
+      sessionId: "sV",
+      role: "agent",
+      text: "ok",
+      reasoned: true,
+      reasoning: "First I considered X, then Y.",
+    });
+    const [t] = await store.turnsForSession("sV");
+    expect(t?.reasoning).toBe("First I considered X, then Y.");
+    // empty prose stores as null → reads back undefined (indicator fallback)
+    await store.addTurn({
+      sessionId: "sV2",
+      role: "agent",
+      text: "ok",
+      reasoned: true,
+      reasoning: "",
+    });
+    const [t2] = await store.turnsForSession("sV2");
+    expect(t2?.reasoning).toBeUndefined();
     await store.close();
   });
 

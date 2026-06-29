@@ -53,4 +53,9 @@ export interface Turn {
    *  reasoning indicator shows on a reloaded turn, independent of the token count
    *  (which is 0 at effort high). Absent on user turns / pre-1608 rows. */
   reasoned?: boolean;
+  /** Verbatim reasoning prose (BRO-1608) — persisted so a reload shows the REAL
+   *  reasoning, identical to the live turn, whenever a deployment provides it
+   *  (e.g. ANTHROPIC_API_KEY auth). Absent under subscription auth (redacted to "")
+   *  and on user / pre-1608 rows → reload falls back to the indicator note. */
+  reasoning?: string;
 }

@@ -60,16 +60,23 @@ interface Turn {
   /** The model reasoned this turn (BRO-1608) → whether to rebuild the indicator,
    *  independent of the token count (0 at effort high). */
   reasoned?: boolean;
+  /** Verbatim reasoning prose (BRO-1608) when a deployment provides it; absent
+   *  under subscription auth (redacted) → falls back to the indicator note. */
+  reasoning?: string;
 }
 
-/** The reasoning INDICATOR note on reload (BRO-1608) — kept in sync with the
- *  engine's `reasoningNote` (apps/api/src/server.ts). Prose is redacted under the
- *  VPS subscription auth (not persisted), so a reloaded turn shows the same
- *  token-based / token-less indicator the live turn did. Undefined → no indicator. */
+/** The reasoning content on reload (BRO-1608) — matches the engine's
+ *  `reasoningNote` (apps/api/src/server.ts) for every turn it produces (prose →
+ *  `~N tokens` → token-less indicator), so live ≡ reload. The extra tokens-only
+ *  clause is reload-ONLY leniency: legacy BRO-1607 rows persisted `thinkingTokens`
+ *  but not `reasoned`, and for any real turn tokens>0 implies the model reasoned,
+ *  so it can never diverge from live (where `reasoned` is always set). */
 function reasoningNote(
   reasoned: boolean | undefined,
   tokens: number | undefined,
+  prose: string | undefined,
 ): string | undefined {
+  if (prose && prose.trim().length > 0) return prose.trim();
   if (!reasoned && !(tokens && tokens > 0)) return undefined;
   return tokens && tokens > 0
     ? `Extended thinking · ~${tokens} tokens (content private on this deployment)`
@@ -123,7 +130,7 @@ export async function fetchThreadMessages(
     // Pre-1607 rows (no `parts`) fall back to a single text part.
     const parts: UIMessage["parts"] = [];
     if (t.role === "agent") {
-      const note = reasoningNote(t.reasoned, t.thinkingTokens);
+      const note = reasoningNote(t.reasoned, t.thinkingTokens, t.reasoning);
       if (note) parts.push({ type: "reasoning", text: note });
     }
     let hasBody = false;

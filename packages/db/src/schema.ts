@@ -57,6 +57,9 @@ export const turns = pgTable(
     parts: text("parts"),
     thinkingTokens: integer("thinking_tokens"),
     reasoned: boolean("reasoned"),
+    // Verbatim reasoning prose (BRO-1608) — persisted so a reload matches the live
+    // turn whenever a deployment provides it; redacted to "" (→ null) on subscription.
+    reasoning: text("reasoning"),
   },
   (t) => ({ bySession: index("turns_session_idx").on(t.sessionId) }),
 );
@@ -101,4 +104,5 @@ ALTER TABLE turns ADD COLUMN IF NOT EXISTS cost_usd double precision;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS parts text;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS thinking_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoned boolean;
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS reasoning text;
 `;

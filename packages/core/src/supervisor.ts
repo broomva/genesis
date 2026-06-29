@@ -279,6 +279,9 @@ export class Supervisor {
         parts: parts && parts.length > 0 ? parts : undefined,
         thinkingTokens: result.state.thinkingTokens,
         reasoned: result.state.reasoned,
+        // Verbatim prose only when the deployment provides it (BRO-1608) — "" under
+        // subscription auth, so the reload falls back to the indicator note.
+        reasoning: result.state.reasoning?.trim() ? result.state.reasoning : undefined,
       });
 
       // Keep a per-session worktree across turns (resume continuity); only

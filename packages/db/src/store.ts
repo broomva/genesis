@@ -42,6 +42,7 @@ interface TurnRow {
   parts?: string | null;
   thinkingTokens?: number | null;
   reasoned?: boolean | null;
+  reasoning?: string | null;
 }
 
 /** Parse the JSON-encoded parts timeline (BRO-1607); tolerate malformed/legacy
@@ -167,6 +168,8 @@ export class DrizzleStore implements Store {
       thinkingTokens: turn.thinkingTokens ?? null,
       // Did the model reason this turn (BRO-1608) — token-independent indicator.
       reasoned: turn.reasoned ?? null,
+      // Verbatim prose when a deployment provides it (BRO-1608); "" → null.
+      reasoning: turn.reasoning && turn.reasoning.length > 0 ? turn.reasoning : null,
     });
     return turn;
   }
@@ -201,6 +204,7 @@ export class DrizzleStore implements Store {
         parts: parseParts(x.parts),
         thinkingTokens: x.thinkingTokens ?? undefined,
         reasoned: x.reasoned ?? undefined,
+        reasoning: x.reasoning ?? undefined,
       };
     });
   }
