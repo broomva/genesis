@@ -46,6 +46,8 @@ export type OutgoingEvent =
       // surfaced to the client as AI-SDK message metadata.
       usage?: TokenUsage;
       costUsd?: number;
+      // Server-measured agent run time in ms (BRO-1610) — also rides the reply.
+      durationMs?: number;
     }
   | { kind: "error"; message: string };
 

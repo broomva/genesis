@@ -224,6 +224,7 @@ export function build(opts: BuildOpts) {
         text: result.reply,
         usage: result.usage,
         costUsd: result.costUsd,
+        durationMs: result.durationMs,
       });
     });
     return chat.encodeStream(events);

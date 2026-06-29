@@ -16,6 +16,8 @@ import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
 export interface MessageMetadata {
   usage?: TokenUsage;
   costUsd?: number;
+  /** Server-measured agent run time in ms (BRO-1610). */
+  durationMs?: number;
 }
 
 // ───────────────────────────── parsing ─────────────────────────────
@@ -237,9 +239,12 @@ export async function* toUiStreamParts(
       if (ev.reasoning && ev.reasoning.length > 0) {
         pendingReasoning = ev.reasoning;
       }
-      // The terminal reply carries usage/cost (BRO-1597).
-      if (ev.kind === "reply" && (ev.usage !== undefined || ev.costUsd !== undefined)) {
-        metadata = { usage: ev.usage, costUsd: ev.costUsd };
+      // The terminal reply carries usage/cost (BRO-1597) + run time (BRO-1610).
+      if (
+        ev.kind === "reply" &&
+        (ev.usage !== undefined || ev.costUsd !== undefined || ev.durationMs !== undefined)
+      ) {
+        metadata = { usage: ev.usage, costUsd: ev.costUsd, durationMs: ev.durationMs };
       }
       const text = ev.text;
       if (typeof text !== "string" || text.length === 0) continue;
