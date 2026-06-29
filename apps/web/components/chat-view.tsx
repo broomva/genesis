@@ -32,6 +32,7 @@ import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ToolPart } from "@/components/ai-elements/tool";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
+import { QuestionCard } from "@/components/question-card";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Button } from "@/components/ui/button";
@@ -151,12 +152,16 @@ function AssistantBody({
   message,
   streaming,
   busy,
+  isLast,
   onRetry,
+  onAnswer,
 }: {
   message: UIMessage;
   streaming: boolean;
   busy: boolean;
+  isLast: boolean;
   onRetry?: () => void;
+  onAnswer?: (text: string) => void;
 }) {
   const parts = message.parts;
   let lastTextIdx = -1;
@@ -193,7 +198,21 @@ function AssistantBody({
     if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) {
       rendered++;
       // Narrowed by the type check — a tool/dynamic-tool UIMessagePart.
-      return <ToolPart key={key} part={part as Parameters<typeof ToolPart>[0]["part"]} />;
+      const p = part as Parameters<typeof ToolPart>[0]["part"];
+      const name = p.type === "dynamic-tool" ? p.toolName : p.type.split("-").slice(1).join("-");
+      // AskUserQuestion renders as an answer card (BRO-1611), interactive only
+      // while it's the awaiting turn (last message, agent idle).
+      if (name === "AskUserQuestion" || name === "ask_user_question") {
+        return (
+          <QuestionCard
+            key={key}
+            input={p.input}
+            interactive={isLast && !busy && !!onAnswer}
+            onAnswer={onAnswer ?? (() => {})}
+          />
+        );
+      }
+      return <ToolPart key={key} part={p} />;
     }
     return null;
   });
@@ -489,8 +508,9 @@ export function ChatView({
                   </Suggestions>
                 </div>
               ) : (
-                messages.map((message) => {
+                messages.map((message, index) => {
                   const isUser = message.role === "user";
+                  const isLast = index === messages.length - 1;
                   return (
                     <MessageScrollerItem
                       key={message.id}
@@ -511,12 +531,14 @@ export function ChatView({
                           message={message}
                           streaming={status === "streaming"}
                           busy={busy}
+                          isLast={isLast}
                           onRetry={() =>
                             regenerate({
                               messageId: message.id,
                               body: { model: modelToBody(model), effort: effortToBody(effort) },
                             })
                           }
+                          onAnswer={send}
                         />
                       )}
                     </MessageScrollerItem>

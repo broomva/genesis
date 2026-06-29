@@ -49,9 +49,11 @@ export interface ToolPart {
  *  `thinkingTokens`), not as a part. */
 export type TurnPart = { type: "text"; text: string } | ToolPart;
 
-/** Tool names that are HITL gates, not renderable tool calls — kept out of the
- *  parts timeline (the `awaiting` phase + question UI handle them). */
-const TIMELINE_SKIP_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
+/** Tool names kept OUT of the renderable timeline. AskUserQuestion now flows
+ *  THROUGH as a tool part (the client renders it as an answer card, BRO-1611) —
+ *  it is no longer skipped; it still drives the `awaiting` phase via the separate
+ *  AWAIT_TOOLS set. Empty for now; future internal tools can be added here. */
+const TIMELINE_SKIP_TOOLS = new Set<string>();
 
 /** Cap a tool output we keep (BRO-1607). A noisy Bash / large Read could otherwise
  *  store + re-transmit multiple MB per turn; the client only displays the head
