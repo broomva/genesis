@@ -179,6 +179,10 @@ export function build(opts: BuildOpts) {
       return c.json({ error: e instanceof Error ? e.message : "bad request" }, 400);
     }
     const events = eventStream(async (emit) => {
+      // Tool parts are emitted on transition only (BRO-1607): once when issued
+      // (input-available), once when the result fills (output-available/error).
+      // Keyed by toolCallId → last-emitted state, so each transition fires once.
+      const emittedTool = new Map<string, string>();
       const result = await supervisor.dispatch(
         incoming.threadId,
         incoming.text,
@@ -192,6 +196,16 @@ export function build(opts: BuildOpts) {
             text: state.lastText,
             reasoning: thinkingNote(state.thinkingTokens),
           });
+          // Surface new/advanced tool parts as dynamic-tool stream parts (BRO-1607)
+          // — the connector closes the open text part first, so tools render in
+          // place between the text blocks that bracket them.
+          for (const p of state.parts ?? []) {
+            if (p.type !== "tool") continue;
+            if (emittedTool.get(p.toolCallId) !== p.state) {
+              emittedTool.set(p.toolCallId, p.state);
+              emit({ kind: "tool", part: p });
+            }
+          }
         },
         { model: incoming.model, effort: incoming.effort },
       );

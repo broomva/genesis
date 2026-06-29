@@ -29,6 +29,7 @@ import {
   usePromptInputController,
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { ToolPart } from "@/components/ai-elements/tool";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
@@ -91,19 +92,12 @@ async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> 
   return blocks.join("");
 }
 
-// Pull the rendered text out of a UIMessage's parts[] (AI SDK v6 shape).
+// Pull the rendered text out of a UIMessage's parts[] (AI SDK v6 shape). Used for
+// the user bubble + input-history recall; assistant messages render their parts in
+// order (text · reasoning · tool) via AssistantBody (BRO-1607).
 function messageText(message: UIMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
-    .map((part) => (part as { text: string }).text)
-    .join("");
-}
-
-// The reasoning INDICATOR note (BRO-1574) — joined from reasoning parts. Empty
-// when the turn did no extended thinking (effort off / low).
-function messageReasoning(message: UIMessage): string {
-  return message.parts
-    .filter((part) => part.type === "reasoning")
     .map((part) => (part as { text: string }).text)
     .join("");
 }
@@ -144,6 +138,67 @@ function ChatLoader() {
         />
       ))}
     </output>
+  );
+}
+
+// Render one assistant message's parts IN ORDER (BRO-1607): reasoning indicator,
+// answer text, and tool/skill blocks interleave exactly as the agent produced
+// them — "say X · run a tool · say Y" — instead of collapsing to the final text.
+// Only the last text part animates while streaming; an empty in-flight message
+// (no parts yet) shows the three-dot loader.
+function AssistantBody({
+  message,
+  streaming,
+  busy,
+}: {
+  message: UIMessage;
+  streaming: boolean;
+  busy: boolean;
+}) {
+  const parts = message.parts;
+  let lastTextIdx = -1;
+  parts.forEach((p, i) => {
+    if (p.type === "text") lastTextIdx = i;
+  });
+  let rendered = 0;
+  const nodes = parts.map((part, i) => {
+    const key = `${message.id}-p${i}`;
+    if (part.type === "reasoning") {
+      const note = (part as { text: string }).text;
+      if (!note) return null;
+      rendered++;
+      return <ThinkingIndicator key={key} note={note} />;
+    }
+    if (part.type === "text") {
+      const t = (part as { text: string }).text;
+      if (!t) return null;
+      rendered++;
+      // streamdown parses INCOMPLETE markdown so partial fences/lists/bold don't
+      // break mid-stream (BRO-1566); only the last text part is still growing.
+      return (
+        <Streamdown
+          key={key}
+          className="text-foreground text-[0.95rem] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+          isAnimating={streaming && i === lastTextIdx}
+          animated
+          linkSafety={LINK_SAFETY}
+        >
+          {t}
+        </Streamdown>
+      );
+    }
+    if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) {
+      rendered++;
+      // Narrowed by the type check — a tool/dynamic-tool UIMessagePart.
+      return <ToolPart key={key} part={part as Parameters<typeof ToolPart>[0]["part"]} />;
+    }
+    return null;
+  });
+  return (
+    <div className="min-w-0 max-w-full">
+      {nodes}
+      {rendered === 0 && busy ? <ChatLoader /> : null}
+    </div>
   );
 }
 
@@ -414,8 +469,6 @@ export function ChatView({
               ) : (
                 messages.map((message) => {
                   const isUser = message.role === "user";
-                  const text = messageText(message);
-                  const reasoning = isUser ? "" : messageReasoning(message);
                   return (
                     <MessageScrollerItem
                       key={message.id}
@@ -427,28 +480,16 @@ export function ChatView({
                         // DS user bubble — soft cool-gray fill, asymmetric radius
                         // (flat bottom-right corner), right-aligned. Never ink-filled.
                         <div className="bg-[var(--bv-canvas-soft-2)] text-foreground ml-auto max-w-[78%] self-end rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
-                          {text}
+                          {messageText(message)}
                         </div>
                       ) : (
                         // DS assistant — plain ink text flowing on the canvas, no
-                        // bubble. The reasoning chip (if any) sits above it.
-                        <div className="min-w-0 max-w-full">
-                          {reasoning ? <ThinkingIndicator note={reasoning} /> : null}
-                          {text ? (
-                            // streamdown parses INCOMPLETE markdown so partial
-                            // fences/lists/bold don't break mid-stream (BRO-1566).
-                            <Streamdown
-                              className="text-foreground text-[0.95rem] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                              isAnimating={status === "streaming"}
-                              animated
-                              linkSafety={LINK_SAFETY}
-                            >
-                              {text}
-                            </Streamdown>
-                          ) : busy ? (
-                            <ChatLoader />
-                          ) : null}
-                        </div>
+                        // bubble; reasoning · text · tool blocks render in order.
+                        <AssistantBody
+                          message={message}
+                          streaming={status === "streaming"}
+                          busy={busy}
+                        />
                       )}
                     </MessageScrollerItem>
                   );

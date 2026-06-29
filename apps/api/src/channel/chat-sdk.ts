@@ -5,7 +5,7 @@
 // Wire format (AI SDK UI message stream, v1):
 //   headers: x-vercel-ai-ui-message-stream: v1, content-type: text/event-stream
 //   body:    `data: {json}\n\n` parts, terminated by `data: [DONE]\n\n`
-//   parts:   start · text-start · text-delta · text-end · error · finish
+//   parts:   start · reasoning-* · text-* · tool-input/output-* · message-metadata · error · finish
 
 import type { TokenUsage } from "@genesis/projection";
 import { EFFORT_LEVELS, type EffortLevel } from "./types";
@@ -89,11 +89,36 @@ export type UiStreamPart =
   | { type: "text-start"; id: string }
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
+  // Dynamic-tool parts (BRO-1607) — the AI-SDK v6 wire names. The CLI's tools
+  // (Bash, Read, …) aren't declared client-side, so they ride as DYNAMIC tools
+  // (`dynamic: true` → a `dynamic-tool` UIMessagePart with `toolName`). useChat
+  // aggregates input-available → output-available/error by toolCallId.
+  | {
+      type: "tool-input-available";
+      toolCallId: string;
+      toolName: string;
+      input: unknown;
+      dynamic: true;
+    }
+  | { type: "tool-output-available"; toolCallId: string; output: unknown; dynamic: true }
+  | { type: "tool-output-error"; toolCallId: string; errorText: string; dynamic: true }
   // Usage/cost metadata (BRO-1597) — useChat merges `messageMetadata` into
   // `message.metadata`. Emitted once, just before `finish`.
   | { type: "message-metadata"; messageMetadata: MessageMetadata }
   | { type: "error"; errorText: string }
   | { type: "finish" };
+
+/** A tool_result's error payload → a display string for `tool-output-error`
+ *  (BRO-1607). The CLI's error content is usually a string, occasionally a block. */
+function toToolErrorText(output: unknown): string {
+  if (typeof output === "string") return output;
+  if (output === undefined || output === null) return "Tool failed";
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
 
 /** Encode one part as an SSE event line. */
 export function encodePart(part: UiStreamPart): string {
@@ -137,6 +162,11 @@ export async function* toUiStreamParts(
   yield { type: "start", messageId: ids.messageId };
   let currentId: string | null = null;
   let emitted = "";
+  // The text of the most-recently CLOSED text part (BRO-1607). After a tool closes
+  // its bracketing text part, the tool_result `user` event re-sends the SAME
+  // `lastText` (the reducer spreads it unchanged) — reopening a part for it would
+  // duplicate the text. We remember the closed text and skip that stale re-emit.
+  let closedText: string | null = null;
   let errored: string | undefined;
   // Reasoning is a ONE-SHOT indicator (BRO-1574): the latest note is captured from
   // phase events (which carry it while thinking, before any answer text) and
@@ -164,6 +194,44 @@ export async function* toUiStreamParts(
         errored = ev.message;
         break;
       }
+      // A tool part delimits the timeline (BRO-1607): close any open text part so
+      // the tool renders as its own part (text → tool → text ordering), surface
+      // reasoning before the first content, then emit the dynamic-tool chunk.
+      // Handled before the phase|reply property access so `ev` narrows cleanly.
+      if (ev.kind === "tool") {
+        if (currentId === null) yield* flushReasoning();
+        if (currentId !== null) {
+          yield { type: "text-end", id: currentId };
+          closedText = emitted;
+          currentId = null;
+          emitted = "";
+        }
+        const p = ev.part;
+        if (p.state === "input-available") {
+          yield {
+            type: "tool-input-available",
+            toolCallId: p.toolCallId,
+            toolName: p.toolName,
+            input: p.input,
+            dynamic: true,
+          };
+        } else if (p.state === "output-available") {
+          yield {
+            type: "tool-output-available",
+            toolCallId: p.toolCallId,
+            output: p.output,
+            dynamic: true,
+          };
+        } else {
+          yield {
+            type: "tool-output-error",
+            toolCallId: p.toolCallId,
+            errorText: toToolErrorText(p.output),
+            dynamic: true,
+          };
+        }
+        continue;
+      }
       // Capture the indicator note even on text-less thinking ticks (ev is
       // phase|reply here — the error case already broke above).
       if (ev.reasoning && ev.reasoning.length > 0) {
@@ -176,6 +244,13 @@ export async function* toUiStreamParts(
       const text = ev.text;
       if (typeof text !== "string" || text.length === 0) continue;
 
+      // Stale re-emit (BRO-1607): a tool already closed this exact text into its own
+      // part; the tool_result phase event carries the unchanged `lastText`. The part
+      // is closed + fully streamed, so skip rather than reopen + duplicate it. (A
+      // genuine next block carries different text; the parts timeline — built from
+      // complete events — keeps the faithful record for reload.)
+      if (currentId === null && text === closedText) continue;
+
       // Thinking precedes the answer → flush the reasoning part before the first
       // text part opens.
       if (currentId === null) yield* flushReasoning();
@@ -183,6 +258,7 @@ export async function* toUiStreamParts(
       // A non-prefix block can't extend the open part → close it, start fresh.
       if (currentId !== null && !text.startsWith(emitted)) {
         yield { type: "text-end", id: currentId };
+        closedText = emitted;
         currentId = null;
         emitted = "";
       }

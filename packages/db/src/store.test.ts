@@ -246,3 +246,41 @@ describe("DrizzleStore (pglite) — turn usage (BRO-1597)", () => {
     await store.close();
   });
 });
+
+describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
+  test("the ordered text+tool timeline round-trips so a reload rebuilds tools", async () => {
+    const store = await createPgliteStore();
+    const parts = [
+      { type: "text" as const, text: "Let me check." },
+      {
+        type: "tool" as const,
+        toolCallId: "tu1",
+        toolName: "Bash",
+        input: { command: "ls" },
+        output: "README.md",
+        state: "output-available" as const,
+      },
+      { type: "text" as const, text: "Found it." },
+    ];
+    await store.addTurn({
+      sessionId: "sP",
+      role: "agent",
+      text: "Found it.",
+      parts,
+      thinkingTokens: 150,
+    });
+    const [t] = await store.turnsForSession("sP");
+    expect(t?.parts).toEqual(parts); // exact ordered timeline survives the reload
+    expect(t?.thinkingTokens).toBe(150);
+    await store.close();
+  });
+
+  test("a turn with no parts reads back undefined (pre-1607 history → text fallback)", async () => {
+    const store = await createPgliteStore();
+    await store.addTurn({ sessionId: "sQ", role: "agent", text: "plain" });
+    const [t] = await store.turnsForSession("sQ");
+    expect(t?.parts).toBeUndefined();
+    expect(t?.thinkingTokens).toBeUndefined();
+    await store.close();
+  });
+});

@@ -8,7 +8,7 @@
 //
 // A ChannelConnector is the only place that knows a provider's wire format.
 
-import type { RunPhase, TokenUsage } from "@genesis/projection";
+import type { RunPhase, TokenUsage, ToolPart } from "@genesis/projection";
 // EffortLevel lives in @genesis/runner (it owns the claude argv); re-export so
 // channel consumers keep importing it from "./types" (single source of truth).
 export { EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
@@ -30,9 +30,13 @@ export interface IncomingMessage {
 /** Canonical outbound event — a live run transition or the final reply.
  *  `reasoning` is a short human-readable thinking INDICATOR note (BRO-1574) — not
  *  verbatim chain-of-thought (redacted under subscription auth); the connector
- *  emits it once as AI-SDK reasoning parts before the answer text. */
+ *  emits it once as AI-SDK reasoning parts before the answer text. A `tool` event
+ *  carries one tool part of the turn timeline (BRO-1607) — emitted when a tool is
+ *  issued (input-available) and again when its result fills (output-available /
+ *  output-error); the connector renders these as AI-SDK dynamic-tool parts. */
 export type OutgoingEvent =
   | { kind: "phase"; phase: RunPhase; text?: string; reasoning?: string }
+  | { kind: "tool"; part: ToolPart }
   | {
       kind: "reply";
       phase: RunPhase;

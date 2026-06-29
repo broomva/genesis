@@ -1,154 +1,166 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { DynamicToolUIPart, ToolUIPart } from "ai";
 import {
-  CheckCircleIcon,
+  BotIcon,
   ChevronDownIcon,
-  CircleIcon,
-  ClockIcon,
+  FileIcon,
+  GlobeIcon,
+  type LucideIcon,
+  SparklesIcon,
+  TerminalIcon,
   WrenchIcon,
-  XCircleIcon,
 } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
-import { isValidElement } from "react";
 
-import { CodeBlock } from "./code-block";
+// A collapsible tool-call block (BRO-1607). DS-true: monochrome at rest — the
+// only colour that carries signal is the ai-blue running pulse and the danger
+// hue on failure; a completed tool is silent (calm is load-bearing). No progress
+// %. Renders the agent's own tools (Bash, Read, …) AND skills/subagents (Skill,
+// Task) through one path — they arrive as dynamic-tool parts, distinguished only
+// by name. Light enough to stay off the shiki/WASM highlighter: plain <pre>.
 
-export type ToolProps = ComponentProps<typeof Collapsible>;
+type AnyToolPart = ToolUIPart | DynamicToolUIPart;
 
-export const Tool = ({ className, ...props }: ToolProps) => (
-  <Collapsible
-    className={cn("group not-prose mb-4 w-full rounded-md border", className)}
-    {...props}
-  />
-);
+/** The tool's display name — `dynamic-tool` carries it explicitly; a static
+ *  `tool-<name>` part encodes it in the type suffix. */
+function toolNameOf(part: AnyToolPart): string {
+  if (part.type === "dynamic-tool") return part.toolName;
+  return part.type.split("-").slice(1).join("-");
+}
 
-export type ToolPart = ToolUIPart | DynamicToolUIPart;
+/** Per-family icon so Bash/Read/Skill/Task read at a glance (skills + subagents
+ *  get the sparkle/bot, not a generic wrench). */
+function iconFor(name: string): LucideIcon {
+  const n = name.toLowerCase();
+  if (n === "skill" || n.startsWith("mcp__")) return SparklesIcon;
+  if (n === "task" || n === "agent") return BotIcon;
+  if (n === "bash" || n === "shell" || n.includes("terminal")) return TerminalIcon;
+  if (n.startsWith("web") || n === "fetch") return GlobeIcon;
+  if (["read", "write", "edit", "glob", "grep", "ls", "notebookedit"].includes(n)) return FileIcon;
+  return WrenchIcon;
+}
 
-export type ToolHeaderProps = {
-  title?: string;
-  className?: string;
-} & (
-  | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
-  | {
-      type: DynamicToolUIPart["type"];
-      state: DynamicToolUIPart["state"];
-      toolName: string;
+/** A one-line preview of the call (the command / path / query) for the closed
+ *  header — the most useful field per tool, else the first string arg. */
+function previewOf(input: unknown): string | undefined {
+  if (typeof input === "string") return input;
+  if (typeof input !== "object" || input === null) return undefined;
+  const o = input as Record<string, unknown>;
+  for (const k of [
+    "command",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "description",
+    "prompt",
+  ]) {
+    const v = o[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  const first = Object.values(o).find((v) => typeof v === "string" && v.length > 0);
+  return typeof first === "string" ? first : undefined;
+}
+
+/** Stringify a tool payload for a <pre> block, capped so a huge command output
+ *  can't blow the DOM. Strings pass through; everything else is pretty JSON. */
+function toBlockText(value: unknown, cap = 6000): string {
+  let s: string;
+  if (typeof value === "string") s = value;
+  else {
+    try {
+      s = JSON.stringify(value, null, 2);
+    } catch {
+      s = String(value);
     }
-);
+  }
+  return s.length > cap ? `${s.slice(0, cap)}\n… [truncated]` : s;
+}
 
-const statusLabels: Record<ToolPart["state"], string> = {
-  "approval-requested": "Awaiting Approval",
-  "approval-responded": "Responded",
-  "input-available": "Running",
-  "input-streaming": "Pending",
-  "output-available": "Completed",
-  "output-denied": "Denied",
-  "output-error": "Error",
-};
-
-const statusIcons: Record<ToolPart["state"], ReactNode> = {
-  "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
-  "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
-  "input-available": <ClockIcon className="size-4 animate-pulse" />,
-  "input-streaming": <CircleIcon className="size-4" />,
-  "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
-  "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-  "output-error": <XCircleIcon className="size-4 text-red-600" />,
-};
-
-export const getStatusBadge = (status: ToolPart["state"]) => (
-  <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
-    {statusIcons[status]}
-    {statusLabels[status]}
-  </Badge>
-);
-
-export const ToolHeader = ({
-  className,
-  title,
-  type,
-  state,
-  toolName,
-  ...props
-}: ToolHeaderProps) => {
-  const derivedName = type === "dynamic-tool" ? toolName : type.split("-").slice(1).join("-");
-
+function Block({ label, text, tone }: { label: string; text: string; tone?: "danger" }) {
   return (
-    <CollapsibleTrigger
-      className={cn("flex w-full items-center justify-between gap-4 p-3", className)}
-      {...props}
-    >
-      <div className="flex items-center gap-2">
-        <WrenchIcon className="size-4 text-muted-foreground" />
-        <span className="font-medium text-sm">{title ?? derivedName}</span>
-        {getStatusBadge(state)}
+    <div className="space-y-1">
+      <div className="text-muted-foreground text-[0.7rem] font-medium uppercase tracking-wide">
+        {label}
       </div>
-      <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-    </CollapsibleTrigger>
-  );
-};
-
-export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
-
-export const ToolContent = ({ className, ...props }: ToolContentProps) => (
-  <CollapsibleContent
-    className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 space-y-4 p-4 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-      className,
-    )}
-    {...props}
-  />
-);
-
-export type ToolInputProps = ComponentProps<"div"> & {
-  input: ToolPart["input"];
-};
-
-export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
-  <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
-    <h4 className="font-medium text-muted-foreground text-xs">Parameters</h4>
-    <div className="rounded-md bg-muted/50">
-      <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
-    </div>
-  </div>
-);
-
-export type ToolOutputProps = ComponentProps<"div"> & {
-  output: ToolPart["output"];
-  errorText: ToolPart["errorText"];
-};
-
-export const ToolOutput = ({ className, output, errorText, ...props }: ToolOutputProps) => {
-  if (!(output || errorText)) {
-    return null;
-  }
-
-  let Output = <div>{output as ReactNode}</div>;
-
-  if (typeof output === "object" && !isValidElement(output)) {
-    Output = <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />;
-  } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
-  }
-
-  return (
-    <div className={cn("space-y-2", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs">
-        {errorText ? "Error" : "Result"}
-      </h4>
-      <div
+      <pre
         className={cn(
-          "overflow-x-auto rounded-md text-xs [&_table]:w-full",
-          errorText ? "bg-destructive/10 text-destructive" : "bg-muted/50 text-foreground",
+          "max-h-72 overflow-auto rounded-md border px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words",
+          tone === "danger"
+            ? "border-[var(--bv-danger)]/30 bg-[var(--bv-danger)]/5 text-[var(--bv-danger)]"
+            : "border-border bg-[var(--bv-canvas-soft-2)] text-foreground",
         )}
       >
-        {errorText && <div>{errorText}</div>}
-        {Output}
-      </div>
+        {text}
+      </pre>
     </div>
   );
-};
+}
+
+export function ToolPart({ part }: { part: AnyToolPart }) {
+  const name = toolNameOf(part);
+  const Icon = iconFor(name);
+  const preview = previewOf(part.input);
+  const running = part.state === "input-streaming" || part.state === "input-available";
+  const errored = part.state === "output-error";
+  const output = "output" in part ? part.output : undefined;
+  const errorText = "errorText" in part ? part.errorText : undefined;
+
+  return (
+    <Collapsible
+      className={cn(
+        "group my-2 w-full overflow-hidden rounded-lg border text-left",
+        errored ? "border-[var(--bv-danger)]/30" : "border-border",
+      )}
+    >
+      <CollapsibleTrigger
+        className={cn(
+          "flex w-full items-center gap-2 px-3 py-2 text-left outline-none transition-colors",
+          "hover:bg-[var(--bv-frost-8)] focus-visible:ring-2 focus-visible:ring-ring/40",
+        )}
+      >
+        <Icon
+          aria-hidden
+          className={cn(
+            "size-3.5 shrink-0",
+            running ? "text-[var(--bv-blue)]" : "text-muted-foreground",
+          )}
+        />
+        <span className="text-foreground shrink-0 text-xs font-medium">{name}</span>
+        {preview ? (
+          <span className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
+            {preview}
+          </span>
+        ) : (
+          <span className="flex-1" />
+        )}
+        {running ? (
+          <span className="bv-dot-live shrink-0" aria-label="running" />
+        ) : errored ? (
+          <span className="text-[var(--bv-danger)] shrink-0 text-[0.7rem]">failed</span>
+        ) : null}
+        <ChevronDownIcon
+          aria-hidden
+          className="text-muted-foreground size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]:rotate-180"
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-2.5 px-3 pb-3 pt-1">
+        {part.input !== undefined ? <Block label="Input" text={toBlockText(part.input)} /> : null}
+        {errored ? (
+          <Block
+            label="Error"
+            text={errorText ?? toBlockText(output) ?? "Tool failed"}
+            tone="danger"
+          />
+        ) : output !== undefined ? (
+          <Block label="Result" text={toBlockText(output)} />
+        ) : running ? (
+          <div className="text-muted-foreground text-xs">Running…</div>
+        ) : null}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}

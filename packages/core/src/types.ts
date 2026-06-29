@@ -2,9 +2,9 @@
 // Workspace/Session object-model *learning*, trimmed to the walking skeleton.
 // Phase 2 (Soul Substrate) promotes these from in-memory to Postgres+Drizzle.
 
-import type { RunPhase, TokenUsage } from "@genesis/projection";
+import type { RunPhase, TokenUsage, TurnPart } from "@genesis/projection";
 
-export type { RunPhase, TokenUsage };
+export type { RunPhase, TokenUsage, TurnPart };
 
 export interface Workspace {
   id: string;
@@ -41,4 +41,11 @@ export interface Turn {
   usage?: TokenUsage;
   /** claude's exact cost for the turn (USD). Absent → unknown (e.g. user turn). */
   costUsd?: number;
+  /** Ordered text+tool timeline (BRO-1607) — set on the agent turn so a reloaded
+   *  thread rebuilds tool blocks + interleaving, not just the final text. Absent
+   *  on user turns and pre-1607 historical rows (reload falls back to `text`). */
+  parts?: TurnPart[];
+  /** Extended-thinking token estimate (BRO-1607 reload of BRO-1574) — drives the
+   *  reasoning indicator on a reloaded turn. Absent → no thinking / pre-1607 row. */
+  thinkingTokens?: number;
 }

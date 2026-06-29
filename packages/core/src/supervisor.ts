@@ -266,14 +266,18 @@ export class Supervisor {
       const reply = result.state.lastText ?? "(no output)";
       const usage = result.state.usage;
       const costUsd = result.state.costUsd;
-      // Persist usage on the agent turn (BRO-1597) so a reloaded thread keeps its
-      // running cost + the latest context-window fill.
+      // Persist the ordered timeline + thinking estimate (BRO-1607) alongside
+      // usage/cost (BRO-1597) so a reloaded thread rebuilds tool blocks, text
+      // interleaving, and the reasoning indicator — not just the final text.
+      const parts = result.state.parts;
       await this.store.addTurn({
         sessionId: session.id,
         role: "agent",
         text: reply,
         usage,
         costUsd,
+        parts: parts && parts.length > 0 ? parts : undefined,
+        thinkingTokens: result.state.thinkingTokens,
       });
 
       // Keep a per-session worktree across turns (resume continuity); only
