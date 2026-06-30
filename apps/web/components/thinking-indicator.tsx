@@ -8,9 +8,11 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 // Hand-rolled on the radix Collapsible primitive rather than the AI Elements
 // <Reasoning> component on purpose: <Reasoning> renders its content through
 // Streamdown + @streamdown/{code,math,mermaid} (shiki/katex/mermaid WASM), which
-// would land in the standalone server trace. The thinking PROSE is redacted under
-// the VPS subscription auth anyway, so there is no markdown to render — only the
-// token-based indicator note — so the heavyweight component buys nothing here.
+// would land in the standalone server trace. Since BRO-1614/BRO-1616 the `note`
+// carries the model's real SUMMARIZED thinking prose (no longer empty — the
+// `--thinking-display summarized` flag + the transcript drain capture it), but it's
+// secondary text in a collapsed panel, not worth pulling the heavyweight WASM bundle
+// in to markdown-render it — plain text in this hand-rolled chip stays the call.
 export function ThinkingIndicator({ note }: { note: string }) {
   return (
     <Collapsible className="mb-1.5 w-fit max-w-[80%]">
