@@ -85,9 +85,13 @@ export class DrizzleStore implements Store {
   }
 
   async upsertWorkspace(ws: Workspace): Promise<Workspace> {
+    // Project to the DECLARED columns only (P20 N2): the Workspace type carries
+    // registry-only fields (isGitRepo/noWorktree) that have no column — drizzle
+    // drops them today, but an explicit projection keeps that intentional (a
+    // future driver/added column can't silently start persisting them).
     await this.db
       .insert(workspaces)
-      .values(ws)
+      .values({ id: ws.id, name: ws.name, rootPath: ws.rootPath })
       .onConflictDoUpdate({ target: workspaces.id, set: { name: ws.name, rootPath: ws.rootPath } });
     return ws;
   }

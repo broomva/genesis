@@ -28,6 +28,11 @@ export interface IncomingMessage {
   /** Requested agent engine (BRO-1620) — honored only on a thread's FIRST turn
    *  (per-thread sticky); ignored after. Omitted/unknown → the server default. */
   engine?: string;
+  /** Requested workspace (BRO-1627) — honored only at session CREATION (a thread's
+   *  first turn); ignored after. Omitted/unregistered → the server default. The
+   *  selectable set is server-dynamic, so there's no client-side enum to validate
+   *  against (membership is checked downstream in Supervisor.resolve). */
+  workspaceId?: string;
 }
 
 /** Agent engines a client may request (BRO-1620). Validated in parseChatRequest;

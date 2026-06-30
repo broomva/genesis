@@ -511,3 +511,197 @@ describe("supervisor — token usage (BRO-1597)", () => {
     expect(r.costUsd).toBeUndefined();
   });
 });
+
+describe("supervisor — workspace selection (BRO-1627)", () => {
+  const wsA = { id: "ws-a", name: "alpha", rootPath: "/repos/alpha" };
+  const wsB = { id: "ws-b", name: "beta", rootPath: "/repos/beta", noWorktree: true };
+
+  // Capture the cwd + worktree flag the LAST turn ran with.
+  function cwdRunner(sink: { cwd?: string; worktree?: unknown }): (o: any) => Promise<RunResult> {
+    return async (o) => {
+      sink.cwd = o.cwd;
+      sink.worktree = o.worktree;
+      return {
+        state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+  }
+
+  test("a NEW thread binds + runs in the requested registered workspace", async () => {
+    const sink: { cwd?: string } = {};
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      store,
+      run: cwdRunner(sink),
+    });
+    await sup.dispatch("t-ws", "go", undefined, { workspaceId: "ws-a" });
+    expect(sink.cwd).toBe("/repos/alpha");
+    expect((await store.findSessionByThread("t-ws"))?.workspaceId).toBe("ws-a");
+  });
+
+  test("an unregistered workspaceId falls back to the default workspace", async () => {
+    const sink: { cwd?: string } = {};
+    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: cwdRunner(sink) });
+    await sup.dispatch("t-unk", "go", undefined, { workspaceId: "ws-nope" });
+    expect(sink.cwd).toBe(ws.rootPath);
+  });
+
+  test("binding is STICKY at creation — a turn-2 workspaceId is ignored", async () => {
+    const sink: { cwd?: string } = {};
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      store,
+      run: cwdRunner(sink),
+    });
+    await sup.dispatch("t-stick", "one", undefined, { workspaceId: "ws-a" });
+    expect(sink.cwd).toBe("/repos/alpha");
+    await sup.dispatch("t-stick", "two", undefined, { workspaceId: "ws-b" }); // ignored
+    expect(sink.cwd).toBe("/repos/alpha");
+    expect((await store.findSessionByThread("t-stick"))?.workspaceId).toBe("ws-a");
+  });
+
+  test("resolve binds the requested workspace at creation; default when omitted", async () => {
+    // ws-b is REGISTERED so the sticky assertion isolates stickiness (P20 N4): if
+    // resolve weren't sticky, the second call WOULD rebind to the valid ws-b.
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      run: fakeRunner("x"),
+    });
+    expect((await sup.resolve("r1", "ws-a")).workspaceId).toBe("ws-a");
+    expect((await sup.resolve("r2")).workspaceId).toBe("ws-1");
+    // sticky: a second resolve with a different REGISTERED id keeps the first.
+    expect((await sup.resolve("r1", "ws-b")).workspaceId).toBe("ws-a");
+  });
+
+  test("per-workspace noWorktree wins over the supervisor global", async () => {
+    const last: { cwd?: string; worktree?: unknown } = {};
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      noWorktree: false, // global default: use worktrees
+      run: cwdRunner(last),
+    });
+    await sup.dispatch("tA", "x", undefined, { workspaceId: "ws-a" });
+    expect(last.worktree).toBeUndefined(); // wsA inherits global false → worktree enabled
+    await sup.dispatch("tB", "y", undefined, { workspaceId: "ws-b" });
+    expect(last.worktree).toBe(false); // wsB declares noWorktree → run direct
+  });
+
+  test("listWorkspaces returns the default first, then the extras", async () => {
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      run: fakeRunner("x"),
+    });
+    expect(sup.listWorkspaces().map((w) => w.id)).toEqual(["ws-1", "ws-a", "ws-b"]);
+    expect(sup.defaultWorkspaceId).toBe("ws-1");
+  });
+
+  test("listWorkspaces is a public DTO — never exposes rootPath (P20/CodeRabbit)", () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: fakeRunner("x") });
+    for (const w of sup.listWorkspaces()) {
+      expect("rootPath" in w).toBe(false);
+      expect("noWorktree" in w).toBe(false);
+    }
+    expect(sup.listWorkspaces().map((w) => w.id)).toEqual(["ws-1", "ws-a"]);
+  });
+
+  test("an explicit workspace overrides a same-id earlier entry (registry merge order)", async () => {
+    const sink: { cwd?: string } = {};
+    const dupe = { id: "ws-a", name: "alpha-override", rootPath: "/repos/alpha-2" };
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, dupe], // later wins
+      run: cwdRunner(sink),
+    });
+    // The override's rootPath wins — asserted via the actual run cwd (listWorkspaces
+    // no longer exposes rootPath; the cwd is the real behavior).
+    await sup.dispatch("t-dupe", "go", undefined, { workspaceId: "ws-a" });
+    expect(sink.cwd).toBe("/repos/alpha-2");
+  });
+
+  test("listThreads carries the bound workspace id + name", async () => {
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      store,
+      run: fakeRunner("x"),
+    });
+    await sup.dispatch("twl", "go", undefined, { workspaceId: "ws-a" });
+    const t = (await sup.listThreads()).find((x) => x.threadId === "twl");
+    expect(t?.workspaceId).toBe("ws-a");
+    expect(t?.workspaceName).toBe("alpha");
+  });
+
+  test("a deconfigured workspace that ALREADY RAN errors instead of silently re-cwd'ing", async () => {
+    const store = new InMemoryStore();
+    await store.upsertSession({
+      id: "sess-gone",
+      workspaceId: "ws-gone", // neither in the registry nor the store
+      threadId: "tgone",
+      phase: "done",
+      createdAt: new Date().toISOString(),
+      agentSessionId: "claude-sid", // ← it ran; --resume continuity must be protected
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: fakeRunner("x") });
+    await expect(sup.dispatch("tgone", "next")).rejects.toThrow(/no longer available/);
+  });
+
+  test("a registry-missing workspace still in the DB ALSO errors on a ran thread (P20 S1)", async () => {
+    // The DB row survives (ensureWorkspace persisted it) but carries no worktree
+    // posture, so a ran thread can't be safely resumed even with a DB hit.
+    const store = new InMemoryStore();
+    await store.upsertWorkspace({ id: "ws-x", name: "x", rootPath: "/repos/x" });
+    await store.upsertSession({
+      id: "sess-x",
+      workspaceId: "ws-x", // in the DB, NOT in the boot registry
+      threadId: "tx",
+      phase: "done",
+      createdAt: new Date().toISOString(),
+      agentSessionId: "sid-x", // ran
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: fakeRunner("x") });
+    await expect(sup.dispatch("tx", "next")).rejects.toThrow(/no longer available/);
+  });
+
+  test("a registry-missing workspace on a NEVER-RAN thread falls back without error", async () => {
+    // never ran → no --resume to break → safe to run at the last-known DB path.
+    const sink: { cwd?: string } = {};
+    const store = new InMemoryStore();
+    await store.upsertWorkspace({ id: "ws-y", name: "y", rootPath: "/repos/y" });
+    await store.upsertSession({
+      id: "sess-y",
+      workspaceId: "ws-y",
+      threadId: "ty",
+      phase: "idle",
+      createdAt: new Date().toISOString(), // no agentSessionId → never ran
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: cwdRunner(sink) });
+    await sup.dispatch("ty", "first");
+    expect(sink.cwd).toBe("/repos/y");
+  });
+
+  test("an extra colliding with the default id is IGNORED (default can't be shadowed, P20 M2)", async () => {
+    const sink: { cwd?: string } = {};
+    const shadow = { id: "ws-1", name: "evil", rootPath: "/repos/evil" }; // ws-1 = default id
+    const sup = new Supervisor({
+      defaultWorkspace: ws, // id ws-1, rootPath /tmp/genesis-test
+      workspaces: [shadow],
+      run: cwdRunner(sink),
+    });
+    // ws-1 appears once (the shadow was dropped), and a default-bound thread runs
+    // in the GENUINE default tree — not the shadow's (asserted via the run cwd,
+    // since listWorkspaces no longer exposes rootPath).
+    expect(sup.listWorkspaces().filter((w) => w.id === "ws-1").length).toBe(1);
+    await sup.dispatch("t-shadow", "go");
+    expect(sink.cwd).toBe(ws.rootPath);
+  });
+});

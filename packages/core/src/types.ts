@@ -11,6 +11,13 @@ export interface Workspace {
   name: string;
   /** A git repository root the agent operates in. */
   rootPath: string;
+  /** rootPath is itself a git repo (informational / display). Optional. */
+  isGitRepo?: boolean;
+  /** Run the agent DIRECTLY in rootPath instead of a per-session worktree
+   *  (BRO-1512) — true for nested-monorepo workspaces. Absent → the supervisor
+   *  global (noWorktree). Lives in the boot registry only; NOT persisted to the
+   *  DB (recomputed every boot, so it can never go stale). */
+  noWorktree?: boolean;
 }
 
 export interface Session {

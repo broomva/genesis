@@ -49,6 +49,7 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     model?: unknown;
     effort?: unknown;
     engine?: unknown;
+    workspaceId?: unknown;
   };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
@@ -87,8 +88,14 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
   const effortSet: readonly string[] = engine === "codex" ? CODEX_EFFORT_LEVELS : EFFORT_LEVELS;
   const effort = effortSet.includes(effortRaw) ? (effortRaw as EffortLevel) : undefined;
+  // Workspace (BRO-1627) — charset-validated only (the selectable set is
+  // server-dynamic, so membership is checked downstream in Supervisor.resolve,
+  // which binds it sticky at session create). Same dash-rejecting guard as model
+  // so a stray value can never be reparsed as a flag.
+  const wsRaw = typeof b.workspaceId === "string" ? b.workspaceId.trim() : "";
+  const workspaceId = /^[A-Za-z0-9][\w.-]*$/.test(wsRaw) ? wsRaw : undefined;
 
-  return { threadId, text, model, effort, engine };
+  return { threadId, text, model, effort, engine, workspaceId };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────

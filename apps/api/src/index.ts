@@ -18,6 +18,7 @@ import {
   runCodex,
 } from "@genesis/runner";
 import { build } from "./server";
+import { discoverWorkspaces } from "./workspaces";
 
 const defaultDataDir = () =>
   process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
@@ -122,6 +123,11 @@ async function selectStore(): Promise<{ store: Store; label: string }> {
 
 const workspaceRoot = process.env.GENESIS_WORKSPACE ?? process.cwd();
 const port = Number(process.env.PORT ?? 8787);
+
+// Selectable workspaces beyond the default (BRO-1627) — discovered from
+// GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES. The edge logic lives in ./workspaces
+// so it's unit-testable without booting this server module.
+const workspaces = discoverWorkspaces(process.env);
 
 // NOTE (Phase 2 Slice A): dispatch is serialized per-thread IN-PROCESS only.
 // Run a SINGLE instance until Slice B adds Upstash slot-locks — two replicas on
@@ -278,6 +284,9 @@ else if (requestedDefault === "codex" && !codexAvailable) {
 
 const { app, websocket } = build({
   workspaceRoot,
+  // Selectable workspaces beyond the default (BRO-1627) — empty unless an operator
+  // sets GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES (then the picker self-shows).
+  workspaces,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
   store,
