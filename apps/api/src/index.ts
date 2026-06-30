@@ -176,7 +176,12 @@ try {
 // doesn't request one (interactive only when it was actually built).
 let interactiveEngine: InteractiveEngine | undefined;
 let engineLabel = "print(claude -p)";
-const localHost = process.env.GENESIS_HOST !== "vercel";
+// Interactive needs a TRULY local host (tmux + local claude). Treat only unset
+// or "local" as local — a non-vercel REMOTE host must NOT register interactive
+// (the interactive runner is local-only; it would fail at dispatch instead of
+// falling back to print). CodeRabbit.
+const hostMode = process.env.GENESIS_HOST;
+const localHost = hostMode === undefined || hostMode === "" || hostMode === "local";
 // Per-session trace dir, shared by both engines (BRO-1519/1524).
 const runsDir = process.env.GENESIS_RUNS_DIR ?? join(defaultDataDir(), "runs");
 mkdirSync(runsDir, { recursive: true });
@@ -225,7 +230,7 @@ if (localHost) {
 } else if (process.env.GENESIS_ENGINE === "interactive") {
   console.error(
     "[genesis] GENESIS_ENGINE=interactive is local-host only (tmux + local claude); " +
-      "unset GENESIS_HOST or drop GENESIS_ENGINE.",
+      "unset GENESIS_HOST, set GENESIS_HOST=local, or drop GENESIS_ENGINE.",
   );
   process.exit(1);
 }
