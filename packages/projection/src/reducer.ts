@@ -75,7 +75,21 @@ function appendAssistantParts(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
   const out = prev.slice();
   for (const b of contentBlocksOf(msg)) {
     if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
-      out.push({ type: "text", text: b.text });
+      // Collapse a CONSECUTIVE prefix-extending text part into one (BRO-1613): the
+      // interactive engine re-pushes the GROWING accumulated text per streaming
+      // chunk (acc, acc+more, …), which would otherwise append a cumulative
+      // duplicate each time. No-op for the print engine (consecutive text parts
+      // are distinct messages that don't prefix-match) and across a tool boundary
+      // (the last part is then a tool, not text).
+      const last = out[out.length - 1];
+      if (last?.type === "text" && (b.text.startsWith(last.text) || last.text.startsWith(b.text))) {
+        out[out.length - 1] = {
+          type: "text",
+          text: b.text.length >= last.text.length ? b.text : last.text,
+        };
+      } else {
+        out.push({ type: "text", text: b.text });
+      }
     } else if (
       b.type === "tool_use" &&
       typeof b.name === "string" &&
