@@ -11,7 +11,7 @@
 import type { RunPhase, TokenUsage, ToolPart } from "@genesis/projection";
 // EffortLevel lives in @genesis/runner (it owns the claude argv); re-export so
 // channel consumers keep importing it from "./types" (single source of truth).
-export { EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
+export { EFFORT_LEVELS, CODEX_EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
 import type { EffortLevel } from "@genesis/runner";
 
 /** Canonical inbound message — what every connector normalizes a request into. */

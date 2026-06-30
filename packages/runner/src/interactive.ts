@@ -490,7 +490,14 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           pin: cfg.pin,
           bin: cfg.bin,
           initialPrompt: opts.prompt,
-          extraArgs: opts.extraArgs,
+          // Model binds at SPAWN (BRO-1623): the interactive session is persistent,
+          // so per-turn model changes don't apply — but the thread's FIRST turn
+          // can launch claude with --model, pinning it for the session's life
+          // (the UI locks the selector once the thread has run). Appended after
+          // extraArgs so a caller-supplied --model would still win (last-wins).
+          extraArgs: opts.model
+            ? [...(opts.extraArgs ?? []), "--model", opts.model]
+            : opts.extraArgs,
         });
         live.set(key, entry);
         armNudge();

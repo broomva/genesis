@@ -102,6 +102,43 @@ describe("parseChatRequest", () => {
     expect(r.model).toBeUndefined();
     expect(r.effort).toBeUndefined();
   });
+
+  // Effort is validated against the ENGINE's provider set (BRO-1623): codex
+  // reasoning effort (minimal/low/medium/high) vs claude --effort (low…max).
+  const reqWith = (engine: string, effort: string) =>
+    parseChatRequest({
+      id: "c",
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+      engine,
+      effort,
+    });
+
+  test("codex accepts 'minimal' effort (codex-only level)", () => {
+    expect(reqWith("codex", "minimal").effort).toBe("minimal");
+  });
+
+  test("codex DROPS claude-only effort (xhigh/max not valid for codex)", () => {
+    expect(reqWith("codex", "xhigh").effort).toBeUndefined();
+    expect(reqWith("codex", "max").effort).toBeUndefined();
+  });
+
+  test("claude engines DROP codex-only 'minimal' effort", () => {
+    expect(reqWith("print", "minimal").effort).toBeUndefined();
+    expect(reqWith("interactive", "minimal").effort).toBeUndefined();
+    // but accept their own levels
+    expect(reqWith("print", "max").effort).toBe("max");
+  });
+
+  test("gpt-5.5 passes the model shape check (alphanumeric-start)", () => {
+    expect(reqWith("codex", "low").effort).toBe("low");
+    const r = parseChatRequest({
+      id: "c",
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+      engine: "codex",
+      model: "gpt-5.5",
+    });
+    expect(r.model).toBe("gpt-5.5");
+  });
 });
 
 describe("encodePart / SSE format", () => {

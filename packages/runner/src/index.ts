@@ -12,11 +12,18 @@ import {
   reduce,
 } from "@genesis/projection";
 
-/** Claude's native `--effort` flag enum (BRO-1573). Thinking only meaningfully
- *  engages at xhigh/max under subscription auth; there is no "off" level. */
-export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
+ *  providers; the per-provider arrays below gate which reach which engine —
+ *  `minimal` is codex-only, `xhigh`/`max` are claude-only. */
+export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/** Claude's native `--effort` flag enum (BRO-1573) — print + interactive. Thinking
+ *  only meaningfully engages at xhigh/max under subscription auth; no "off" level. */
 export const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** codex `-c model_reasoning_effort=<level>` values (BRO-1623) — OpenAI reasoning
+ *  effort. `minimal` is codex-only; codex has no xhigh/max. */
+export const CODEX_EFFORT_LEVELS: readonly EffortLevel[] = ["minimal", "low", "medium", "high"];
 
 export interface RunOptions {
   prompt: string;

@@ -17,10 +17,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
-  EFFORT_OPTIONS,
   ENGINE_OPTIONS,
-  MODEL_OPTIONS,
   type SelectOption,
+  effortOptionsFor,
+  engineShowsEffort,
+  modelOptionsFor,
+  sanitizeEffortFor,
+  sanitizeModelFor,
 } from "@/lib/chat-options";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
@@ -195,25 +198,30 @@ export function SettingsSheet({
                   ))}
                 </SegmentedControl>
               </Row>
+              {/* Model/effort options follow the selected engine's provider
+                  (BRO-1623) — claude aliases for print/interactive, OpenAI models
+                  for codex. Interactive has no per-launch effort knob → hidden. */}
               <Row
                 label="Default model"
                 hint="Seeds new chats; change it per turn in the composer."
               >
                 <PrefSelect
-                  value={prefs.model}
-                  options={MODEL_OPTIONS}
+                  value={sanitizeModelFor(prefs.model, prefs.engine)}
+                  options={modelOptionsFor(prefs.engine)}
                   onValueChange={(v) => onUpdate({ model: v })}
                   ariaLabel="Default model"
                 />
               </Row>
-              <Row label="Default effort" hint="Higher effort engages extended thinking.">
-                <PrefSelect
-                  value={prefs.effort}
-                  options={EFFORT_OPTIONS}
-                  onValueChange={(v) => onUpdate({ effort: v })}
-                  ariaLabel="Default effort"
-                />
-              </Row>
+              {engineShowsEffort(prefs.engine) ? (
+                <Row label="Default effort" hint="Higher effort engages extended thinking.">
+                  <PrefSelect
+                    value={sanitizeEffortFor(prefs.effort, prefs.engine)}
+                    options={effortOptionsFor(prefs.engine)}
+                    onValueChange={(v) => onUpdate({ effort: v })}
+                    ariaLabel="Default effort"
+                  />
+                </Row>
+              ) : null}
             </Section>
 
             <Section icon={Info} title="About">

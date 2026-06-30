@@ -34,9 +34,15 @@ const MODEL_CONTEXT: Record<string, number> = {
   fable: 200_000,
 };
 const FALLBACK_CONTEXT_WINDOW = 200_000;
+/** codex's default model (gpt-5.5) context window — approximate denominator for
+ *  the meter on codex threads (BRO-1623). The meter is informational. */
+const CODEX_CONTEXT_WINDOW = 400_000;
 
-/** Context-window size for the selected model value (BRO-1597). */
-export function contextWindowFor(model: string): number {
+/** Context-window size for the selected model value (BRO-1597/1623). Engine-aware:
+ *  the same sentinel "default" means Opus-1M on a claude engine but gpt-5.5 on
+ *  codex, so the provider decides before the per-model lookup. */
+export function contextWindowFor(model: string, engine?: string): number {
+  if (engine && engineProvider(engine) === "openai") return CODEX_CONTEXT_WINDOW;
   return MODEL_CONTEXT[model] ?? FALLBACK_CONTEXT_WINDOW;
 }
 
@@ -66,15 +72,26 @@ export function effortToBody(effort: string): string | undefined {
   return effort === DEFAULT_EFFORT ? undefined : effort;
 }
 
-/** A persisted value is only honored if it still maps to a known option — a
- *  stale value from a renamed/removed option would leave the controlled Radix
- *  Select with no matching item (blank trigger). */
+/** A persisted value is only honored if it maps to a known option for EITHER
+ *  provider (BRO-1623) — the model/effort prefs are a shared slot across engines,
+ *  so a valid codex value (e.g. effort "minimal") must survive a reload even
+ *  though it isn't a claude option. The composer/settings then clamp it to the
+ *  active engine's provider via {@link sanitizeModelFor}/{@link sanitizeEffortFor}.
+ *  A genuinely unknown value (renamed/removed) is still dropped → provider default. */
 export function isKnownModel(value: string | null): value is string {
-  return value != null && MODEL_OPTIONS.some((o) => o.value === value);
+  return (
+    value != null &&
+    (MODEL_OPTIONS.some((o) => o.value === value) ||
+      CODEX_MODEL_OPTIONS.some((o) => o.value === value))
+  );
 }
 
 export function isKnownEffort(value: string | null): value is string {
-  return value != null && EFFORT_OPTIONS.some((o) => o.value === value);
+  return (
+    value != null &&
+    (EFFORT_OPTIONS.some((o) => o.value === value) ||
+      CODEX_EFFORT_OPTIONS.some((o) => o.value === value))
+  );
 }
 
 /** Agent engine picker (BRO-1620/1621). `interactive` = a persistent Claude Code
@@ -91,20 +108,91 @@ export const ENGINE_OPTIONS: readonly SelectOption[] = [
 ];
 export const DEFAULT_ENGINE = "interactive";
 
-/** Engines that ignore the per-turn model/effort knobs (BRO-1621). The
- *  interactive engine pins them at session spawn; codex reads its own
- *  `~/.codex/config.toml` defaults (its models are auth-tier gated), so the
- *  composer hides the model/effort selectors for both — only `print` honors them. */
-const MODELLESS_ENGINES = new Set(["interactive", "codex"]);
-
-/** Whether the composer should surface the per-turn model + effort selectors for
- *  a given engine (only the print engine consumes them). */
-export function engineUsesModelControls(engine: string): boolean {
-  return !MODELLESS_ENGINES.has(engine);
-}
-
 export function isKnownEngine(value: string | null): value is string {
   return value != null && ENGINE_OPTIONS.some((o) => o.value === value);
+}
+
+// ── Provider-aware model/effort (BRO-1623) ──────────────────────────────────
+// Each engine belongs to a provider, and the model/effort options + wiring must
+// match it: a claude alias must never reach codex, nor an OpenAI model claude.
+//   print        → Anthropic, per-turn model + effort
+//   interactive  → Anthropic, model at SPAWN (locked once running), no effort
+//   codex        → OpenAI, per-turn model + reasoning effort
+
+export type EngineProvider = "anthropic" | "openai";
+
+/** The LLM provider behind an engine. */
+export function engineProvider(engine: string): EngineProvider {
+  return engine === "codex" ? "openai" : "anthropic";
+}
+
+/** OpenAI model picker for codex (BRO-1623). Only models the ChatGPT
+ *  subscription actually serves are offered — gpt-5.5 is the default and the
+ *  only one verified available (gpt-5.5-codex / gpt-5.1-codex 400 on this tier);
+ *  `default` omits `-m` so codex uses its config default (gpt-5.5). Add entries
+ *  here as higher tiers expose more models. */
+export const CODEX_MODEL_OPTIONS: readonly SelectOption[] = [
+  { value: "default", label: "GPT-5.5" },
+];
+
+/** codex reasoning-effort picker → `-c model_reasoning_effort` (BRO-1623).
+ *  `standard` omits the override (codex config default). `minimal` is codex-only. */
+export const CODEX_EFFORT_OPTIONS: readonly SelectOption[] = [
+  { value: "standard", label: "Default" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+
+/** The model options for an engine's provider (claude aliases vs OpenAI models). */
+export function modelOptionsFor(engine: string): readonly SelectOption[] {
+  return engineProvider(engine) === "openai" ? CODEX_MODEL_OPTIONS : MODEL_OPTIONS;
+}
+
+/** The effort options for an engine's provider. */
+export function effortOptionsFor(engine: string): readonly SelectOption[] {
+  return engineProvider(engine) === "openai" ? CODEX_EFFORT_OPTIONS : EFFORT_OPTIONS;
+}
+
+/** Provider default model/effort sentinels (both "omit the flag"). */
+export function defaultModelFor(_engine: string): string {
+  return DEFAULT_MODEL; // "default" — claude Opus-1M or codex gpt-5.5 per provider
+}
+export function defaultEffortFor(_engine: string): string {
+  return DEFAULT_EFFORT; // "standard" — omit the effort override
+}
+
+/** Whether the composer shows the model selector for an engine. All three do —
+ *  but interactive's binds at spawn (see {@link modelIsSpawnPinned}). */
+export function engineShowsModel(_engine: string): boolean {
+  return true;
+}
+
+/** Whether the composer shows the effort selector. Interactive has no clean
+ *  per-launch effort knob (persistent claude session) → hidden there. */
+export function engineShowsEffort(engine: string): boolean {
+  return engine !== "interactive";
+}
+
+/** True when the model binds at session SPAWN rather than per-turn (interactive):
+ *  the selector is editable only until the thread's session exists, then locks. */
+export function modelIsSpawnPinned(engine: string): boolean {
+  return engine === "interactive";
+}
+
+/** Clamp a stored model pref to a value valid for the engine's provider — so a
+ *  claude alias held in the shared pref slot can't be sent to (or shown for)
+ *  codex, and vice-versa. Falls back to the provider default. */
+export function sanitizeModelFor(model: string, engine: string): string {
+  return modelOptionsFor(engine).some((o) => o.value === model) ? model : defaultModelFor(engine);
+}
+
+/** Clamp a stored effort pref to a value valid for the engine's provider. */
+export function sanitizeEffortFor(effort: string, engine: string): string {
+  return effortOptionsFor(engine).some((o) => o.value === effort)
+    ? effort
+    : defaultEffortFor(engine);
 }
 
 /** Engine rides as a concrete value (no sentinel-omit) — the server binds it

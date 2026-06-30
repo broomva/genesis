@@ -325,6 +325,31 @@ describe("codexArgs", () => {
     expect(args[args.length - 1]).toBe("--help me");
   });
 
+  test("forwards model via -m and effort via -c model_reasoning_effort (BRO-1623)", () => {
+    const args = codexArgs({ prompt: "p", cwd: "/repo", model: "gpt-5.5", effort: "high" });
+    expect(args).toContain("-m");
+    expect(args[args.indexOf("-m") + 1]).toBe("gpt-5.5");
+    expect(args).toContain("model_reasoning_effort=high");
+    // model/effort sit BEFORE the -- prompt boundary.
+    expect(args.indexOf("model_reasoning_effort=high")).toBeLessThan(args.indexOf("--"));
+    // resume path forwards them too.
+    const r = codexArgs({
+      prompt: "p",
+      cwd: "/repo",
+      resumeSessionId: "t",
+      model: "gpt-5.5",
+      effort: "minimal",
+    });
+    expect(r[r.indexOf("-m") + 1]).toBe("gpt-5.5");
+    expect(r).toContain("model_reasoning_effort=minimal");
+  });
+
+  test("omits -m / effort override when unset (codex uses its config defaults)", () => {
+    const args = codexArgs({ prompt: "p", cwd: "/repo" });
+    expect(args).not.toContain("-m");
+    expect(args.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+  });
+
   test("claude-shaped extraArgs are NOT forwarded to codex (would exit-2 brick it)", () => {
     // GENESIS_AGENT_ARGS (e.g. --dangerously-skip-permissions) is a claude flag;
     // codex's clap parser rejects unknown flags with exit 2. The engine boundary

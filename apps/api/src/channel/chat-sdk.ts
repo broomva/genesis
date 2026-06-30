@@ -8,7 +8,7 @@
 //   parts:   start · reasoning-* · text-* · tool-input/output-* · message-metadata · error · finish
 
 import type { TokenUsage } from "@genesis/projection";
-import { EFFORT_LEVELS, ENGINE_IDS, type EffortLevel } from "./types";
+import { CODEX_EFFORT_LEVELS, EFFORT_LEVELS, ENGINE_IDS, type EffortLevel } from "./types";
 import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
 
 /** Per-message metadata (BRO-1597) surfaced to `useChat` as `message.metadata`
@@ -72,14 +72,18 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   // BRO-1573 — the runner ALSO uses the equals-form as defense-in-depth).
   const modelRaw = typeof b.model === "string" ? b.model.trim() : "";
   const model = /^[A-Za-z0-9][\w.-]*$/.test(modelRaw) ? modelRaw : undefined;
-  const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
-  const effort = (EFFORT_LEVELS as readonly string[]).includes(effortRaw)
-    ? (effortRaw as EffortLevel)
-    : undefined;
   // Engine (BRO-1620) — validated against the allowlist; unknown dropped so the
-  // supervisor falls back to its default (and binds it sticky on turn 1).
+  // supervisor falls back to its default (and binds it sticky on turn 1). Parsed
+  // BEFORE effort because effort validates against the engine's PROVIDER set.
   const engineRaw = typeof b.engine === "string" ? b.engine.trim() : "";
   const engine = (ENGINE_IDS as readonly string[]).includes(engineRaw) ? engineRaw : undefined;
+  // Effort is provider-specific (BRO-1623): codex reasoning effort
+  // (minimal/low/medium/high) vs claude --effort (low…max). Validate against the
+  // engine's set so `minimal` never reaches claude and `xhigh`/`max` never reach
+  // codex — a cross-provider value is dropped (engine uses its own default).
+  const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
+  const effortSet: readonly string[] = engine === "codex" ? CODEX_EFFORT_LEVELS : EFFORT_LEVELS;
+  const effort = effortSet.includes(effortRaw) ? (effortRaw as EffortLevel) : undefined;
 
   return { threadId, text, model, effort, engine };
 }
