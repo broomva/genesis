@@ -424,18 +424,17 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
     handle.kill();
   }
 
-  if (
-    state.phase !== "done" &&
-    state.phase !== "blocked" &&
-    state.phase !== "awaiting" &&
-    exitCode !== 0
-  ) {
-    // Forced-blocked (nonzero exit with no terminal result): reconcile any tool
-    // part the truncated stream left "running" so the UI doesn't spin forever.
+  if (state.phase !== "done" && state.phase !== "blocked" && state.phase !== "awaiting") {
+    // The process is gone but the run never terminalized. This covers BOTH a
+    // nonzero exit AND a clean exit-0 that emitted no PARSED terminal — codex
+    // can stop with status 0 while parseCodexLine dropped every line (unknown/
+    // malformed), which would otherwise leave the run stuck "running" downstream
+    // (CodeRabbit). Force-block either way + reconcile any tool the truncated
+    // stream left "running" so the UI doesn't spin forever.
     state = {
       ...state,
       phase: "blocked",
-      error: `codex exited ${exitCode}`,
+      error: exitCode === 0 ? "codex ended without a result" : `codex exited ${exitCode}`,
       parts: reconcileStrandedParts(state.parts),
     };
   }

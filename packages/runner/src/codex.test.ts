@@ -517,4 +517,18 @@ describe("runCodex", () => {
     expect(r.state.phase).toBe("blocked");
     expect(r.state.error).toContain("codex exited 1");
   });
+
+  test("a CLEAN exit-0 with no parsed terminal still blocks (not stuck running)", async () => {
+    // codex stops with status 0 but every line was unknown/malformed → no parsed
+    // turn.completed → without the force-block the run looks active forever
+    // (CodeRabbit). exit 0 + non-terminal must still resolve to blocked.
+    const host = new FakeMicroVMHost([
+      '{"type":"thread.started","thread_id":"t"}',
+      '{"type":"thread.metadata","note":"unknown line, dropped"}',
+    ]);
+    const r = await runCodex({ prompt: "x", cwd: "/x", host });
+    expect(r.exitCode).toBe(0);
+    expect(r.state.phase).toBe("blocked");
+    expect(r.state.error).toContain("without a result");
+  });
 });
