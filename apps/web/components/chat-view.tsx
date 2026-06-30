@@ -63,6 +63,8 @@ import { recallDirection, recallStep } from "@/lib/input-history";
 import type { ThemeChoice } from "@/lib/preferences";
 import { parseSlash, slashHelpText } from "@/lib/slash";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
+import { useComposerAutoHide } from "@/lib/use-composer-autohide";
+import { cn } from "@/lib/utils";
 
 // Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
 // inline images, so only text-ish files are inlined as fenced blocks; anything
@@ -410,6 +412,53 @@ export function ChatView({
 
   const busy = status === "submitted" || status === "streaming";
 
+  // ── Mobile composer auto-hide (BRO-1626) ──
+  // The composer is a bottom OVERLAY over the scroller; on mobile it slides away
+  // when scrolling toward older messages (freeing reading space) and returns
+  // toward the newest. `stageRef` is the positioning context that also carries
+  // `--composer-h` (the live overlay height) so the scroller reserves matching
+  // bottom clearance and the scroll-to-end button rides above the composer.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLElement>(null);
+  const [composerFocused, setComposerFocused] = useState(false);
+
+  // Resolve the scroll viewport for the auto-hide hook (declared before the hook
+  // so the ref is populated first). Resolving by data-slot avoids depending on
+  // the message-scroller primitive forwarding a ref.
+  useEffect(() => {
+    const node =
+      stageRef.current?.querySelector<HTMLDivElement>('[data-slot="message-scroller-viewport"]') ??
+      null;
+    viewportRef.current = node;
+    if (!node && process.env.NODE_ENV !== "production") {
+      console.warn(
+        "[composer-autohide] scroll viewport not found ([data-slot=message-scroller-viewport]); auto-hide is disabled.",
+      );
+    }
+  }, []);
+
+  // Keep `--composer-h` in lockstep with the live composer height (it grows with a
+  // multi-line draft) so the last message never hides behind the overlay.
+  useEffect(() => {
+    const el = composerRef.current;
+    const stage = stageRef.current;
+    if (!el || !stage || typeof ResizeObserver === "undefined") return;
+    const sync = () => stage.style.setProperty("--composer-h", `${el.offsetHeight}px`);
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Hidden only on mobile, only when scrolling toward older messages, and never
+  // while focused / streaming / a notice is up (see the hook's overrides).
+  const composerHidden = useComposerAutoHide(viewportRef, {
+    focused: composerFocused,
+    streaming: busy,
+    forceShow: notice !== null,
+  });
+
   // Provider-aware model/effort (BRO-1623). The model/effort prefs are a shared
   // slot, but each engine belongs to a provider (claude vs OpenAI) with its own
   // valid values — so clamp to the engine's provider for display AND for the wire
@@ -537,193 +586,221 @@ export function ChatView({
         </div>
       </header>
 
-      <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor">
-        <MessageScroller className="min-h-0 flex-1">
-          <MessageScrollerViewport className="px-4">
-            <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 py-6">
-              {messages.length === 0 ? (
-                <div className="message-in flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
-                  <p className="text-foreground text-[1.375rem] font-semibold">
-                    Start a conversation
-                  </p>
-                  <p className="text-muted-foreground max-w-sm text-sm">
-                    Message the agent, or pick a starting point.
-                  </p>
-                  <Suggestions className="mt-2 justify-center">
-                    {STARTERS.map((s) => (
-                      <Suggestion key={s} suggestion={s} onClick={send} />
-                    ))}
-                  </Suggestions>
-                </div>
-              ) : (
-                messages.map((message, index) => {
-                  const isUser = message.role === "user";
-                  const isLast = index === messages.length - 1;
-                  return (
-                    <MessageScrollerItem
-                      key={message.id}
-                      messageId={message.id}
-                      scrollAnchor={isUser}
-                      className="message-in flex flex-col"
-                    >
-                      {isUser ? (
-                        // DS user bubble — soft cool-gray fill, asymmetric radius
-                        // (flat bottom-right corner), right-aligned. Never ink-filled.
-                        <div className="bg-[var(--bv-canvas-soft-2)] text-foreground ml-auto max-w-[78%] self-end rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
-                          {messageText(message)}
-                        </div>
-                      ) : (
-                        // DS assistant — plain ink text flowing on the canvas, no
-                        // bubble; reasoning · text · tool blocks render in order.
-                        <AssistantBody
-                          message={message}
-                          streaming={status === "streaming"}
-                          busy={busy}
-                          isLast={isLast}
-                          showReasoning={showReasoning}
-                          onRetry={() =>
-                            regenerate({
-                              messageId: message.id,
-                              body: {
-                                model: modelToBody(effModel),
-                                effort: engineShowsEffort(engine)
-                                  ? effortToBody(effEffort)
-                                  : undefined,
-                                engine: engineToBody(engine),
-                              },
-                            })
-                          }
-                          onAnswer={send}
-                        />
-                      )}
-                    </MessageScrollerItem>
-                  );
-                })
-              )}
-              {error ? (
-                <div role="alert" className="text-[var(--bv-danger)] text-sm">
-                  {error.message}
-                </div>
-              ) : null}
-            </MessageScrollerContent>
-          </MessageScrollerViewport>
-          <MessageScrollerButton direction="end" />
-        </MessageScroller>
-      </MessageScrollerProvider>
+      <div ref={stageRef} className="relative min-h-0 flex-1">
+        <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor">
+          <MessageScroller className="min-h-0">
+            <MessageScrollerViewport className="px-4">
+              <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[var(--composer-h,4.5rem)]">
+                {messages.length === 0 ? (
+                  <div className="message-in flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
+                    <p className="text-foreground text-[1.375rem] font-semibold">
+                      Start a conversation
+                    </p>
+                    <p className="text-muted-foreground max-w-sm text-sm">
+                      Message the agent, or pick a starting point.
+                    </p>
+                    <Suggestions className="mt-2 justify-center">
+                      {STARTERS.map((s) => (
+                        <Suggestion key={s} suggestion={s} onClick={send} />
+                      ))}
+                    </Suggestions>
+                  </div>
+                ) : (
+                  messages.map((message, index) => {
+                    const isUser = message.role === "user";
+                    const isLast = index === messages.length - 1;
+                    return (
+                      <MessageScrollerItem
+                        key={message.id}
+                        messageId={message.id}
+                        scrollAnchor={isUser}
+                        className="message-in flex flex-col"
+                      >
+                        {isUser ? (
+                          // DS user bubble — soft cool-gray fill, asymmetric radius
+                          // (flat bottom-right corner), right-aligned. Never ink-filled.
+                          <div className="bg-[var(--bv-canvas-soft-2)] text-foreground ml-auto max-w-[78%] self-end rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
+                            {messageText(message)}
+                          </div>
+                        ) : (
+                          // DS assistant — plain ink text flowing on the canvas, no
+                          // bubble; reasoning · text · tool blocks render in order.
+                          <AssistantBody
+                            message={message}
+                            streaming={status === "streaming"}
+                            busy={busy}
+                            isLast={isLast}
+                            showReasoning={showReasoning}
+                            onRetry={() =>
+                              regenerate({
+                                messageId: message.id,
+                                body: {
+                                  model: modelToBody(effModel),
+                                  effort: engineShowsEffort(engine)
+                                    ? effortToBody(effEffort)
+                                    : undefined,
+                                  engine: engineToBody(engine),
+                                },
+                              })
+                            }
+                            onAnswer={send}
+                          />
+                        )}
+                      </MessageScrollerItem>
+                    );
+                  })
+                )}
+                {error ? (
+                  <div role="alert" className="text-[var(--bv-danger)] text-sm">
+                    {error.message}
+                  </div>
+                ) : null}
+              </MessageScrollerContent>
+            </MessageScrollerViewport>
+            <MessageScrollerButton
+              direction="end"
+              style={{ bottom: "calc(var(--composer-h, 4.5rem) + 0.5rem)" }}
+              // (fallback agrees with the content's pb-[var(--composer-h,4.5rem)])
+            />
+          </MessageScroller>
+        </MessageScrollerProvider>
 
-      {/* No top divider — the composer floats with its frosted-blue halo, the one
-          dramatic depth cue. Messages blur behind the glass as they scroll under. */}
-      <footer className="shrink-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-        <div className="mx-auto w-full max-w-2xl">
-          {notice ? (
-            <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-xl border px-3 py-2 text-xs whitespace-pre-line">
-              <span>{notice}</span>
-              <button
-                type="button"
-                onClick={() => setNotice(null)}
-                aria-label="Dismiss"
-                className="hover:text-foreground -m-1 inline-flex shrink-0 items-center justify-center rounded-md p-1 transition-colors [@media(pointer:coarse)]:size-11"
-              >
-                <X className="size-3.5" />
-              </button>
-            </div>
-          ) : null}
-          <TooltipProvider>
-            {/* The Undertow breathes behind the glass composer while a turn is in
+        {/* The composer is a bottom OVERLAY over the scroller (BRO-1626): messages
+            scroll UNDER its frosted glass — the depth cue the design always intended
+            — and on mobile it slides toward older messages (freeing reading space),
+            returning toward the newest. translateY past the edge (not overflow-clip)
+            keeps the running halo intact. */}
+        <footer
+          ref={composerRef}
+          data-hidden={composerHidden ? "true" : undefined}
+          inert={composerHidden || undefined}
+          // Capture-phase focus tracking for the WHOLE composer — textarea, the
+          // model/effort selects, attach menu, and send button. A focused composer
+          // never auto-hides (so we never inert + blur the control being used,
+          // which on mobile would collapse the keyboard mid-typing). P20 BRO-1626.
+          onFocusCapture={() => setComposerFocused(true)}
+          onBlurCapture={(e) => setComposerFocused(e.currentTarget.contains(e.relatedTarget))}
+          className={cn(
+            "absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
+            "transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform motion-reduce:transition-none",
+            composerHidden
+              ? "pointer-events-none translate-y-[110%] opacity-0"
+              : "translate-y-0 opacity-100",
+          )}
+        >
+          <div className="mx-auto w-full max-w-2xl">
+            {notice ? (
+              <div className="text-muted-foreground border-border mb-2 flex items-start justify-between gap-2 rounded-xl border px-3 py-2 text-xs whitespace-pre-line">
+                <span>{notice}</span>
+                <button
+                  type="button"
+                  onClick={() => setNotice(null)}
+                  aria-label="Dismiss"
+                  className="hover:text-foreground -m-1 inline-flex shrink-0 items-center justify-center rounded-md p-1 transition-colors [@media(pointer:coarse)]:size-11"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ) : null}
+            <TooltipProvider>
+              {/* The Undertow breathes behind the glass composer while a turn is in
                 flight (BRO-1590) — the DS running signal as a composer
                 microinteraction. data-streaming gates the aura; idle is silent. */}
-            <div className="bv-composer-aura" data-streaming={busy ? "true" : undefined}>
-              {/* PromptInputProvider lifts the textarea state so input-history
+              <div className="bv-composer-aura" data-streaming={busy ? "true" : undefined}>
+                {/* PromptInputProvider lifts the textarea state so input-history
                   recall (BRO-1598) can write recalled text back through the
                   controller. Without it PromptInput stays self-managed and recall
                   can't reach the value. */}
-              <PromptInputProvider>
-                <PromptInput
-                  onSubmit={handleSubmit}
-                  multiple
-                  onError={(e) => setNotice(e.message)}
-                  className="bv-composer w-full"
-                >
-                  <PromptInputBody>
-                    <RecallTextarea history={userHistory} />
-                  </PromptInputBody>
-                  <PromptInputFooter>
-                    <PromptInputTools>
-                      <PromptInputActionMenu>
-                        <PromptInputActionMenuTrigger aria-label="Attach files">
-                          <Paperclip className="size-4" />
-                        </PromptInputActionMenuTrigger>
-                        <PromptInputActionMenuContent>
-                          <PromptInputActionAddAttachments label="Attach text files" />
-                        </PromptInputActionMenuContent>
-                      </PromptInputActionMenu>
-                      {/* Provider-aware model/effort (BRO-1623). Options follow the
+                <PromptInputProvider>
+                  <PromptInput
+                    onSubmit={handleSubmit}
+                    multiple
+                    onError={(e) => setNotice(e.message)}
+                    className="bv-composer w-full"
+                  >
+                    <PromptInputBody>
+                      <RecallTextarea history={userHistory} />
+                    </PromptInputBody>
+                    <PromptInputFooter>
+                      <PromptInputTools>
+                        <PromptInputActionMenu>
+                          <PromptInputActionMenuTrigger aria-label="Attach files">
+                            <Paperclip className="size-4" />
+                          </PromptInputActionMenuTrigger>
+                          <PromptInputActionMenuContent>
+                            <PromptInputActionAddAttachments label="Attach text files" />
+                          </PromptInputActionMenuContent>
+                        </PromptInputActionMenu>
+                        {/* Provider-aware model/effort (BRO-1623). Options follow the
                           engine's provider (claude aliases vs OpenAI models); the
                           model selector locks once an interactive thread's session
                           has spawned (its model binds at spawn). Effort is hidden
                           for interactive (no clean per-launch reasoning knob). */}
-                      {engineShowsModel(engine) ? (
-                        <PromptInputSelect
-                          value={effModel}
-                          onValueChange={onModelChange}
-                          disabled={modelLocked}
-                        >
-                          <PromptInputSelectTrigger
-                            aria-label={modelLocked ? "Model (locked — session running)" : "Model"}
+                        {engineShowsModel(engine) ? (
+                          <PromptInputSelect
+                            value={effModel}
+                            onValueChange={onModelChange}
+                            disabled={modelLocked}
                           >
-                            <PromptInputSelectValue />
-                          </PromptInputSelectTrigger>
-                          <PromptInputSelectContent>
-                            {modelOptionsFor(engine).map((o) => (
-                              <PromptInputSelectItem key={o.value} value={o.value}>
-                                {o.label}
-                              </PromptInputSelectItem>
-                            ))}
-                          </PromptInputSelectContent>
-                        </PromptInputSelect>
-                      ) : null}
-                      {engineShowsEffort(engine) ? (
-                        <PromptInputSelect value={effEffort} onValueChange={onEffortChange}>
-                          <PromptInputSelectTrigger aria-label="Effort">
-                            <PromptInputSelectValue />
-                          </PromptInputSelectTrigger>
-                          <PromptInputSelectContent>
-                            {effortOptionsFor(engine).map((o) => (
-                              <PromptInputSelectItem key={o.value} value={o.value}>
-                                {o.label}
-                              </PromptInputSelectItem>
-                            ))}
-                          </PromptInputSelectContent>
-                        </PromptInputSelect>
-                      ) : null}
-                    </PromptInputTools>
-                    {/* Right group: the context meter (BRO-1604) sits next to the
+                            <PromptInputSelectTrigger
+                              aria-label={
+                                modelLocked ? "Model (locked — session running)" : "Model"
+                              }
+                            >
+                              <PromptInputSelectValue />
+                            </PromptInputSelectTrigger>
+                            <PromptInputSelectContent>
+                              {modelOptionsFor(engine).map((o) => (
+                                <PromptInputSelectItem key={o.value} value={o.value}>
+                                  {o.label}
+                                </PromptInputSelectItem>
+                              ))}
+                            </PromptInputSelectContent>
+                          </PromptInputSelect>
+                        ) : null}
+                        {engineShowsEffort(engine) ? (
+                          <PromptInputSelect value={effEffort} onValueChange={onEffortChange}>
+                            <PromptInputSelectTrigger aria-label="Effort">
+                              <PromptInputSelectValue />
+                            </PromptInputSelectTrigger>
+                            <PromptInputSelectContent>
+                              {effortOptionsFor(engine).map((o) => (
+                                <PromptInputSelectItem key={o.value} value={o.value}>
+                                  {o.label}
+                                </PromptInputSelectItem>
+                              ))}
+                            </PromptInputSelectContent>
+                          </PromptInputSelect>
+                        ) : null}
+                      </PromptInputTools>
+                      {/* Right group: the context meter (BRO-1604) sits next to the
                         send button — a compact usage trigger that opens the breakdown
                         popover, off the top of the composer where it crowded spacing. */}
-                    <div className="flex items-center gap-1.5">
-                      <ContextMeter data={meterData} />
-                      {/* DS send — a circular primary-fill button with the DS up-arrow
+                      <div className="flex items-center gap-1.5">
+                        <ContextMeter data={meterData} />
+                        {/* DS send — a circular primary-fill button with the DS up-arrow
                   at rest. The component swaps in its own spinner/stop/error glyphs
                   for the in-flight states, so only the idle icon is overridden.
                   onStop → during a stream the button becomes type=button and aborts
                   directly (no form submit/reset), so text typed mid-stream isn't
                   wiped (P20 BRO-1573). handleSubmit's busy-guard is the Enter-key
                   fallback. */}
-                      <PromptInputSubmit
-                        status={status}
-                        onStop={stop}
-                        className="size-9 rounded-full"
-                      >
-                        {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
-                      </PromptInputSubmit>
-                    </div>
-                  </PromptInputFooter>
-                </PromptInput>
-              </PromptInputProvider>
-            </div>
-          </TooltipProvider>
-        </div>
-      </footer>
+                        <PromptInputSubmit
+                          status={status}
+                          onStop={stop}
+                          className="size-9 rounded-full"
+                        >
+                          {status === "ready" ? <ArrowUp className="size-4" /> : undefined}
+                        </PromptInputSubmit>
+                      </div>
+                    </PromptInputFooter>
+                  </PromptInput>
+                </PromptInputProvider>
+              </div>
+            </TooltipProvider>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }
