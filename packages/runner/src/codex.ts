@@ -42,9 +42,11 @@ import {
   reduce,
 } from "@genesis/projection";
 import {
+  CODEX_EFFORT_LEVELS,
   type RunOptions,
   type RunResult,
   ensureSessionWorktree,
+  isCodexModel,
   isGitRepo,
   removeWorktree,
   scrubAgentEnv,
@@ -81,18 +83,35 @@ function codexRunId(): string {
  * the sandbox shut for model-RUN commands; codex's own API call to OpenAI is
  * unaffected (it runs outside the command sandbox). P20 BRO-1621.
  *
- * `opts.extraArgs` is intentionally NOT forwarded — same reasoning as
- * model/effort below. `extraArgs` is the supervisor's `GENESIS_AGENT_ARGS`,
- * canonically claude flags (`--dangerously-skip-permissions`); codex's clap
- * parser rejects an unknown flag with exit 2, which would brick EVERY codex
- * turn on any host configured for claude. The engine boundary must not leak the
- * other vendor's global knobs (P20 BRO-1621, Forge cross-vendor finding).
+ * `opts.extraArgs` is intentionally NOT forwarded — `extraArgs` is the
+ * supervisor's `GENESIS_AGENT_ARGS`, canonically claude flags
+ * (`--dangerously-skip-permissions`); codex's clap parser rejects an unknown
+ * flag with exit 2, which would brick EVERY codex turn on any host configured
+ * for claude. The engine boundary must not leak the other vendor's global knobs
+ * (P20 BRO-1621, Forge cross-vendor finding).
  *
- * v1 does NOT forward `opts.model` / `opts.effort`: codex models are auth-tier
- * gated (a subscription tier 400s on an unavailable model) and the per-turn
- * model/effort UI is hidden for codex (BRO-1621). codex uses its own
- * `~/.codex/config.toml` defaults (e.g. gpt-5.5 / reasoning high).
+ * `opts.model` / `opts.effort` ARE forwarded provider-correctly (BRO-1623): the
+ * UI now sends OpenAI values for codex (a model via `-m`, reasoning effort via
+ * `-c model_reasoning_effort=<level>`), so per-turn control works like print.
+ * Both are omitted when unset → codex falls back to its `~/.codex/config.toml`
+ * defaults (e.g. gpt-5.5). An auth-tier-gated model still 400s, but the picker
+ * only offers models the subscription supports, and a 400 maps to a blocked
+ * turn via parseCodexLine (graceful). model/effort go BEFORE `--` (flags), and
+ * the model rides `-m <value>` as a separate argv element (no shell; the value
+ * is allowlist-validated upstream in parseChatRequest).
  */
+function codexModelEffortArgs(opts: RunOptions): string[] {
+  const extra: string[] = [];
+  // Vendor-boundary drop (BRO-1623, P20): only OpenAI-shaped models + codex
+  // reasoning levels reach codex's flags; a claude alias (sticky-engine
+  // divergence / raw curl) is dropped → codex's config default, never `-m opus`.
+  if (opts.model && isCodexModel(opts.model)) extra.push("-m", opts.model);
+  if (opts.effort && (CODEX_EFFORT_LEVELS as readonly string[]).includes(opts.effort)) {
+    extra.push("-c", `model_reasoning_effort=${opts.effort}`);
+  }
+  return extra;
+}
+
 export function codexArgs(opts: RunOptions): string[] {
   const bin = opts.agentBin ?? "codex";
   if (opts.resumeSessionId) {
@@ -109,6 +128,7 @@ export function codexArgs(opts: RunOptions): string[] {
       "approval_policy=never",
       "-c",
       "sandbox_workspace_write.network_access=false",
+      ...codexModelEffortArgs(opts),
       "--",
       opts.prompt,
     ];
@@ -124,6 +144,7 @@ export function codexArgs(opts: RunOptions): string[] {
     "approval_policy=never",
     "-c",
     "sandbox_workspace_write.network_access=false",
+    ...codexModelEffortArgs(opts),
     "--",
     opts.prompt,
   ];

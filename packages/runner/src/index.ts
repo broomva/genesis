@@ -12,11 +12,42 @@ import {
   reduce,
 } from "@genesis/projection";
 
-/** Claude's native `--effort` flag enum (BRO-1573). Thinking only meaningfully
- *  engages at xhigh/max under subscription auth; there is no "off" level. */
-export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+/** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
+ *  providers; the per-provider arrays below gate which reach which engine —
+ *  `minimal` is codex-only, `xhigh`/`max` are claude-only. */
+export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+/** Claude's native `--effort` flag enum (BRO-1573) — print + interactive. Thinking
+ *  only meaningfully engages at xhigh/max under subscription auth; no "off" level. */
 export const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** codex `-c model_reasoning_effort=<level>` values (BRO-1623) — OpenAI reasoning
+ *  effort. `minimal` is codex-only; codex has no xhigh/max. */
+export const CODEX_EFFORT_LEVELS: readonly EffortLevel[] = ["minimal", "low", "medium", "high"];
+
+// ── Provider model/effort guards (BRO-1623, P20 Forge MUST-FIX) ─────────────
+// Engine binding is STICKY (BRO-1620): the request's engine is advisory after a
+// thread's first turn, so a later request can carry an effort/model meant for a
+// DIFFERENT provider than the one that actually runs. The UI clamps to the bound
+// engine, but the server is a standalone channel ("any useChat client or curl"),
+// so the vendor boundary — the runner that builds the argv — is where we drop an
+// out-of-provider value, robustly for every caller regardless of how the
+// supervisor resolved the engine. A dropped value → the engine's own default.
+
+const CLAUDE_MODEL_ALIASES = new Set(["opus", "sonnet", "haiku", "fable"]);
+
+/** A model claude's `--model` accepts: an alias (opus/sonnet/haiku/fable) or a
+ *  full `claude-*` id. An OpenAI id (gpt-*, o3, …) is rejected so it can't reach
+ *  the claude runner. */
+export function isClaudeModel(model: string): boolean {
+  return CLAUDE_MODEL_ALIASES.has(model) || model.startsWith("claude");
+}
+
+/** A model codex's `-m` accepts: an OpenAI id (gpt-*, o<n>, codex-*). A claude
+ *  alias is rejected so it can't reach the codex runner (where it would 400). */
+export function isCodexModel(model: string): boolean {
+  return /^(gpt|o\d|codex)/i.test(model);
+}
 
 export interface RunOptions {
   prompt: string;
@@ -132,8 +163,13 @@ function agentArgs(opts: RunOptions): string[] {
   // caller smuggled a dash-prefixed string past validation — defense-in-depth on
   // top of the parseChatRequest allowlist (P20 BRO-1573). Verified claude accepts
   // both `--model=haiku` and `--effort=max`.
-  if (opts.model) args.push(`--model=${opts.model}`);
-  if (opts.effort) args.push(`--effort=${opts.effort}`);
+  // Vendor-boundary drop (BRO-1623, P20): only claude-shaped models + claude
+  // effort levels reach claude's flags; a codex value (sticky-engine divergence
+  // or a raw curl) is dropped → claude's default, never `--model=gpt-5.5`.
+  if (opts.model && isClaudeModel(opts.model)) args.push(`--model=${opts.model}`);
+  if (opts.effort && (EFFORT_LEVELS as readonly string[]).includes(opts.effort)) {
+    args.push(`--effort=${opts.effort}`);
+  }
   return args;
 }
 

@@ -17,10 +17,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
-  EFFORT_OPTIONS,
   ENGINE_OPTIONS,
-  MODEL_OPTIONS,
   type SelectOption,
+  effortOptionsFor,
+  engineShowsModel,
+  modelOptionsFor,
+  sanitizeEffortFor,
+  sanitizeModelFor,
 } from "@/lib/chat-options";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
@@ -195,22 +198,36 @@ export function SettingsSheet({
                   ))}
                 </SegmentedControl>
               </Row>
-              <Row
-                label="Default model"
-                hint="Seeds new chats; change it per turn in the composer."
-              >
-                <PrefSelect
-                  value={prefs.model}
-                  options={MODEL_OPTIONS}
-                  onValueChange={(v) => onUpdate({ model: v })}
-                  ariaLabel="Default model"
-                />
-              </Row>
+              {/* Model/effort options follow the selected engine's PROVIDER
+                  (BRO-1623) — claude aliases for print/interactive, OpenAI for
+                  codex. The model row hides when the provider has a single model
+                  (codex → gpt-5.5). The effort row is ALWAYS shown (it seeds the
+                  provider's default for new chats, regardless of which engine is
+                  the default); codex effort is a separate pref from claude. */}
+              {engineShowsModel(prefs.engine) ? (
+                <Row
+                  label="Default model"
+                  hint="Seeds new chats; change it per turn in the composer."
+                >
+                  <PrefSelect
+                    value={sanitizeModelFor(prefs.model, prefs.engine)}
+                    options={modelOptionsFor(prefs.engine)}
+                    onValueChange={(v) => onUpdate({ model: v })}
+                    ariaLabel="Default model"
+                  />
+                </Row>
+              ) : null}
               <Row label="Default effort" hint="Higher effort engages extended thinking.">
                 <PrefSelect
-                  value={prefs.effort}
-                  options={EFFORT_OPTIONS}
-                  onValueChange={(v) => onUpdate({ effort: v })}
+                  value={
+                    prefs.engine === "codex"
+                      ? sanitizeEffortFor(prefs.codexEffort, prefs.engine)
+                      : sanitizeEffortFor(prefs.effort, prefs.engine)
+                  }
+                  options={effortOptionsFor(prefs.engine)}
+                  onValueChange={(v) =>
+                    onUpdate(prefs.engine === "codex" ? { codexEffort: v } : { effort: v })
+                  }
                   ariaLabel="Default effort"
                 />
               </Row>

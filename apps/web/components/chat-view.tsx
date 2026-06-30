@@ -32,7 +32,7 @@ import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ToolPart } from "@/components/ai-elements/tool";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
-import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
+import { MessageActions, RunTimer } from "@/components/message-actions";
 import { QuestionCard } from "@/components/question-card";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
@@ -47,13 +47,17 @@ import {
 } from "@/components/ui/message-scroller";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
-  EFFORT_OPTIONS,
-  MODEL_OPTIONS,
   contextWindowFor,
+  effortOptionsFor,
   effortToBody,
+  engineShowsEffort,
+  engineShowsModel,
   engineToBody,
-  engineUsesModelControls,
+  modelIsSpawnPinned,
+  modelOptionsFor,
   modelToBody,
+  sanitizeEffortFor,
+  sanitizeModelFor,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
 import type { ThemeChoice } from "@/lib/preferences";
@@ -344,13 +348,6 @@ function RecallTextarea({ history }: { history: readonly string[] }) {
   );
 }
 
-// Copy the current composer text (BRO-1610). Reads the live value from the
-// PromptInput controller; disabled (via CopyButton) when the input is empty.
-function ComposerCopyButton() {
-  const { textInput } = usePromptInputController();
-  return <CopyButton text={textInput.value} label="Copy input" />;
-}
-
 /** One chat thread. Remounted by the parent with a `key={threadId}`, so `useChat`
  *  is constructed fresh per thread with the right `id` (→ engine threadId routing)
  *  and hydrated `initialMessages`. `onActivity` fires when a turn finishes so the
@@ -406,6 +403,17 @@ export function ChatView({
 
   const busy = status === "submitted" || status === "streaming";
 
+  // Provider-aware model/effort (BRO-1623). The model/effort prefs are a shared
+  // slot, but each engine belongs to a provider (claude vs OpenAI) with its own
+  // valid values — so clamp to the engine's provider for display AND for the wire
+  // (a claude alias must never reach codex). Clamping at DISPLAY (not overwriting
+  // the pref) preserves the other provider's choice across an engine switch.
+  const effModel = sanitizeModelFor(model, engine);
+  const effEffort = sanitizeEffortFor(effort, engine);
+  // Interactive binds its model at session SPAWN; once the thread has produced an
+  // assistant turn the live session exists and the model is locked (BRO-1623).
+  const modelLocked = modelIsSpawnPinned(engine) && messages.some((m) => m.role === "assistant");
+
   // Session usage for the composer context meter (BRO-1597). Sum cost + tokens
   // over assistant turns — live message-metadata and hydrated history both land
   // on `message.metadata` — and take the LATEST assistant usage as the current
@@ -433,14 +441,14 @@ export function ChatView({
     const contextTokens = latest ? latest.input + latest.cacheRead + latest.cacheCreation : 0;
     return {
       contextTokens,
-      contextWindow: contextWindowFor(model),
+      contextWindow: contextWindowFor(effModel, engine),
       costUsd,
       sessionInput,
       sessionOutput,
       sessionCacheRead,
       sessionCacheWrite,
     };
-  }, [messages, model]);
+  }, [messages, effModel, engine]);
 
   // The thread's user-message texts (oldest → newest) for input-history recall
   // (BRO-1598) — the ArrowUp/ArrowDown stack in the composer.
@@ -458,8 +466,10 @@ export function ChatView({
       { text },
       {
         body: {
-          model: modelToBody(model),
-          effort: effortToBody(effort),
+          model: modelToBody(effModel),
+          // Only send effort for an engine that consumes it (interactive ignores
+          // it — persistent session, no per-launch knob) — BRO-1623 P20.
+          effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
           engine: engineToBody(engine),
         },
       },
@@ -568,8 +578,10 @@ export function ChatView({
                             regenerate({
                               messageId: message.id,
                               body: {
-                                model: modelToBody(model),
-                                effort: effortToBody(effort),
+                                model: modelToBody(effModel),
+                                effort: engineShowsEffort(engine)
+                                  ? effortToBody(effEffort)
+                                  : undefined,
                                 engine: engineToBody(engine),
                               },
                             })
@@ -638,39 +650,44 @@ export function ChatView({
                           <PromptInputActionAddAttachments label="Attach text files" />
                         </PromptInputActionMenuContent>
                       </PromptInputActionMenu>
-                      {/* Copy the current input (BRO-1610). */}
-                      <ComposerCopyButton />
-                      {/* Some engines ignore per-turn model/effort — interactive
-                          pins them at session spawn, codex reads its own config
-                          (auth-tier-gated models). Hide the selectors for those;
-                          only print honors them (BRO-1620/1621). */}
-                      {engineUsesModelControls(engine) ? (
-                        <>
-                          <PromptInputSelect value={model} onValueChange={onModelChange}>
-                            <PromptInputSelectTrigger aria-label="Model">
-                              <PromptInputSelectValue />
-                            </PromptInputSelectTrigger>
-                            <PromptInputSelectContent>
-                              {MODEL_OPTIONS.map((o) => (
-                                <PromptInputSelectItem key={o.value} value={o.value}>
-                                  {o.label}
-                                </PromptInputSelectItem>
-                              ))}
-                            </PromptInputSelectContent>
-                          </PromptInputSelect>
-                          <PromptInputSelect value={effort} onValueChange={onEffortChange}>
-                            <PromptInputSelectTrigger aria-label="Effort">
-                              <PromptInputSelectValue />
-                            </PromptInputSelectTrigger>
-                            <PromptInputSelectContent>
-                              {EFFORT_OPTIONS.map((o) => (
-                                <PromptInputSelectItem key={o.value} value={o.value}>
-                                  {o.label}
-                                </PromptInputSelectItem>
-                              ))}
-                            </PromptInputSelectContent>
-                          </PromptInputSelect>
-                        </>
+                      {/* Provider-aware model/effort (BRO-1623). Options follow the
+                          engine's provider (claude aliases vs OpenAI models); the
+                          model selector locks once an interactive thread's session
+                          has spawned (its model binds at spawn). Effort is hidden
+                          for interactive (no clean per-launch reasoning knob). */}
+                      {engineShowsModel(engine) ? (
+                        <PromptInputSelect
+                          value={effModel}
+                          onValueChange={onModelChange}
+                          disabled={modelLocked}
+                        >
+                          <PromptInputSelectTrigger
+                            aria-label={modelLocked ? "Model (locked — session running)" : "Model"}
+                          >
+                            <PromptInputSelectValue />
+                          </PromptInputSelectTrigger>
+                          <PromptInputSelectContent>
+                            {modelOptionsFor(engine).map((o) => (
+                              <PromptInputSelectItem key={o.value} value={o.value}>
+                                {o.label}
+                              </PromptInputSelectItem>
+                            ))}
+                          </PromptInputSelectContent>
+                        </PromptInputSelect>
+                      ) : null}
+                      {engineShowsEffort(engine) ? (
+                        <PromptInputSelect value={effEffort} onValueChange={onEffortChange}>
+                          <PromptInputSelectTrigger aria-label="Effort">
+                            <PromptInputSelectValue />
+                          </PromptInputSelectTrigger>
+                          <PromptInputSelectContent>
+                            {effortOptionsFor(engine).map((o) => (
+                              <PromptInputSelectItem key={o.value} value={o.value}>
+                                {o.label}
+                              </PromptInputSelectItem>
+                            ))}
+                          </PromptInputSelectContent>
+                        </PromptInputSelect>
                       ) : null}
                     </PromptInputTools>
                     {/* Right group: the context meter (BRO-1604) sits next to the

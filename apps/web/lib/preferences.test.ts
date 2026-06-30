@@ -14,11 +14,28 @@ describe("sanitizePreferences (BRO-1618)", () => {
     const p = {
       model: "opus",
       effort: "high",
+      codexEffort: "minimal",
       theme: "dark",
       showReasoning: false,
       engine: "print",
     };
     expect(sanitizePreferences(p)).toEqual(p);
+  });
+
+  test("codexEffort is a separate slot — a codex value survives reload (BRO-1623)", () => {
+    // codex-only "minimal" must round-trip (it's invalid for claude but valid for
+    // codex); the shared-slot clobber is gone because effort/codexEffort are split.
+    const out = sanitizePreferences({ effort: "max", codexEffort: "minimal" });
+    expect(out.effort).toBe("max"); // claude pick preserved
+    expect(out.codexEffort).toBe("minimal"); // codex pick preserved, independently
+    // a missing codexEffort defaults (doesn't borrow `effort`)
+    expect(sanitizePreferences({ effort: "high" }).codexEffort).toBe(
+      DEFAULT_PREFERENCES.codexEffort,
+    );
+    // a junk codexEffort falls back
+    expect(sanitizePreferences({ codexEffort: "ultra" }).codexEffort).toBe(
+      DEFAULT_PREFERENCES.codexEffort,
+    );
   });
 
   test("unknown engine falls back to default; known engine kept (BRO-1620)", () => {

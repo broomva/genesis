@@ -183,6 +183,17 @@ export default function ChatPage() {
   // bulletproof full-screen technique for iOS standalone PWAs, where `100dvh`
   // under-resolves (reports shorter than the real screen → a dark band below the
   // composer, BRO-1582). Header/footer carry the safe-area insets.
+  // The active thread's BOUND engine gates the composer's per-turn controls
+  // (BRO-1620 P20 F) and routes the effort pref to the right PROVIDER slot
+  // (BRO-1623 P20): codex effort is a separate pref from claude effort, so a
+  // codex pick never clobbers the claude one. A never-run thread inherits the
+  // global default engine until its first turn binds it.
+  const activeThread = threads.find((t) => t.threadId === activeThreadId);
+  const activeEngine = activeThread?.engine ?? prefs.engine;
+  const activeEffort = activeEngine === "codex" ? prefs.codexEffort : prefs.effort;
+  const setActiveEffort = (value: string) =>
+    update(activeEngine === "codex" ? { codexEffort: value } : { effort: value });
+
   return (
     <div className="bg-background text-foreground fixed inset-0 flex overflow-hidden">
       <ThreadDrawer
@@ -210,16 +221,13 @@ export default function ChatPage() {
             onMenuClick={() => setDrawerOpen(true)}
             onNewThread={newThread}
             model={prefs.model}
-            effort={prefs.effort}
+            effort={activeEffort}
             onModelChange={(value) => update({ model: value })}
-            onEffortChange={(value) => update({ effort: value })}
+            onEffortChange={setActiveEffort}
             showReasoning={prefs.showReasoning}
             theme={prefs.theme}
             onThemeChange={(theme) => update({ theme })}
-            // The thread's BOUND engine gates the composer's per-turn controls
-            // (BRO-1620 P20 F); a never-run thread inherits the global pref until
-            // its first turn binds it.
-            engine={threads.find((t) => t.threadId === activeThreadId)?.engine ?? prefs.engine}
+            engine={activeEngine}
           />
         ) : (
           <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">

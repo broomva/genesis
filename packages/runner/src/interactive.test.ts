@@ -44,6 +44,9 @@ class FakeHub implements EngineHub {
   listeners = new Set<Listener>();
   sessions: FakeSession[] = [];
   createCalls = 0;
+  /** The opts of the most recent createSession — lets a test assert spawn args
+   *  (e.g. the BRO-1623 `--model` injection). */
+  lastCreateOpts?: { sessionId?: string; initialPrompt?: string; extraArgs?: string[] };
   stopped = false;
   /** Script: IR events (minus sessionId) emitted after each spawn/send.
    *  `drainScript` (optional): transcript-only events the engine pulls in when it
@@ -61,8 +64,13 @@ class FakeHub implements EngineHub {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
-  async createSession(opts: { sessionId?: string; initialPrompt?: string }): Promise<FakeSession> {
+  async createSession(opts: {
+    sessionId?: string;
+    initialPrompt?: string;
+    extraArgs?: string[];
+  }): Promise<FakeSession> {
     this.createCalls += 1;
+    this.lastCreateOpts = opts;
     const id = opts.sessionId ?? "fake-session";
     // Default drain mirrors reality: the transcript always receives the assistant
     // entry shortly after turn.complete, which ends the engine's bounded drain
@@ -379,6 +387,25 @@ describe("createInteractiveEngine", () => {
     expect(hub.createCalls).toBe(1); // ONE persistent session
     expect(hub.sessions[0]?.sent).toEqual(["turn two"]); // 2nd turn via send()
     expect(result2.state.phase).toBe("done");
+    await engine.shutdown();
+  });
+
+  test("opts.model injects --model into the session spawn args (BRO-1623)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "delta"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "sm" };
+    await engine.run({ ...opts, prompt: "one", model: "sonnet" });
+    const extra = hub.lastCreateOpts?.extraArgs ?? [];
+    expect(extra).toContain("--model");
+    expect(extra[extra.indexOf("--model") + 1]).toBe("sonnet");
+    await engine.shutdown();
+  });
+
+  test("no opts.model → no --model in the spawn args", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "eps"));
+    const engine = createInteractiveEngine({ hub });
+    await engine.run({ cwd: "/x", worktree: false as const, sessionKey: "sn", prompt: "one" });
+    expect(hub.lastCreateOpts?.extraArgs ?? []).not.toContain("--model");
     await engine.shutdown();
   });
 

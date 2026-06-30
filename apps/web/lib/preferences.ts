@@ -39,7 +39,13 @@ export function isKnownTheme(value: unknown): value is ThemeChoice {
  *  (theme/showReasoning). Engine selection (BRO-1620) lands here later. */
 export interface Preferences {
   model: string;
+  /** Claude effort (print) — see {@link codexEffort} for codex. */
   effort: string;
+  /** codex reasoning effort, a SEPARATE slot from `effort` (BRO-1623, P20): the
+   *  two providers have different effort sets, so sharing one slot let a codex
+   *  pick (e.g. "minimal") silently clobber a still-valid claude pick on the next
+   *  engine switch. Provider-scoped slots end the clobber. */
+  codexEffort: string;
   theme: ThemeChoice;
   /** Render-gate for the reasoning ("Reasoned") panel (BRO-1614/1616). */
   showReasoning: boolean;
@@ -52,6 +58,7 @@ export interface Preferences {
 export const DEFAULT_PREFERENCES: Preferences = {
   model: DEFAULT_MODEL,
   effort: DEFAULT_EFFORT,
+  codexEffort: DEFAULT_EFFORT,
   theme: DEFAULT_THEME,
   showReasoning: true,
   engine: DEFAULT_ENGINE,
@@ -67,9 +74,13 @@ export function sanitizePreferences(raw: unknown): Preferences {
   const model = typeof o.model === "string" && isKnownModel(o.model) ? o.model : DEFAULT_MODEL;
   const effort =
     typeof o.effort === "string" && isKnownEffort(o.effort) ? o.effort : DEFAULT_EFFORT;
+  const codexEffort =
+    typeof o.codexEffort === "string" && isKnownEffort(o.codexEffort)
+      ? o.codexEffort
+      : DEFAULT_EFFORT;
   const theme = isKnownTheme(o.theme) ? o.theme : DEFAULT_THEME;
   const showReasoning = typeof o.showReasoning === "boolean" ? o.showReasoning : true;
   const engine =
     typeof o.engine === "string" && isKnownEngine(o.engine) ? o.engine : DEFAULT_ENGINE;
-  return { model, effort, theme, showReasoning, engine };
+  return { model, effort, codexEffort, theme, showReasoning, engine };
 }

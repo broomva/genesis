@@ -22,7 +22,7 @@ import { LocalHost } from "@genesis/host";
 import { type AgentEvent, type RunState, initialState, reduce } from "@genesis/projection";
 import type { IREvent, PermissionPolicy } from "@genesis/session-host";
 import { SessionHub } from "@genesis/session-host";
-import { type RunOptions, type RunResult, ensureSessionWorktree } from "./index";
+import { type RunOptions, type RunResult, ensureSessionWorktree, isClaudeModel } from "./index";
 import { interceptSlashCommand } from "./slash";
 
 /** Minimal hub surface the engine needs — SessionHub satisfies it
@@ -490,7 +490,17 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           pin: cfg.pin,
           bin: cfg.bin,
           initialPrompt: opts.prompt,
-          extraArgs: opts.extraArgs,
+          // Model binds at SPAWN (BRO-1623): the interactive session is persistent,
+          // so per-turn model changes don't apply — but the thread's FIRST turn
+          // can launch claude with --model, pinning it for the session's life
+          // (the UI locks the selector once the thread has run). Only a claude-
+          // shaped model is injected (vendor-boundary drop, P20) — a stray codex
+          // id never reaches claude's --model. Appended after extraArgs so a
+          // caller-supplied --model would still win (last-wins).
+          extraArgs:
+            opts.model && isClaudeModel(opts.model)
+              ? [...(opts.extraArgs ?? []), "--model", opts.model]
+              : opts.extraArgs,
         });
         live.set(key, entry);
         armNudge();
