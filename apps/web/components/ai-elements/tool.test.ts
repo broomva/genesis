@@ -23,6 +23,12 @@ describe("humanizeSkill (BRO-1625)", () => {
     expect(humanizeSkill("_leading_trailing_")).toBe("Leading Trailing");
   });
 
+  test("only forces the first char up — an already-cased tail is preserved", () => {
+    // Acronyms / mixed-case tokens keep their tail; only the leading char is raised.
+    expect(humanizeSkill("p9")).toBe("P9");
+    expect(humanizeSkill("HTTP-api")).toBe("HTTP Api");
+  });
+
   test("falls back to the trimmed raw slug when nothing tokenizes", () => {
     expect(humanizeSkill("   ")).toBe("");
     expect(humanizeSkill("::")).toBe("::");

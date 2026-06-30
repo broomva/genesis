@@ -415,7 +415,8 @@ export function ToolPart({ part }: { part: AnyToolPart }) {
 
 /** A skill slug → human label. `kg` → "Kg", `knowledge-graph-memory` →
  *  "Knowledge Graph Memory", `broomva:bookkeeping` → "Bookkeeping" (namespace
- *  dropped — the skill's own name is what reads). Whitespace/case normalized. */
+ *  dropped — the skill's own name is what reads). Separators collapse to spaces
+ *  and each word is title-cased; an acronym-ish token keeps its tail (`p9` → `P9`). */
 export function humanizeSkill(slug: string): string {
   const base = slug.includes(":") ? slug.slice(slug.lastIndexOf(":") + 1) : slug;
   const words = base
@@ -484,7 +485,12 @@ export function SkillPart({ part }: { part: AnyToolPart }) {
         </span>
         <span className="flex min-w-0 flex-col">
           <span className="text-foreground truncate text-sm font-medium leading-tight">{name}</span>
-          <span className="text-muted-foreground text-[0.7rem] font-medium uppercase leading-tight tracking-wide">
+          <span
+            // Announce the activation transition (Activating… → activated / failed)
+            // — a skill activation is a notable event worth a live region (P20).
+            role={errored ? "alert" : "status"}
+            className="text-muted-foreground text-[0.7rem] font-medium uppercase leading-tight tracking-wide"
+          >
             {status}
           </span>
         </span>
@@ -495,7 +501,7 @@ export function SkillPart({ part }: { part: AnyToolPart }) {
         ) : (
           <span className="ml-auto" />
         )}
-        {running ? <span className="bv-dot-live shrink-0" aria-label="activating" /> : null}
+        {running ? <span className="bv-dot-live shrink-0" aria-hidden /> : null}
         {detail ? (
           <ChevronDownIcon
             aria-hidden
@@ -503,13 +509,15 @@ export function SkillPart({ part }: { part: AnyToolPart }) {
           />
         ) : null}
       </CollapsibleTrigger>
+      {/* Mobile args line — independent of `detail` so a skill with args but no
+          captured output still shows them (the header preview is sm:block-only). */}
+      {args ? (
+        <div className="text-muted-foreground break-words px-3 pb-2 font-mono text-xs sm:hidden">
+          {args}
+        </div>
+      ) : null}
       {detail ? (
-        <CollapsibleContent className="space-y-2 px-3 pb-3 pt-1">
-          {args ? (
-            <div className="text-muted-foreground break-words font-mono text-xs sm:hidden">
-              {args}
-            </div>
-          ) : null}
+        <CollapsibleContent className="px-3 pb-3 pt-1">
           <Mono text={detail} tone={errored ? "danger" : "muted"} />
         </CollapsibleContent>
       ) : null}
