@@ -64,7 +64,7 @@ function runId(): string {
   return `run-${Math.floor(performance.now()).toString(36)}-${process.pid.toString(36)}`;
 }
 
-async function isGitRepo(host: ExecutionHost, cwd: string): Promise<boolean> {
+export async function isGitRepo(host: ExecutionHost, cwd: string): Promise<boolean> {
   const r = await host.exec(["git", "rev-parse", "--is-inside-work-tree"], { cwd });
   return r.code === 0 && r.stdout.trim() === "true";
 }
@@ -274,3 +274,13 @@ export { interceptSlashCommand, TUI_BUILTIN_COMMANDS } from "./slash";
 // Session observability (BRO-1519) — re-exported so the api wires the logger
 // without a direct @genesis/session-host dependency.
 export { RunLogger, type RunLoggerOptions, type IREvent } from "@genesis/session-host";
+
+// Codex engine (BRO-1621) — the second harness (OpenAI codex CLI), a RunnerFn
+// sibling of runAgent behind the same Supervisor seam. See ./codex.ts.
+export {
+  codexArgs,
+  codexEnv,
+  parseCodexLine,
+  parseCodexStream,
+  runCodex,
+} from "./codex";
