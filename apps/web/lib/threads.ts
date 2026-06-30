@@ -38,6 +38,12 @@ export interface ThreadSummary {
    *  model/effort controls on the THREAD's engine, not the global pref. Absent on
    *  a never-run thread (it inherits the pref until its first turn binds it). */
   engine?: string;
+  /** The thread's bound workspace (BRO-1627) — id + display name, so the drawer +
+   *  composer show which repo the thread runs in. Absent on a never-run thread (it
+   *  inherits the workspace pref until its first turn binds it); `workspaceName` is
+   *  absent if the workspace was deconfigured since binding. */
+  workspaceId?: string;
+  workspaceName?: string;
 }
 
 /** Mirror of the engine's TurnPart (packages/projection) — the persisted ordered

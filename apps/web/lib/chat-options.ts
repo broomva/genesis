@@ -204,3 +204,22 @@ export function sanitizeEffortFor(effort: string, engine: string): string {
 export function engineToBody(engine: string): string {
   return engine;
 }
+
+// ── Workspace (BRO-1627) ──
+// The repo/dir a thread's agent runs in. Chosen for a NEW thread, bound sticky on
+// its first turn (switching = a new thread). The selectable set is server-dynamic
+// (GET /workspaces), so unlike engine there's no static option list here.
+
+/** Workspace rides as a concrete id — the server binds it sticky at session
+ *  create, validating against its registry (unknown/"" → its default). "" (no
+ *  explicit choice) → omit, so the server picks its default workspace. */
+export function workspaceToBody(workspace: string): string | undefined {
+  return workspace ? workspace : undefined;
+}
+
+/** Show the workspace picker only when there's a real choice (>1) — mirrors the
+ *  single-option suppression of the model picker, so single-workspace deploys
+ *  see no new control. */
+export function workspaceShowsPicker(count: number): boolean {
+  return count > 1;
+}

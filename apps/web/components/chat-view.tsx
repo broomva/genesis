@@ -58,6 +58,8 @@ import {
   modelToBody,
   sanitizeEffortFor,
   sanitizeModelFor,
+  workspaceShowsPicker,
+  workspaceToBody,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
 import type { ThemeChoice } from "@/lib/preferences";
@@ -65,6 +67,7 @@ import { parseSlash, slashHelpText } from "@/lib/slash";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
 import { useComposerAutoHide } from "@/lib/use-composer-autohide";
 import { cn } from "@/lib/utils";
+import type { Workspace } from "@/lib/workspaces";
 
 // Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
 // inline images, so only text-ish files are inlined as fenced blocks; anything
@@ -376,6 +379,9 @@ export function ChatView({
   theme,
   onThemeChange,
   engine,
+  workspace,
+  workspaces,
+  onWorkspaceChange,
 }: {
   threadId: string;
   initialMessages: UIMessage[];
@@ -399,6 +405,12 @@ export function ChatView({
    *  first turn). Interactive ignores per-turn model/effort, so those selectors
    *  are hidden when it's active. */
   engine: string;
+  /** Selected workspace id (BRO-1627) — the repo the thread runs in, sent on the
+   *  first turn (sticky at session create). Locked once the thread has run. */
+  workspace: string;
+  /** The selectable workspaces; the picker self-hides when there's ≤1. */
+  workspaces: Workspace[];
+  onWorkspaceChange: (value: string) => void;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
   const { messages, sendMessage, status, error, stop, regenerate } = useChat({
@@ -469,6 +481,12 @@ export function ChatView({
   // Interactive binds its model at session SPAWN; once the thread has produced an
   // assistant turn the live session exists and the model is locked (BRO-1623).
   const modelLocked = modelIsSpawnPinned(engine) && messages.some((m) => m.role === "assistant");
+  // Workspace binds at session CREATE — locked the moment the thread has ANY turn
+  // (broader than modelLocked, which is interactive-only: workspace = cwd, which
+  // can't change after the agent session is keyed to it, for every engine). The
+  // picker self-hides at ≤1 workspace, so single-workspace deploys are unchanged.
+  const showWorkspacePicker = workspaceShowsPicker(workspaces.length);
+  const workspaceLocked = messages.length > 0;
 
   // Session usage for the composer context meter (BRO-1597). Sum cost + tokens
   // over assistant turns — live message-metadata and hydrated history both land
@@ -527,6 +545,9 @@ export function ChatView({
           // it — persistent session, no per-launch knob) — BRO-1623 P20.
           effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
           engine: engineToBody(engine),
+          // The workspace binds at session create (BRO-1627) — sent every turn but
+          // honored only on the first; the server ignores it once bound.
+          workspaceId: workspaceToBody(workspace),
         },
       },
     );
@@ -640,6 +661,7 @@ export function ChatView({
                                     ? effortToBody(effEffort)
                                     : undefined,
                                   engine: engineToBody(engine),
+                                  workspaceId: workspaceToBody(workspace),
                                 },
                               })
                             }
@@ -731,6 +753,33 @@ export function ChatView({
                             <PromptInputActionAddAttachments label="Attach text files" />
                           </PromptInputActionMenuContent>
                         </PromptInputActionMenu>
+                        {/* Workspace picker (BRO-1627) — which repo this thread runs
+                          in. Editable until the thread's first turn binds it, then
+                          disabled (a read-only chip showing the bound workspace).
+                          Self-hides at ≤1 workspace, so single-workspace deploys
+                          see no new control. */}
+                        {showWorkspacePicker ? (
+                          <PromptInputSelect
+                            value={workspace}
+                            onValueChange={onWorkspaceChange}
+                            disabled={workspaceLocked}
+                          >
+                            <PromptInputSelectTrigger
+                              aria-label={
+                                workspaceLocked ? "Workspace (locked — thread bound)" : "Workspace"
+                              }
+                            >
+                              <PromptInputSelectValue />
+                            </PromptInputSelectTrigger>
+                            <PromptInputSelectContent>
+                              {workspaces.map((w) => (
+                                <PromptInputSelectItem key={w.id} value={w.id}>
+                                  {w.name}
+                                </PromptInputSelectItem>
+                              ))}
+                            </PromptInputSelectContent>
+                          </PromptInputSelect>
+                        ) : null}
                         {/* Provider-aware model/effort (BRO-1623). Options follow the
                           engine's provider (claude aliases vs OpenAI models); the
                           model selector locks once an interactive thread's session

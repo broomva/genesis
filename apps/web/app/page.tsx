@@ -15,6 +15,7 @@ import {
   renameThread,
 } from "@/lib/threads";
 import { usePreferences } from "@/lib/use-preferences";
+import { type Workspace, fetchWorkspaces, resolveWorkspace } from "@/lib/workspaces";
 
 // localStorage key for the active thread (restore the conversation on reload).
 // Owned here, not in ChatView, because ChatView remounts per thread (key=threadId).
@@ -28,6 +29,11 @@ export default function ChatPage() {
   const [initialMessages, setInitialMessages] = useState<UIMessage[] | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Selectable workspaces (BRO-1627) — fetched once; the per-thread picker offers
+  // these and self-hides when there's ≤1. `defaultWorkspaceId` is the server's
+  // fallback (what a thread binds when none is chosen).
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [defaultWorkspaceId, setDefaultWorkspaceId] = useState("");
   // The one source of truth for prefs (model, effort, theme, show-reasoning) —
   // localStorage fast-path + server sync (BRO-1618). The composer toolbar and the
   // settings sheet both bind here.
@@ -87,6 +93,19 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshThreads();
   }, [refreshThreads]);
+
+  // Fetch the selectable workspaces once (BRO-1627). On failure the list stays
+  // empty and the picker self-hides (single-workspace behavior, unchanged).
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetchWorkspaces(ctrl.signal)
+      .then((list) => {
+        setWorkspaces(list.workspaces);
+        setDefaultWorkspaceId(list.defaultWorkspace);
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, []);
 
   // Hydrate the active thread's transcript whenever it changes. ChatView is
   // remounted by key once messages are ready, so useChat seeds with them.
@@ -193,6 +212,16 @@ export default function ChatPage() {
   const activeEffort = activeEngine === "codex" ? prefs.codexEffort : prefs.effort;
   const setActiveEffort = (value: string) =>
     update(activeEngine === "codex" ? { codexEffort: value } : { effort: value });
+  // The active thread's workspace (BRO-1627): its bound id once it has run, else
+  // the user's default pref, else the server default — clamped to the live list so
+  // a stale id never selects nothing. A new thread can change it until its first
+  // turn binds it (the composer picker locks after).
+  const activeWorkspace = resolveWorkspace(
+    activeThread?.workspaceId,
+    prefs.workspace,
+    defaultWorkspaceId,
+    workspaces,
+  );
 
   return (
     <div className="bg-background text-foreground fixed inset-0 flex overflow-hidden">
@@ -210,6 +239,7 @@ export default function ChatPage() {
           setDrawerOpen(false);
           setSettingsOpen(true);
         }}
+        showWorkspace={workspaces.length > 1}
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {activeThreadId && initialMessages !== null ? (
@@ -228,6 +258,9 @@ export default function ChatPage() {
             theme={prefs.theme}
             onThemeChange={(theme) => update({ theme })}
             engine={activeEngine}
+            workspace={activeWorkspace}
+            workspaces={workspaces}
+            onWorkspaceChange={(value) => update({ workspace: value })}
           />
         ) : (
           <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
@@ -241,6 +274,8 @@ export default function ChatPage() {
         onOpenChange={setSettingsOpen}
         prefs={prefs}
         onUpdate={update}
+        workspaces={workspaces}
+        defaultWorkspaceId={defaultWorkspaceId}
       />
     </div>
   );

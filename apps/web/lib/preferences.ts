@@ -53,6 +53,12 @@ export interface Preferences {
    *  A thread's engine is bound sticky on its first turn, so changing this never
    *  reroutes an existing conversation. */
   engine: string;
+  /** Default workspace for NEW threads (BRO-1627) — a workspace id, or "" to
+   *  follow the server's default. The valid set is server-dynamic (GET
+   *  /workspaces), so this can't be validated in this pure module; the picker
+   *  clamps a stale/unknown id to the live list at render. Bound sticky on the
+   *  thread's first turn, so changing it never reroutes an existing conversation. */
+  workspace: string;
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -62,6 +68,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   theme: DEFAULT_THEME,
   showReasoning: true,
   engine: DEFAULT_ENGINE,
+  workspace: "",
 };
 
 /** Coerce ANY untrusted shape (localStorage blob, server JSON, partial PUT body)
@@ -82,5 +89,8 @@ export function sanitizePreferences(raw: unknown): Preferences {
   const showReasoning = typeof o.showReasoning === "boolean" ? o.showReasoning : true;
   const engine =
     typeof o.engine === "string" && isKnownEngine(o.engine) ? o.engine : DEFAULT_ENGINE;
-  return { model, effort, codexEffort, theme, showReasoning, engine };
+  // Workspace (BRO-1627): pass any string through (the valid set is server-dynamic
+  // — the picker clamps an unknown/removed id to the live list at render).
+  const workspace = typeof o.workspace === "string" ? o.workspace : "";
+  return { model, effort, codexEffort, theme, showReasoning, engine, workspace };
 }
