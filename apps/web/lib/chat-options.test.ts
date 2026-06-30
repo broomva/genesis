@@ -73,14 +73,13 @@ describe("sanitizeModelFor — the cross-provider clamp", () => {
 });
 
 describe("sanitizeEffortFor — the cross-provider clamp", () => {
-  test("codex-only 'minimal' is clamped to standard for claude", () => {
-    expect(sanitizeEffortFor("minimal", "print")).toBe("standard");
-    expect(sanitizeEffortFor("minimal", "interactive")).toBe("standard");
-  });
-
   test("claude-only 'max'/'xhigh' is clamped to standard for codex", () => {
     expect(sanitizeEffortFor("max", "codex")).toBe("standard");
     expect(sanitizeEffortFor("xhigh", "codex")).toBe("standard");
+  });
+
+  test("'minimal' (rejected by gpt-5.5) is clamped to standard for codex", () => {
+    expect(sanitizeEffortFor("minimal", "codex")).toBe("standard");
   });
 
   test("a value valid for BOTH providers is preserved across the clamp", () => {
@@ -89,8 +88,9 @@ describe("sanitizeEffortFor — the cross-provider clamp", () => {
     expect(sanitizeEffortFor("standard", "codex")).toBe("standard"); // sentinel in both
   });
 
-  test("codex keeps its own 'minimal'; print keeps its own 'max'", () => {
-    expect(sanitizeEffortFor("minimal", "codex")).toBe("minimal");
+  test("codex keeps its own levels; print keeps its own 'max'", () => {
+    expect(sanitizeEffortFor("low", "codex")).toBe("low");
+    expect(sanitizeEffortFor("medium", "codex")).toBe("medium");
     expect(sanitizeEffortFor("max", "print")).toBe("max");
   });
 });

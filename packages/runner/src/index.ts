@@ -14,16 +14,18 @@ import {
 
 /** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
  *  providers; the per-provider arrays below gate which reach which engine —
- *  `minimal` is codex-only, `xhigh`/`max` are claude-only. */
-export type EffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+ *  `xhigh`/`max` are claude-only (codex rejects them). */
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Claude's native `--effort` flag enum (BRO-1573) — print + interactive. Thinking
  *  only meaningfully engages at xhigh/max under subscription auth; no "off" level. */
 export const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 
-/** codex `-c model_reasoning_effort=<level>` values (BRO-1623) — OpenAI reasoning
- *  effort. `minimal` is codex-only; codex has no xhigh/max. */
-export const CODEX_EFFORT_LEVELS: readonly EffortLevel[] = ["minimal", "low", "medium", "high"];
+/** codex `-c model_reasoning_effort=<level>` values (BRO-1623). VERIFIED against
+ *  gpt-5.5 on the live CLI 0.142.4: low/medium/high are accepted; `minimal` is
+ *  REJECTED ("error: invalid") despite being a generic OpenAI reasoning level, so
+ *  it is NOT offered (benchmark-the-real-engine). codex has no xhigh/max. */
+export const CODEX_EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high"];
 
 // ── Provider model/effort guards (BRO-1623, P20 Forge MUST-FIX) ─────────────
 // Engine binding is STICKY (BRO-1620): the request's engine is advisory after a

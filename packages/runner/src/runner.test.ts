@@ -115,7 +115,7 @@ describe("runAgent — local host worktree", () => {
     expect(cmd[cmd.indexOf("--thinking-display") + 1]).toBe("summarized");
   });
 
-  test("forwards a claude model/effort but DROPS a codex-shaped value (P20 Forge MUST-FIX)", async () => {
+  test("forwards a claude model/effort but DROPS a codex-shaped model (P20 Forge MUST-FIX)", async () => {
     const host = new FakeLocalHost();
     await runAgent({
       prompt: "go",
@@ -128,20 +128,12 @@ describe("runAgent — local host worktree", () => {
     const cmd = host.spawnCmd ?? [];
     expect(cmd).toContain("--model=opus"); // a claude alias reaches --model
     expect(cmd).toContain("--effort=high");
-    // A codex model + codex-only effort (sticky-engine divergence / curl) must NOT
-    // reach claude — would be `claude --model=gpt-5.5` / `--effort=minimal` (rejected).
+    // A codex model (sticky-engine divergence / curl) must NOT reach claude —
+    // would be `claude --model=gpt-5.5` (rejected). Effort needs no claude-side
+    // drop: codex's levels (low/medium/high) are all valid claude levels too.
     const host2 = new FakeLocalHost();
-    await runAgent({
-      prompt: "go",
-      cwd: "/repo",
-      host: host2,
-      worktree: false,
-      model: "gpt-5.5",
-      effort: "minimal",
-    });
-    const cmd2 = host2.spawnCmd ?? [];
-    expect(cmd2.some((a) => a.startsWith("--model="))).toBe(false);
-    expect(cmd2.some((a) => a.startsWith("--effort="))).toBe(false);
+    await runAgent({ prompt: "go", cwd: "/repo", host: host2, worktree: false, model: "gpt-5.5" });
+    expect((host2.spawnCmd ?? []).some((a) => a.startsWith("--model="))).toBe(false);
   });
 
   test("enforces thinking flags AFTER extraArgs — operator cannot disable (BRO-1614)", async () => {

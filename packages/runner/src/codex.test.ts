@@ -338,10 +338,10 @@ describe("codexArgs", () => {
       cwd: "/repo",
       resumeSessionId: "t",
       model: "gpt-5.5",
-      effort: "minimal",
+      effort: "low",
     });
     expect(r[r.indexOf("-m") + 1]).toBe("gpt-5.5");
-    expect(r).toContain("model_reasoning_effort=minimal");
+    expect(r).toContain("model_reasoning_effort=low");
   });
 
   test("omits -m / effort override when unset (codex uses its config defaults)", () => {
