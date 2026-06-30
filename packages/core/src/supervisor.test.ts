@@ -106,6 +106,34 @@ describe("supervisor", () => {
     expect(calls.at(-1)).toBe("interactive");
   });
 
+  test("engine registry: a pre-1620 thread that already ran binds DEFAULT, not the requested (BRO-1620 P20)", async () => {
+    const calls: string[] = [];
+    const store = new InMemoryStore();
+    // A pre-BRO-1620 row: it already ran (agentSessionId set) but has NO engine.
+    await store.upsertSession({
+      id: "sess-old",
+      workspaceId: ws.id,
+      threadId: "told",
+      phase: "done",
+      createdAt: new Date().toISOString(),
+      agentSessionId: "claude-sid-old",
+    });
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      store,
+      runners: {
+        print: trackingRunner("print", calls),
+        interactive: trackingRunner("interactive", calls),
+      },
+      defaultEngine: "print",
+    });
+    // The client requests interactive, but an existing-that-ran thread must bind the
+    // DEFAULT (print) — preserving its actual engine, not silently rerouting it.
+    await sup.dispatch("told", "next", undefined, { engine: "interactive" });
+    expect(calls.at(-1)).toBe("print");
+    expect((await store.findSessionByThread("told"))?.engine).toBe("print");
+  });
+
   test("listThreads returns threads newest-first with last-turn preview (BRO-1567)", async () => {
     const store = new InMemoryStore();
     await store.upsertWorkspace(ws);

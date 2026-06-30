@@ -80,8 +80,9 @@ export interface SupervisorConfig {
   controls?: Record<string, EngineControl>;
   defaultEngine?: string;
   /** Per-event observability tap (BRO-1524): every AgentEvent of every turn,
-   *  tagged with the session id. The interactive engine has its own IR-trace
-   *  observer, so wire this only for the print engine to get trace parity. */
+   *  tagged with the session id. The boot wires this for ALL turns now that both
+   *  engines coexist (BRO-1620) — interactive turns get both this AgentEvent trace
+   *  (a distinct *.events.jsonl file) and the engine's richer IR observer. */
   trace?: (sessionId: string, event: AgentEvent) => void;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
@@ -120,6 +121,10 @@ export interface ThreadSummary {
   lastText?: string;
   title?: string;
   archived: boolean;
+  /** The thread's bound engine (BRO-1620), so the client can gate per-turn
+   *  controls (model/effort) on the THREAD's actual engine, not the global pref.
+   *  Absent on a never-run thread (it inherits the pref until its first turn). */
+  engine?: string;
 }
 
 /** First-user-turn → a short thread title (BRO-1592). First line, collapsed
@@ -240,12 +245,17 @@ export class Supervisor {
     // the phase write below, so the drawer shows a stable label instead of a
     // running last-text preview. Never overwrites a title once set (or renamed).
     if (!session.title) session.title = deriveTitle(text);
-    // Bind the engine STICKY on the first turn (BRO-1620): the client's requested
-    // engine if it's registered, else the default. Reused for every later turn —
-    // so flipping the global default never reroutes a thread with a live session.
+    // Bind the engine STICKY on the first turn (BRO-1620), reused for every later
+    // turn — so flipping the global default never reroutes a thread with a live
+    // session. A brand-new thread (never ran) takes the client's requested engine;
+    // an EXISTING thread with no engine (a pre-BRO-1620 row) is bound to the DEFAULT
+    // instead, preserving the engine it actually ran under (the deploy's
+    // GENESIS_ENGINE) so it can't be silently rerouted + lose --resume continuity.
     if (!session.engine) {
+      const neverRan = session.agentSessionId === undefined;
       const requested = turnOpts?.engine;
-      session.engine = requested && this.runners[requested] ? requested : this.defaultEngine;
+      session.engine =
+        neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
     }
     session.phase = "running";
     await this.store.upsertSession(session);
@@ -376,6 +386,7 @@ export class Supervisor {
           lastText: turns.at(-1)?.text,
           title: s.title,
           archived: s.archived ?? false,
+          engine: s.engine,
         };
       }),
     );
