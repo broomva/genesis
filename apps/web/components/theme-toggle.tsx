@@ -4,57 +4,45 @@ import { Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import type { ThemeChoice } from "@/lib/preferences";
+import { resolvesDark, watchSystemTheme } from "@/lib/theme";
 
-// localStorage key — the chosen theme survives reloads. Read once before paint by
-// the no-flash script in layout.tsx (THEME_INIT_SCRIPT), so there is never a
-// light→dark flash. Default is light (the DS signature look).
-export const THEME_KEY = "genesis:theme";
-
-// Inline <head> script: apply the stored theme to <html> BEFORE first paint.
-// Light is the default — only the explicit "dark" choice adds the class. Kept as
-// a string so it can run synchronously via dangerouslySetInnerHTML (no hydration
-// round-trip). Wrapped in try/catch so a privacy-mode localStorage throw can't
-// blank the page.
-export const THEME_INIT_SCRIPT = `try{if(localStorage.getItem('${THEME_KEY}')==='dark'){document.documentElement.classList.add('dark')}}catch(e){}`;
-
-/** Light/dark toggle. The DS fully specifies both; light leads (its "reads as
- *  Houston until you look" signature lives there). Toggling flips `.dark` on
- *  <html> — which drives both the CSS-var theme block and Tailwind `dark:`
- *  utilities — and persists the choice. */
-export function ThemeToggle() {
-  // null until mounted — the trigger renders a stable placeholder during SSR so
-  // the icon doesn't mismatch the (script-applied) class on hydration.
-  const [isDark, setIsDark] = useState<boolean | null>(null);
-
+// Header quick-toggle for theme (BRO-1618). CONTROLLED by the prefs hook so it
+// never drifts from the settings sheet's three-way control; the heavy lifting
+// (apply `.dark`, persist, server-sync) lives in use-preferences + lib/theme.
+// Toggling sets an EXPLICIT light/dark — "system" is reachable only via Settings.
+// The no-flash boot script + the THEME_KEY now live in lib/theme.ts.
+export function ThemeToggle({
+  theme,
+  onChange,
+}: {
+  theme: ThemeChoice;
+  onChange: (theme: ThemeChoice) => void;
+}) {
+  // Guard SSR↔hydration: `resolvesDark("system")` reads matchMedia (client-only),
+  // so render a neutral placeholder until mounted to avoid a Sun↔Moon mismatch.
+  const [mounted, setMounted] = useState(false);
+  // Re-render the icon when the OS theme flips while the choice is "system"
+  // (resolvesDark("system") reads matchMedia, which doesn't trigger React) — P20 #2.
+  const [, bump] = useState(0);
+  useEffect(() => setMounted(true), []);
   useEffect(() => {
-    setIsDark(document.documentElement.classList.contains("dark"));
-  }, []);
-
-  function toggle() {
-    const next = !document.documentElement.classList.contains("dark");
-    document.documentElement.classList.toggle("dark", next);
-    try {
-      localStorage.setItem(THEME_KEY, next ? "dark" : "light");
-    } catch {
-      // private mode — the toggle still works for this session.
-    }
-    setIsDark(next);
-  }
+    if (theme !== "system") return;
+    return watchSystemTheme(() => bump((n) => n + 1));
+  }, [theme]);
+  const isDark = mounted && resolvesDark(theme);
 
   return (
     <Button
       type="button"
       size="icon-sm"
       variant="ghost"
-      onClick={toggle}
+      onClick={() => onChange(isDark ? "light" : "dark")}
       aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
       title="Toggle theme"
       className="[@media(pointer:coarse)]:size-11"
     >
-      {/* While `isDark` is null (SSR + first client render, before the effect
-          reads the script-applied class) show a neutral placeholder — never the
-          wrong icon. This matches SSR↔hydration and avoids a Moon→Sun flash. */}
-      {isDark === null ? (
+      {!mounted ? (
         <span className="size-4" aria-hidden />
       ) : isDark ? (
         <Moon className="size-4" />

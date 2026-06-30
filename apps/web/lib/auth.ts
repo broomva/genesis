@@ -86,11 +86,16 @@ function getDb(): ReturnType<typeof drizzle> {
 
 // Lazy proxy passed to the drizzle adapter: any property access (db.select, …)
 // forces construction + migration, but nothing happens until the first request.
+// Exported as `authDb` (BRO-1618) so preferences-store.ts can query the user's
+// `settings` column directly via Drizzle — call ensureAuthDb() first to guarantee
+// the migration (incl. the settings ALTER) has run.
 const db = new Proxy({} as ReturnType<typeof drizzle>, {
   get(_target, prop, receiver) {
     return Reflect.get(getDb(), prop, receiver);
   },
 });
+
+export { db as authDb };
 
 // Trigger lazy DB construction + migration and resolve once the tables exist.
 // Call this at the top of any route that queries the auth store directly

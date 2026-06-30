@@ -21,6 +21,11 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("emailVerified").notNull().default(false),
   image: text("image"),
+  // Per-user app preferences (BRO-1618) — a JSON blob {model,effort,theme,
+  // showReasoning,…}. Queried directly via Drizzle (preferences-store.ts), NOT
+  // declared to Better Auth as a managed field — the adapter ignores columns it
+  // doesn't know, so this stays out of the auth surface.
+  settings: text("settings"),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow(),
 });
@@ -99,6 +104,11 @@ CREATE TABLE IF NOT EXISTS "user" (
   "createdAt" timestamp NOT NULL DEFAULT now(),
   "updatedAt" timestamp NOT NULL DEFAULT now()
 );
+
+-- Additive: per-user preferences blob (BRO-1618). IF NOT EXISTS so re-running on
+-- an existing DB is a no-op (CREATE TABLE above is a no-op once the table exists,
+-- so a new column must come via ALTER — mirrors packages/db MIGRATE_SQL).
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "settings" text;
 
 CREATE TABLE IF NOT EXISTS "session" (
   "id" text PRIMARY KEY,
