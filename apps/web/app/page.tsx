@@ -16,9 +16,9 @@ import {
 } from "@/lib/threads";
 import { usePreferences } from "@/lib/use-preferences";
 
-// localStorage keys — active thread (restore the conversation on reload) + the
-// model/effort selection (sticky across threads + reloads). Owned here, not in
-// ChatView, because ChatView remounts per thread (key=threadId).
+// localStorage key for the active thread (restore the conversation on reload).
+// Owned here, not in ChatView, because ChatView remounts per thread (key=threadId).
+// Preference keys (model/effort/theme/show-reasoning) now live in usePreferences.
 const ACTIVE_KEY = "genesis:active-thread";
 
 export default function ChatPage() {

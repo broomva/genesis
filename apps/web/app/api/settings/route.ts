@@ -28,8 +28,18 @@ export async function PUT(req: Request): Promise<Response> {
   // No user row to attribute to → accept-and-discard so the client write path
   // stays uniform (it never special-cases the agent).
   if (principal.asAgent) return new Response(null, { status: 204 });
-  const body = (await req.json().catch(() => ({}))) as Partial<Preferences>;
+  // Reject malformed / non-object bodies (CodeRabbit) — otherwise invalid JSON
+  // would coerce to {} and look like a successful no-op write.
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: "invalid json" }, { status: 400 });
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return Response.json({ error: "expected a preferences object" }, { status: 400 });
+  }
   // upsert sanitizes the merge ({...current, ...body}) — a partial or full body
   // is both fine; unknown/stale fields are dropped to defaults.
-  return Response.json(await upsertPreferences(principal.userId, body));
+  return Response.json(await upsertPreferences(principal.userId, body as Partial<Preferences>));
 }
