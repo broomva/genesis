@@ -331,6 +331,15 @@ export class SessionHost {
     await this.tailer.start();
   }
 
+  /** Flush the transcript tailer to EOF (BRO-1616). The Stop hook that fires
+   *  `turn.complete` outpaces the async tailer, so the final assistant message's
+   *  extended-thinking (transcript-only — hooks don't carry thinking blocks)
+   *  would otherwise be dropped. The engine awaits this before finalizing a turn.
+   *  No-op if no transcript is attached. */
+  async drainTranscript(): Promise<void> {
+    await this.tailer?.flush();
+  }
+
   /** @internal — hub routes this session's hook/status events here. */
   ingest(event: IREvent): void {
     if (event.kind === "session.lifecycle" && event.transcriptPath !== undefined) {

@@ -61,6 +61,27 @@ describe("TranscriptTailer", () => {
     }
   });
 
+  test("flush() drains pending lines to EOF on demand, idempotently (BRO-1616)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "gen-tailer-"));
+    const path = join(dir, "t.jsonl");
+    await writeFile(path, "");
+    const lines: string[] = [];
+    // Long poll: the periodic drain won't fire within the test, so flush() must be
+    // what delivers the line — the turn.complete-vs-tailer race fix (BRO-1616).
+    const tailer = new TranscriptTailer({ path, pollMs: 100_000, onLine: (l) => lines.push(l) });
+    await tailer.start();
+    try {
+      await appendFile(path, '{"thinking":"summarized prose"}\n');
+      await tailer.flush();
+      expect(lines).toContain('{"thinking":"summarized prose"}');
+      const delivered = lines.length;
+      await tailer.flush(); // offset already at EOF → nothing re-emitted
+      expect(lines.length).toBe(delivered);
+    } finally {
+      tailer.stop();
+    }
+  });
+
   test("file created after start is picked up (transcript lands late)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "gen-tailer-"));
     const path = join(dir, "late.jsonl");

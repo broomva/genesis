@@ -48,6 +48,10 @@ export interface EngineSession {
   interrupt(): Promise<void>;
   alive(): Promise<boolean>;
   kill(): Promise<void>;
+  /** Flush the transcript tailer to EOF (BRO-1616) — drains the final assistant
+   *  message's extended-thinking before the turn finalizes. Optional so scripted
+   *  fakes (and non-transcript sessions) can omit it. */
+  drainTranscript?(): Promise<void>;
 }
 
 export interface InteractiveEngineConfig {
@@ -64,6 +68,13 @@ export interface InteractiveEngineConfig {
   policy?: PermissionPolicy;
   /** Per-turn ceiling before the run is marked blocked (default 10 min). */
   turnTimeoutMs?: number;
+  /** Bounded transcript-drain at turn.complete (BRO-1616): the assistant entry
+   *  (with any thinking) is written ~125ms AFTER the Stop hook, so we retry the
+   *  flush until it lands. Max iterations × interval bounds the wait when it never
+   *  does (tool-only-ending turn / unattached transcript). Defaults 80 × 25ms.
+   *  Lowered in tests to exercise the cap path. */
+  drainMaxIters?: number;
+  drainIntervalMs?: number;
   /** First-spawn grace before the trust-dialog Enter nudge (default 12s). */
   trustNudgeMs?: number;
   /** Observability tap (BRO-1519): receives EVERY hub IR event PLUS engine
@@ -111,6 +122,9 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
   let hub: EngineHub | undefined;
   let started = false;
   const live = new Map<string, LiveSession>();
+  // Bounded transcript-drain knobs (BRO-1616) — see InteractiveEngineConfig.
+  const drainMaxIters = cfg.drainMaxIters ?? 80;
+  const drainIntervalMs = cfg.drainIntervalMs ?? 25;
 
   // Emit an engine diagnostic to the observer (failures the hub can't surface).
   const diag = (sessionId: string, message: string, detail?: unknown): void => {
@@ -220,16 +234,35 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     let state: RunState = { ...initialState, sessionId };
     const assistantAccum = new Map<string, string>();
     let lastAssistant: string | undefined;
+    // Set when the transcript's final assistant entry has been tailed (BRO-1616):
+    // the Stop hook fires turn.complete BEFORE claude writes the assistant
+    // message (thinking + text) to the transcript, so the finalize step drains in
+    // a bounded retry until this flips — at which point any thinking sibling has
+    // been captured too.
+    let transcriptAssistantSeen = false;
     // Latest cost from the statusline feed (BRO-1613) — folded onto the terminal
     // result so the context meter shows the turn's running cost.
     let lastCostUsd: number | undefined;
 
-    let finish: () => void = () => {};
+    // `finished` guards the terminal window (BRO-1616 P20 MUST-FIX #1): the async
+    // drain at turn.complete keeps this run's listener live for up to the drain
+    // cap, so a reset()/timeout firing DURING the drain finalizes the turn first.
+    // Without the guard the resumed turn.complete handler would push a SECOND
+    // terminal result after run() returned, flipping a settled blocked→done via a
+    // late onState. finish() is now idempotent and push() drops post-finish events.
+    let finished = false;
+    let resolveTurn: () => void = () => {};
     const turnDone = new Promise<void>((resolve) => {
-      finish = resolve;
+      resolveTurn = resolve;
     });
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      resolveTurn();
+    };
 
     const push = (event: AgentEvent): void => {
+      if (finished) return; // turn already terminal — drop late events (post-drain race)
       events.push(event);
       state = reduce(state, event);
       opts.onState?.(state, event);
@@ -258,7 +291,7 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       finish();
     };
 
-    const unsubscribe = engineHub.onEvent((ir) => {
+    const unsubscribe = engineHub.onEvent(async (ir) => {
       if (ir.sessionId !== sessionId) return;
       if (ir.surface === "hook") entry.hookSeen = true;
       // Hook surface only: in TTY-interactive mode it is the sole live content
@@ -299,7 +332,13 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           });
           return;
         case "message.assistant": {
-          if (ir.surface !== "hook") return;
+          if (ir.surface !== "hook") {
+            // The transcript's final assistant entry landed (its thinking sibling,
+            // written just before it, was drained in the same pass) — signal the
+            // turn.complete drain loop it can stop waiting (BRO-1616).
+            transcriptAssistantSeen = true;
+            return;
+          }
           const id = ir.messageId ?? "current";
           const acc = (assistantAccum.get(id) ?? "") + ir.text;
           assistantAccum.set(id, acc);
@@ -333,6 +372,32 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           return;
         case "turn.complete": {
           if (ir.surface !== "hook") return; // terminal kinds are hook-only too
+          // Flush the transcript BEFORE finalizing (BRO-1616): the Stop hook that
+          // fires this event outpaces the async tailer, so the final assistant
+          // message's extended-thinking (transcript-only) would land after the
+          // reduce stream closed. Draining now lets the existing `case "thinking"`
+          // push its `thinking_delta` in time. Best-effort — a flush failure must
+          // not strand the turn. Idempotent via the tailer's byte offset.
+          // The assistant entry (thinking + text) is written to the transcript a
+          // beat AFTER the Stop hook fires this event (BRO-1616 — verified live: at
+          // turn.complete only the user entry is on disk; the assistant lands ~5
+          // poll-ticks / ~125ms later). Drain in a bounded retry until the transcript
+          // `message.assistant` (a `text` block) flips the flag, so the existing
+          // `case "thinking"` captures its prose first. The cap bounds the wait when
+          // no text block ever lands (a tool_use-only ending, or an unattached
+          // transcript) — the turn still finalizes, just without thinking. Nominal
+          // cap drainMaxIters × drainIntervalMs (~2s); each flush adds its own short
+          // settle. Best-effort — never strand the turn.
+          transcriptAssistantSeen = false;
+          for (let i = 0; i < drainMaxIters && !transcriptAssistantSeen; i++) {
+            try {
+              await entry.session?.drainTranscript?.();
+            } catch {
+              break; // tolerate flush errors — finalize the turn regardless
+            }
+            if (transcriptAssistantSeen) break;
+            await new Promise((resolve) => setTimeout(resolve, drainIntervalMs));
+          }
           // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
           // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
           // print engine's independent turns) totals correctly instead of growing

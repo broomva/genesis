@@ -13,9 +13,13 @@ class FakeSession implements EngineSession {
   sent: string[] = [];
   killed = false;
   interrupted = 0;
+  drained = 0;
   constructor(
     public sessionId: string,
     private deliver: (sessionId: string) => void,
+    /** Emits transcript-only content (e.g. thinking) the way the real tailer
+     *  does when flushed — used to exercise the BRO-1616 drain. */
+    private onDrain?: (sessionId: string) => void,
   ) {}
   async send(text: string): Promise<void> {
     this.sent.push(text);
@@ -30,6 +34,10 @@ class FakeSession implements EngineSession {
   async kill(): Promise<void> {
     this.killed = true;
   }
+  async drainTranscript(): Promise<void> {
+    this.drained += 1;
+    this.onDrain?.(this.sessionId);
+  }
 }
 
 class FakeHub implements EngineHub {
@@ -37,8 +45,13 @@ class FakeHub implements EngineHub {
   sessions: FakeSession[] = [];
   createCalls = 0;
   stopped = false;
-  /** Script: IR events (minus sessionId) emitted after each spawn/send. */
-  constructor(private script: (sessionId: string) => IREvent[]) {}
+  /** Script: IR events (minus sessionId) emitted after each spawn/send.
+   *  `drainScript` (optional): transcript-only events the engine pulls in when it
+   *  flushes the transcript at turn.complete (BRO-1616). */
+  constructor(
+    private script: (sessionId: string) => IREvent[],
+    private drainScript?: (sessionId: string) => IREvent[],
+  ) {}
 
   start(): void {}
   async stop(): Promise<void> {
@@ -51,7 +64,24 @@ class FakeHub implements EngineHub {
   async createSession(opts: { sessionId?: string; initialPrompt?: string }): Promise<FakeSession> {
     this.createCalls += 1;
     const id = opts.sessionId ?? "fake-session";
-    const session = new FakeSession(id, (sid) => this.playScript(sid));
+    // Default drain mirrors reality: the transcript always receives the assistant
+    // entry shortly after turn.complete, which ends the engine's bounded drain
+    // loop (BRO-1616). Tests that exercise thinking override with their own script.
+    const drainScript =
+      this.drainScript ??
+      ((sid: string): IREvent[] => [
+        {
+          sessionId: sid,
+          observedAt: 1,
+          surface: "transcript",
+          kind: "message.assistant",
+          text: "",
+        },
+      ]);
+    const onDrain = (sid: string) => {
+      for (const e of drainScript(sid)) this.emit(e);
+    };
+    const session = new FakeSession(id, (sid) => this.playScript(sid), onDrain);
     this.sessions.push(session);
     if (opts.initialPrompt !== undefined) this.playScript(id);
     return session;
@@ -137,6 +167,165 @@ describe("createInteractiveEngine", () => {
     expect(states.at(-1)).toBe("done");
     await engine.shutdown();
     expect(hub.stopped).toBe(true);
+  });
+
+  test("flushes transcript-only thinking at turn.complete → reasoned + reasoning (BRO-1616)", async () => {
+    // Hook surface carries the answer + turn.complete but NOT the thinking —
+    // extended-thinking is transcript-only and the Stop hook outpaces the tailer.
+    // It lands only when the engine flushes the transcript at turn.complete.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "The answer is 33.",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "The answer is 33." },
+    ];
+    // The drain delivers the late-written transcript entries: the thinking block
+    // FOLLOWED by the assistant message (the order claude writes them). The
+    // assistant message ends the bounded drain-retry loop.
+    const drainTurn = (sid: string): IREvent[] => [
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "thinking",
+        text: "I used inclusion-exclusion: 99 − 66 = 33.",
+      },
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "message.assistant",
+        text: "The answer is 33.",
+        messageId: "m1",
+      },
+    ];
+    const hub = new FakeHub(hookTurn, drainTurn);
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({
+      prompt: "count",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sr",
+    });
+    expect(hub.sessions[0]?.drained).toBeGreaterThan(0); // the engine flushed at turn.complete
+    expect(result.state.reasoned).toBe(true);
+    expect(result.state.reasoning ?? "").toContain("inclusion-exclusion");
+    await engine.shutdown();
+  });
+
+  test("a no-thinking turn drains the assistant entry but stays not-reasoned (BRO-1616)", async () => {
+    // The drain delivers the late assistant entry but NO thinking sibling (adaptive
+    // thinking skipped a trivial turn). The loop terminates on the assistant entry;
+    // reasoned stays false. Guards that capture is thinking-specific, not "any drain".
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "4.",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "4." },
+    ];
+    const drainTurn = (sid: string): IREvent[] => [
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "message.assistant",
+        text: "4.",
+      },
+    ];
+    const hub = new FakeHub(hookTurn, drainTurn);
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({
+      prompt: "2+2",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sr2",
+    });
+    expect(result.state.reasoned).toBeFalsy();
+    expect(result.state.reasoning ?? "").toBe("");
+    await engine.shutdown();
+  });
+
+  test("the drain loop is BOUNDED — a turn whose transcript assistant never lands still finalizes (BRO-1616)", async () => {
+    // Models a tool_use-only ending (no `text` block → no transcript message.assistant
+    // → the flag never flips) or an unattached transcript. The bounded cap must let
+    // the turn finalize instead of hanging. Tiny cap so the test is fast.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "done",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "done" },
+    ];
+    // Drain delivers NOTHING (no transcript assistant ever lands).
+    const emptyDrain = (_sid: string): IREvent[] => [];
+    const hub = new FakeHub(hookTurn, emptyDrain);
+    const engine = createInteractiveEngine({ hub, drainMaxIters: 3, drainIntervalMs: 1 });
+    const result = await engine.run({
+      prompt: "x",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "scap",
+    });
+    // The cap bounded the loop and the turn finalized (did not hang), just without
+    // thinking — graceful degradation.
+    expect(result.state.phase).toBe("done");
+    expect(result.state.reasoned).toBeFalsy();
+    expect(hub.sessions[0]?.drained).toBe(3); // looped exactly drainMaxIters times
+    await engine.shutdown();
+  });
+
+  test("a timeout during the drain is NOT overwritten by the late turn.complete (BRO-1616 P20 #1)", async () => {
+    // The async drain keeps the listener live; a timeout firing mid-drain finalizes
+    // the turn (blocked). Without the `finished` guard the resumed turn.complete
+    // would push a SECOND result:success after run() returned, flipping blocked→done.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "done",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "done" },
+    ];
+    const emptyDrain = (_sid: string): IREvent[] => []; // assistant never lands → drain spins
+    const hub = new FakeHub(hookTurn, emptyDrain);
+    // Drain (~200ms) outlives the 30ms timeout, so the timeout fires mid-drain.
+    const engine = createInteractiveEngine({
+      hub,
+      drainMaxIters: 20,
+      drainIntervalMs: 10,
+      turnTimeoutMs: 30,
+    });
+    const phases: string[] = [];
+    const result = await engine.run({
+      prompt: "x",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sg",
+      onState: (s) => phases.push(s.phase),
+    });
+    expect(result.state.phase).not.toBe("done"); // timed out, stays terminal-error
+    // Let the drain loop run to its cap — it WOULD push a late success without the guard.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(phases.filter((p) => p === "done")).toHaveLength(0); // no late blocked→done flip
+    expect(result.events.filter((e) => e.type === "result")).toHaveLength(1); // exactly one terminal
+    await engine.shutdown();
   });
 
   test("tool ids flow through → a BUILT + FILLED tool part (BRO-1613 S2)", async () => {
