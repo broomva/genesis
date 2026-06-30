@@ -17,6 +17,8 @@ import {
   modelOptionsFor,
   sanitizeEffortFor,
   sanitizeModelFor,
+  workspaceShowsPicker,
+  workspaceToBody,
 } from "./chat-options";
 
 describe("engineProvider", () => {
@@ -99,5 +101,18 @@ describe("contextWindowFor is engine-aware", () => {
   test("codex 'default' is the codex window, not claude's 1M", () => {
     expect(contextWindowFor("default", "print")).toBe(1_000_000);
     expect(contextWindowFor("default", "codex")).toBe(400_000);
+  });
+});
+
+describe("workspace helpers (BRO-1627)", () => {
+  test("workspaceToBody: '' → undefined (omit → server default); an id passes through", () => {
+    expect(workspaceToBody("")).toBeUndefined();
+    expect(workspaceToBody("ws-alpha")).toBe("ws-alpha");
+  });
+
+  test("workspaceShowsPicker: only with a real choice (>1)", () => {
+    expect(workspaceShowsPicker(0)).toBe(false);
+    expect(workspaceShowsPicker(1)).toBe(false);
+    expect(workspaceShowsPicker(2)).toBe(true);
   });
 });

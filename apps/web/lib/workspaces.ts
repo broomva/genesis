@@ -3,13 +3,14 @@
 // repo/dir a thread's agent runs in; the choice binds sticky on the thread's
 // first turn (switching = a new thread).
 
-/** Mirror of the engine's Workspace (packages/core types.ts). */
+/** The PUBLIC workspace DTO the engine exposes (GET /workspaces) — mirrors the
+ *  hardened server shape (packages/core Supervisor.listWorkspaces): id + name +
+ *  optional isGitRepo. The filesystem rootPath + the registry-only noWorktree are
+ *  deliberately NOT here (they never leave the engine, P20/CodeRabbit #66). */
 export interface Workspace {
   id: string;
   name: string;
-  rootPath: string;
   isGitRepo?: boolean;
-  noWorktree?: boolean;
 }
 
 export interface WorkspaceList {
@@ -28,7 +29,16 @@ export async function fetchWorkspaces(signal?: AbortSignal): Promise<WorkspaceLi
     if (!res.ok) return EMPTY;
     const data = (await res.json()) as Partial<WorkspaceList>;
     return {
-      workspaces: Array.isArray(data.workspaces) ? data.workspaces : [],
+      // Filter to well-formed items on ingest (P20 SHOULD-FIX): a malformed/empty
+      // id would later render <SelectItem value=""> and Radix throws synchronously
+      // on an empty value, white-screening the composer. Defensive — the hardened
+      // server won't, but every untrusted-input path here is rigorous.
+      workspaces: Array.isArray(data.workspaces)
+        ? data.workspaces.filter(
+            (w): w is Workspace =>
+              typeof w?.id === "string" && w.id.length > 0 && typeof w?.name === "string",
+          )
+        : [],
       defaultWorkspace: typeof data.defaultWorkspace === "string" ? data.defaultWorkspace : "",
     };
   } catch {
