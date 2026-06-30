@@ -412,3 +412,115 @@ export function ToolPart({ part }: { part: AnyToolPart }) {
     </Collapsible>
   );
 }
+
+/** A skill slug → human label. `kg` → "Kg", `knowledge-graph-memory` →
+ *  "Knowledge Graph Memory", `broomva:bookkeeping` → "Bookkeeping" (namespace
+ *  dropped — the skill's own name is what reads). Separators collapse to spaces
+ *  and each word is title-cased; an acronym-ish token keeps its tail (`p9` → `P9`). */
+export function humanizeSkill(slug: string): string {
+  const base = slug.includes(":") ? slug.slice(slug.lastIndexOf(":") + 1) : slug;
+  const words = base
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return words.join(" ") || slug.trim();
+}
+
+/** Skill activation — a first-class, premium-rendered event, distinct from a
+ *  generic tool card (BRO-1625). A skill loads a *capability* into the run, so it
+ *  earns a tinted icon chip + humanized name + a status line, with the loaded
+ *  content collapsed by default. Mirrors Conductor's "Kg · Skill activated"
+ *  treatment in the Genesis DS — a skill is the one place a subtle frost accent
+ *  marks a notable event (monochrome-at-rest holds everywhere else). When there's
+ *  no captured output the row is non-interactive: just the activation badge. */
+export function SkillPart({ part }: { part: AnyToolPart }) {
+  const input = part.input as { skill?: unknown; args?: unknown } | undefined;
+  const rawSkill = typeof input?.skill === "string" ? input.skill.trim() : "";
+  const name = rawSkill ? humanizeSkill(rawSkill) : "Skill";
+  const args =
+    typeof input?.args === "string" && input.args.trim().length > 0 ? input.args.trim() : undefined;
+  const running = part.state === "input-streaming" || part.state === "input-available";
+  const errored = part.state === "output-error";
+  const output = "output" in part ? part.output : undefined;
+  const errorText = "errorText" in part ? part.errorText : undefined;
+  const detail = outText(output, errored, typeof errorText === "string" ? errorText : undefined);
+  const status = errored ? "Skill failed" : running ? "Activating skill…" : "Skill activated";
+
+  return (
+    <Collapsible
+      className={cn(
+        "group my-2 w-full overflow-hidden rounded-xl border text-left",
+        errored
+          ? "border-[var(--bv-danger)]/30 bg-[var(--bv-danger)]/5"
+          : "border-[var(--bv-blue)]/20 bg-[var(--bv-frost-8)]",
+      )}
+    >
+      <CollapsibleTrigger
+        // Non-interactive when there's nothing to expand — still a clean badge row.
+        disabled={!detail}
+        className={cn(
+          "flex w-full items-center gap-2.5 px-3 py-2.5 text-left outline-none transition-colors",
+          detail
+            ? "hover:bg-[var(--bv-frost-12)] focus-visible:ring-2 focus-visible:ring-ring/40"
+            : "cursor-default",
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "grid size-7 shrink-0 place-items-center rounded-lg",
+            errored ? "bg-[var(--bv-danger)]/10" : "bg-[var(--bv-frost-12)]",
+          )}
+        >
+          <SparklesIcon
+            className={cn(
+              "size-4",
+              errored
+                ? "text-[var(--bv-danger)]"
+                : running
+                  ? "text-[var(--bv-blue)]"
+                  : "text-[var(--bv-blue-text)]",
+            )}
+          />
+        </span>
+        <span className="flex min-w-0 flex-col">
+          <span className="text-foreground truncate text-sm font-medium leading-tight">{name}</span>
+          <span
+            // Announce the activation transition (Activating… → activated / failed)
+            // — a skill activation is a notable event worth a live region (P20).
+            role={errored ? "alert" : "status"}
+            className="text-muted-foreground text-[0.7rem] font-medium uppercase leading-tight tracking-wide"
+          >
+            {status}
+          </span>
+        </span>
+        {args ? (
+          <span className="text-muted-foreground ml-auto hidden min-w-0 max-w-[42%] truncate font-mono text-xs sm:block">
+            {args}
+          </span>
+        ) : (
+          <span className="ml-auto" />
+        )}
+        {running ? <span className="bv-dot-live shrink-0" aria-hidden /> : null}
+        {detail ? (
+          <ChevronDownIcon
+            aria-hidden
+            className="text-muted-foreground size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]:rotate-180"
+          />
+        ) : null}
+      </CollapsibleTrigger>
+      {/* Mobile args line — independent of `detail` so a skill with args but no
+          captured output still shows them (the header preview is sm:block-only). */}
+      {args ? (
+        <div className="text-muted-foreground break-words px-3 pb-2 font-mono text-xs sm:hidden">
+          {args}
+        </div>
+      ) : null}
+      {detail ? (
+        <CollapsibleContent className="px-3 pb-3 pt-1">
+          <Mono text={detail} tone={errored ? "danger" : "muted"} />
+        </CollapsibleContent>
+      ) : null}
+    </Collapsible>
+  );
+}

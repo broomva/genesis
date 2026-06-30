@@ -29,7 +29,7 @@ import {
   usePromptInputController,
 } from "@/components/ai-elements/prompt-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
-import { ToolPart } from "@/components/ai-elements/tool";
+import { SkillPart, ToolPart } from "@/components/ai-elements/tool";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { MessageActions, RunTimer } from "@/components/message-actions";
@@ -223,6 +223,13 @@ function AssistantBody({
             onAnswer={onAnswer ?? (() => {})}
           />
         );
+      }
+      // A Skill activation is a first-class event (BRO-1625) — premium badge,
+      // distinct from a generic tool card. The Skill tool input is {skill, args}.
+      // Case-insensitive to match a "skill"/"Skill" spelling either way (mirrors
+      // the AskUserQuestion alternate-spelling handling above) — CodeRabbit #64.
+      if (name.toLowerCase() === "skill") {
+        return <SkillPart key={key} part={p} />;
       }
       return <ToolPart key={key} part={p} />;
     }
