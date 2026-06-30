@@ -224,6 +224,12 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     let state: RunState = { ...initialState, sessionId };
     const assistantAccum = new Map<string, string>();
     let lastAssistant: string | undefined;
+    // Set when the transcript's final assistant entry has been tailed (BRO-1616):
+    // the Stop hook fires turn.complete BEFORE claude writes the assistant
+    // message (thinking + text) to the transcript, so the finalize step drains in
+    // a bounded retry until this flips — at which point any thinking sibling has
+    // been captured too.
+    let transcriptAssistantSeen = false;
     // Latest cost from the statusline feed (BRO-1613) — folded onto the terminal
     // result so the context meter shows the turn's running cost.
     let lastCostUsd: number | undefined;
@@ -311,7 +317,13 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           });
           return;
         case "message.assistant": {
-          if (ir.surface !== "hook") return;
+          if (ir.surface !== "hook") {
+            // The transcript's final assistant entry landed (its thinking sibling,
+            // written just before it, was drained in the same pass) — signal the
+            // turn.complete drain loop it can stop waiting (BRO-1616).
+            transcriptAssistantSeen = true;
+            return;
+          }
           const id = ir.messageId ?? "current";
           const acc = (assistantAccum.get(id) ?? "") + ir.text;
           assistantAccum.set(id, acc);
@@ -351,15 +363,28 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // reduce stream closed. Draining now lets the existing `case "thinking"`
           // push its `thinking_delta` in time. Best-effort — a flush failure must
           // not strand the turn. Idempotent via the tailer's byte offset.
-          console.error(
-            `[bro1616-diag] turn.complete: draining (session=${!!entry.session}, reasoned-before=${state.reasoned})`,
-          );
-          try {
-            await entry.session?.drainTranscript?.();
-          } catch (e) {
-            console.error(`[bro1616-diag] drain threw: ${e}`);
+          // The assistant entry (thinking + text) is written to the transcript a
+          // beat AFTER the Stop hook fires this event (BRO-1616 — verified live: at
+          // turn.complete only the user entry is on disk). Drain in a bounded retry
+          // until that entry lands (transcript `message.assistant` flips the flag),
+          // so the existing `case "thinking"` captures its prose first. No-think
+          // turns exit as soon as the text entry lands; the cap bounds the worst
+          // case. Best-effort — never strand the turn.
+          transcriptAssistantSeen = false;
+          let drainIters = 0;
+          for (; drainIters < 80 && !transcriptAssistantSeen; drainIters++) {
+            try {
+              await entry.session?.drainTranscript?.();
+            } catch (e) {
+              console.error(`[bro1616-diag] drain threw: ${e}`);
+              break;
+            }
+            if (transcriptAssistantSeen) break;
+            await new Promise((resolve) => setTimeout(resolve, 25));
           }
-          console.error(`[bro1616-diag] drain done, reasoned-after=${state.reasoned}`);
+          console.error(
+            `[bro1616-diag] drain loop iters=${drainIters} seen=${transcriptAssistantSeen} reasoned=${state.reasoned}`,
+          );
           // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
           // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
           // print engine's independent turns) totals correctly instead of growing
