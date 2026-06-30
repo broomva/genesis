@@ -28,6 +28,12 @@ export interface Session {
   /** Human-readable thread title — auto-derived from the first user turn, or
    *  renamed (BRO-1592). Absent → the drawer falls back to a last-text preview. */
   title?: string;
+  /** Resolved agent engine for this thread (BRO-1620) — bound STICKY on the first
+   *  turn (from the client's requested engine, else the server default) and reused
+   *  for every later turn + control op, so flipping the global default never
+   *  reroutes a thread that already has a live (e.g. tmux) session. Absent → resolve
+   *  to the supervisor's defaultEngine at read time. */
+  engine?: string;
 }
 
 export interface Turn {

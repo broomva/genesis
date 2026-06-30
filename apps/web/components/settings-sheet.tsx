@@ -16,7 +16,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { EFFORT_OPTIONS, MODEL_OPTIONS, type SelectOption } from "@/lib/chat-options";
+import {
+  EFFORT_OPTIONS,
+  ENGINE_OPTIONS,
+  MODEL_OPTIONS,
+  type SelectOption,
+} from "@/lib/chat-options";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 
@@ -172,7 +177,24 @@ export function SettingsSheet({
               </Row>
             </Section>
 
-            <Section icon={Cpu} title="Models">
+            <Section icon={Cpu} title="Models & engine">
+              <Row
+                label="Engine"
+                hint="Interactive keeps a live session per chat; print runs one-shot. Applies to new chats — an existing chat keeps the engine it started with."
+              >
+                <SegmentedControl
+                  type="single"
+                  value={prefs.engine}
+                  onValueChange={(v) => v && onUpdate({ engine: v })}
+                  aria-label="Engine"
+                >
+                  {ENGINE_OPTIONS.map((o) => (
+                    <SegmentedControlItem key={o.value} value={o.value}>
+                      {o.label}
+                    </SegmentedControlItem>
+                  ))}
+                </SegmentedControl>
+              </Row>
               <Row
                 label="Default model"
                 hint="Seeds new chats; change it per turn in the composer."

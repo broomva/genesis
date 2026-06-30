@@ -19,6 +19,7 @@ import { THEME_KEY, applyTheme, watchSystemTheme } from "@/lib/theme";
 const MODEL_KEY = "genesis:model";
 const EFFORT_KEY = "genesis:effort";
 const SHOW_REASONING_KEY = "genesis:show-reasoning";
+const ENGINE_KEY = "genesis:engine";
 
 function writeLocal(p: Preferences): void {
   try {
@@ -26,6 +27,7 @@ function writeLocal(p: Preferences): void {
     localStorage.setItem(EFFORT_KEY, p.effort);
     localStorage.setItem(THEME_KEY, p.theme);
     localStorage.setItem(SHOW_REASONING_KEY, String(p.showReasoning));
+    localStorage.setItem(ENGINE_KEY, p.engine);
   } catch {
     // private mode — state still drives this session.
   }
@@ -39,6 +41,7 @@ function readLocal(): Preferences {
       effort: localStorage.getItem(EFFORT_KEY),
       theme: localStorage.getItem(THEME_KEY),
       showReasoning: sr === null ? undefined : sr === "true",
+      engine: localStorage.getItem(ENGINE_KEY),
     });
   } catch {
     return DEFAULT_PREFERENCES;

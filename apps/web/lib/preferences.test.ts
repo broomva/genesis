@@ -11,8 +11,20 @@ describe("sanitizePreferences (BRO-1618)", () => {
   });
 
   test("valid full shape is preserved", () => {
-    const p = { model: "opus", effort: "high", theme: "dark", showReasoning: false };
+    const p = {
+      model: "opus",
+      effort: "high",
+      theme: "dark",
+      showReasoning: false,
+      engine: "print",
+    };
     expect(sanitizePreferences(p)).toEqual(p);
+  });
+
+  test("unknown engine falls back to default; known engine kept (BRO-1620)", () => {
+    expect(sanitizePreferences({ engine: "quantum" }).engine).toBe(DEFAULT_PREFERENCES.engine);
+    expect(sanitizePreferences({ engine: "print" }).engine).toBe("print");
+    expect(sanitizePreferences({ engine: "interactive" }).engine).toBe("interactive");
   });
 
   test("unknown / stale model + effort fall back (never leave a Select blank)", () => {

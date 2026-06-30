@@ -48,6 +48,13 @@ export interface BuildOpts {
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
+  /** Engine REGISTRY (BRO-1620) — per-thread engine selection. `runners` maps an
+   *  engine id to its runner; `controls` the ids with a live-session control;
+   *  `defaultEngine` is what a thread inherits absent a client request. `print`
+   *  is always registered. Forwarded verbatim to the Supervisor. */
+  runners?: Record<string, (opts: RunOptions) => Promise<RunResult>>;
+  controls?: Record<string, EngineControl>;
+  defaultEngine?: string;
   /** Run the agent directly in the workspace (no per-session worktree) —
    *  required for workspaces with nested git repos (BRO-1512). */
   noWorktree?: boolean;
@@ -67,6 +74,9 @@ export function build(opts: BuildOpts) {
     store: opts.store,
     run: opts.run,
     control: opts.control,
+    runners: opts.runners,
+    controls: opts.controls,
+    defaultEngine: opts.defaultEngine,
   });
 
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {
@@ -216,7 +226,7 @@ export function build(opts: BuildOpts) {
             }
           }
         },
-        { model: incoming.model, effort: incoming.effort },
+        { model: incoming.model, effort: incoming.effort, engine: incoming.engine },
       );
       emit({
         kind: "reply",

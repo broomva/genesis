@@ -57,6 +57,55 @@ describe("supervisor", () => {
     expect(seenResume).toBe("sid-persist"); // second turn resumes the captured session
   });
 
+  // Records which engine's runner ran, by id.
+  function trackingRunner(id: string, calls: string[]): (o: any) => Promise<RunResult> {
+    return async () => {
+      calls.push(id);
+      return {
+        state: { phase: "done", sessionId: `s-${id}`, lastText: id, turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+  }
+
+  test("engine registry: per-thread STICKY binding (BRO-1620)", async () => {
+    const calls: string[] = [];
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      store,
+      runners: {
+        print: trackingRunner("print", calls),
+        interactive: trackingRunner("interactive", calls),
+      },
+      defaultEngine: "print",
+    });
+    // Turn 1 requests interactive → runs it AND binds the session to it.
+    await sup.dispatch("te", "one", undefined, { engine: "interactive" });
+    expect(calls.at(-1)).toBe("interactive");
+    expect((await store.findSessionByThread("te"))?.engine).toBe("interactive");
+    // Turn 2 requests print → IGNORED (sticky); the thread stays interactive.
+    await sup.dispatch("te", "two", undefined, { engine: "print" });
+    expect(calls.at(-1)).toBe("interactive");
+  });
+
+  test("engine registry: absent → default; unknown → default, no crash (BRO-1620)", async () => {
+    const calls: string[] = [];
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      runners: {
+        print: trackingRunner("print", calls),
+        interactive: trackingRunner("interactive", calls),
+      },
+      defaultEngine: "interactive",
+    });
+    await sup.dispatch("td1", "x"); // no engine → defaultEngine (interactive)
+    expect(calls.at(-1)).toBe("interactive");
+    await sup.dispatch("td2", "y", undefined, { engine: "quantum" }); // unknown → default
+    expect(calls.at(-1)).toBe("interactive");
+  });
+
   test("listThreads returns threads newest-first with last-turn preview (BRO-1567)", async () => {
     const store = new InMemoryStore();
     await store.upsertWorkspace(ws);

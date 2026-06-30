@@ -8,7 +8,7 @@
 //   parts:   start · reasoning-* · text-* · tool-input/output-* · message-metadata · error · finish
 
 import type { TokenUsage } from "@genesis/projection";
-import { EFFORT_LEVELS, type EffortLevel } from "./types";
+import { EFFORT_LEVELS, ENGINE_IDS, type EffortLevel } from "./types";
 import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
 
 /** Per-message metadata (BRO-1597) surfaced to `useChat` as `message.metadata`
@@ -48,6 +48,7 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     message?: unknown;
     model?: unknown;
     effort?: unknown;
+    engine?: unknown;
   };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
@@ -75,8 +76,12 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   const effort = (EFFORT_LEVELS as readonly string[]).includes(effortRaw)
     ? (effortRaw as EffortLevel)
     : undefined;
+  // Engine (BRO-1620) — validated against the allowlist; unknown dropped so the
+  // supervisor falls back to its default (and binds it sticky on turn 1).
+  const engineRaw = typeof b.engine === "string" ? b.engine.trim() : "";
+  const engine = (ENGINE_IDS as readonly string[]).includes(engineRaw) ? engineRaw : undefined;
 
-  return { threadId, text, model, effort };
+  return { threadId, text, model, effort, engine };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────

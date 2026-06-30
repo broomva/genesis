@@ -76,3 +76,24 @@ export function isKnownModel(value: string | null): value is string {
 export function isKnownEffort(value: string | null): value is string {
   return value != null && EFFORT_OPTIONS.some((o) => o.value === value);
 }
+
+/** Agent engine picker (BRO-1620). `interactive` = a persistent Claude Code
+ *  session per thread (richer, the exempt subscription class — the default);
+ *  `print` = one-shot `claude -p` (metered). Sent per turn but the server honors it
+ *  only on a thread's FIRST turn (per-thread sticky). Keep these values in sync
+ *  with the server's ENGINE_IDS (apps/api channel/types.ts). */
+export const ENGINE_OPTIONS: readonly SelectOption[] = [
+  { value: "interactive", label: "Interactive" },
+  { value: "print", label: "Print" },
+];
+export const DEFAULT_ENGINE = "interactive";
+
+export function isKnownEngine(value: string | null): value is string {
+  return value != null && ENGINE_OPTIONS.some((o) => o.value === value);
+}
+
+/** Engine rides as a concrete value (no sentinel-omit) — the server binds it
+ *  sticky on turn 1, validating against its registry (unknown → its default). */
+export function engineToBody(engine: string): string {
+  return engine;
+}

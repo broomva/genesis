@@ -51,6 +51,7 @@ import {
   MODEL_OPTIONS,
   contextWindowFor,
   effortToBody,
+  engineToBody,
   modelToBody,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
@@ -367,6 +368,7 @@ export function ChatView({
   showReasoning,
   theme,
   onThemeChange,
+  engine,
 }: {
   threadId: string;
   initialMessages: UIMessage[];
@@ -386,6 +388,10 @@ export function ChatView({
    *  so it never drifts from the settings sheet. */
   theme: ThemeChoice;
   onThemeChange: (theme: ThemeChoice) => void;
+  /** Selected agent engine (BRO-1620) — sent per turn (sticky on the server's
+   *  first turn). Interactive ignores per-turn model/effort, so those selectors
+   *  are hidden when it's active. */
+  engine: string;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
   const { messages, sendMessage, status, error, stop, regenerate } = useChat({
@@ -449,7 +455,13 @@ export function ChatView({
     setNotice(null);
     void sendMessage(
       { text },
-      { body: { model: modelToBody(model), effort: effortToBody(effort) } },
+      {
+        body: {
+          model: modelToBody(model),
+          effort: effortToBody(effort),
+          engine: engineToBody(engine),
+        },
+      },
     );
   }
 
@@ -554,7 +566,11 @@ export function ChatView({
                           onRetry={() =>
                             regenerate({
                               messageId: message.id,
-                              body: { model: modelToBody(model), effort: effortToBody(effort) },
+                              body: {
+                                model: modelToBody(model),
+                                effort: effortToBody(effort),
+                                engine: engineToBody(engine),
+                              },
                             })
                           }
                           onAnswer={send}
@@ -623,30 +639,36 @@ export function ChatView({
                       </PromptInputActionMenu>
                       {/* Copy the current input (BRO-1610). */}
                       <ComposerCopyButton />
-                      <PromptInputSelect value={model} onValueChange={onModelChange}>
-                        <PromptInputSelectTrigger aria-label="Model">
-                          <PromptInputSelectValue />
-                        </PromptInputSelectTrigger>
-                        <PromptInputSelectContent>
-                          {MODEL_OPTIONS.map((o) => (
-                            <PromptInputSelectItem key={o.value} value={o.value}>
-                              {o.label}
-                            </PromptInputSelectItem>
-                          ))}
-                        </PromptInputSelectContent>
-                      </PromptInputSelect>
-                      <PromptInputSelect value={effort} onValueChange={onEffortChange}>
-                        <PromptInputSelectTrigger aria-label="Effort">
-                          <PromptInputSelectValue />
-                        </PromptInputSelectTrigger>
-                        <PromptInputSelectContent>
-                          {EFFORT_OPTIONS.map((o) => (
-                            <PromptInputSelectItem key={o.value} value={o.value}>
-                              {o.label}
-                            </PromptInputSelectItem>
-                          ))}
-                        </PromptInputSelectContent>
-                      </PromptInputSelect>
+                      {/* Interactive ignores per-turn model/effort (set at session
+                          spawn) — hide the selectors when it's active (BRO-1620). */}
+                      {engine !== "interactive" ? (
+                        <>
+                          <PromptInputSelect value={model} onValueChange={onModelChange}>
+                            <PromptInputSelectTrigger aria-label="Model">
+                              <PromptInputSelectValue />
+                            </PromptInputSelectTrigger>
+                            <PromptInputSelectContent>
+                              {MODEL_OPTIONS.map((o) => (
+                                <PromptInputSelectItem key={o.value} value={o.value}>
+                                  {o.label}
+                                </PromptInputSelectItem>
+                              ))}
+                            </PromptInputSelectContent>
+                          </PromptInputSelect>
+                          <PromptInputSelect value={effort} onValueChange={onEffortChange}>
+                            <PromptInputSelectTrigger aria-label="Effort">
+                              <PromptInputSelectValue />
+                            </PromptInputSelectTrigger>
+                            <PromptInputSelectContent>
+                              {EFFORT_OPTIONS.map((o) => (
+                                <PromptInputSelectItem key={o.value} value={o.value}>
+                                  {o.label}
+                                </PromptInputSelectItem>
+                              ))}
+                            </PromptInputSelectContent>
+                          </PromptInputSelect>
+                        </>
+                      ) : null}
                     </PromptInputTools>
                     {/* Right group: the context meter (BRO-1604) sits next to the
                         send button — a compact usage trigger that opens the breakdown

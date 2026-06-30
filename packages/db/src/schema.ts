@@ -28,6 +28,10 @@ export const sessions = pgTable("sessions", {
   // user turn, or renamed). Both additive — see the ALTER block in MIGRATE_SQL.
   archived: boolean("archived").notNull().default(false),
   title: text("title"),
+  // Per-thread sticky engine binding (BRO-1620): "print" | "interactive", set on
+  // the first turn, reused after. Additive — see the ALTER block. NULL → the
+  // supervisor's defaultEngine at read time.
+  engine: text("engine"),
 });
 
 export const turns = pgTable(
@@ -98,6 +102,7 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE INDEX IF NOT EXISTS turns_session_idx ON turns (session_id);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engine text;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS input_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;

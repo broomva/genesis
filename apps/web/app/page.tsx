@@ -216,6 +216,7 @@ export default function ChatPage() {
             showReasoning={prefs.showReasoning}
             theme={prefs.theme}
             onThemeChange={(theme) => update({ theme })}
+            engine={prefs.engine}
           />
         ) : (
           <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
