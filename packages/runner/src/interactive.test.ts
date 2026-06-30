@@ -64,12 +64,23 @@ class FakeHub implements EngineHub {
   async createSession(opts: { sessionId?: string; initialPrompt?: string }): Promise<FakeSession> {
     this.createCalls += 1;
     const id = opts.sessionId ?? "fake-session";
-    const drainScript = this.drainScript;
-    const onDrain = drainScript
-      ? (sid: string) => {
-          for (const e of drainScript(sid)) this.emit(e);
-        }
-      : undefined;
+    // Default drain mirrors reality: the transcript always receives the assistant
+    // entry shortly after turn.complete, which ends the engine's bounded drain
+    // loop (BRO-1616). Tests that exercise thinking override with their own script.
+    const drainScript =
+      this.drainScript ??
+      ((sid: string): IREvent[] => [
+        {
+          sessionId: sid,
+          observedAt: 1,
+          surface: "transcript",
+          kind: "message.assistant",
+          text: "",
+        },
+      ]);
+    const onDrain = (sid: string) => {
+      for (const e of drainScript(sid)) this.emit(e);
+    };
     const session = new FakeSession(id, (sid) => this.playScript(sid), onDrain);
     this.sessions.push(session);
     if (opts.initialPrompt !== undefined) this.playScript(id);
@@ -173,6 +184,9 @@ describe("createInteractiveEngine", () => {
       },
       { ...base(sid), kind: "turn.complete", lastAssistantMessage: "The answer is 33." },
     ];
+    // The drain delivers the late-written transcript entries: the thinking block
+    // FOLLOWED by the assistant message (the order claude writes them). The
+    // assistant message ends the bounded drain-retry loop.
     const drainTurn = (sid: string): IREvent[] => [
       {
         sessionId: sid,
@@ -180,6 +194,14 @@ describe("createInteractiveEngine", () => {
         surface: "transcript",
         kind: "thinking",
         text: "I used inclusion-exclusion: 99 − 66 = 33.",
+      },
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "message.assistant",
+        text: "The answer is 33.",
+        messageId: "m1",
       },
     ];
     const hub = new FakeHub(hookTurn, drainTurn);
@@ -196,23 +218,34 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
-  test("without the flush, transcript-only thinking is lost (the BRO-1616 race)", async () => {
-    // Same hook turn, NO drainScript → models the pre-fix race where the thinking
-    // never lands before finalize. Guards that capture comes from the flush.
-    const hub = new FakeHub((sid) => [
+  test("a no-thinking turn drains the assistant entry but stays not-reasoned (BRO-1616)", async () => {
+    // The drain delivers the late assistant entry but NO thinking sibling (adaptive
+    // thinking skipped a trivial turn). The loop terminates on the assistant entry;
+    // reasoned stays false. Guards that capture is thinking-specific, not "any drain".
+    const hookTurn = (sid: string): IREvent[] => [
       { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
       {
         ...base(sid),
         kind: "message.assistant",
-        text: "The answer is 33.",
+        text: "4.",
         messageId: "m1",
         streaming: { final: true },
       },
-      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "The answer is 33." },
-    ]);
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "4." },
+    ];
+    const drainTurn = (sid: string): IREvent[] => [
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "message.assistant",
+        text: "4.",
+      },
+    ];
+    const hub = new FakeHub(hookTurn, drainTurn);
     const engine = createInteractiveEngine({ hub });
     const result = await engine.run({
-      prompt: "count",
+      prompt: "2+2",
       cwd: "/x",
       worktree: false,
       sessionKey: "sr2",

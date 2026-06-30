@@ -270,14 +270,6 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
 
     const unsubscribe = engineHub.onEvent(async (ir) => {
       if (ir.sessionId !== sessionId) return;
-      if (ir.surface !== "hook")
-        console.error(
-          `[bro1616-diag] non-hook IR kind=${ir.kind} surface=${ir.surface} textlen=${
-            typeof (ir as { text?: unknown }).text === "string"
-              ? (ir as { text: string }).text.length
-              : "n/a"
-          }`,
-        );
       if (ir.surface === "hook") entry.hookSeen = true;
       // Hook surface only: in TTY-interactive mode it is the sole live content
       // source, and filtering prevents double-emit if a transcript ever
@@ -365,26 +357,22 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // not strand the turn. Idempotent via the tailer's byte offset.
           // The assistant entry (thinking + text) is written to the transcript a
           // beat AFTER the Stop hook fires this event (BRO-1616 — verified live: at
-          // turn.complete only the user entry is on disk). Drain in a bounded retry
-          // until that entry lands (transcript `message.assistant` flips the flag),
-          // so the existing `case "thinking"` captures its prose first. No-think
-          // turns exit as soon as the text entry lands; the cap bounds the worst
+          // turn.complete only the user entry is on disk; the assistant lands ~5
+          // poll-ticks / ~125ms later). Drain in a bounded retry until that entry
+          // lands (the transcript `message.assistant` flips the flag), so the
+          // existing `case "thinking"` captures its prose first. No-think turns exit
+          // as soon as the text entry lands; the 2s cap (80 × 25ms) bounds the worst
           // case. Best-effort — never strand the turn.
           transcriptAssistantSeen = false;
-          let drainIters = 0;
-          for (; drainIters < 80 && !transcriptAssistantSeen; drainIters++) {
+          for (let i = 0; i < 80 && !transcriptAssistantSeen; i++) {
             try {
               await entry.session?.drainTranscript?.();
-            } catch (e) {
-              console.error(`[bro1616-diag] drain threw: ${e}`);
-              break;
+            } catch {
+              break; // tolerate flush errors — finalize the turn regardless
             }
             if (transcriptAssistantSeen) break;
             await new Promise((resolve) => setTimeout(resolve, 25));
           }
-          console.error(
-            `[bro1616-diag] drain loop iters=${drainIters} seen=${transcriptAssistantSeen} reasoned=${state.reasoned}`,
-          );
           // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
           // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
           // print engine's independent turns) totals correctly instead of growing
