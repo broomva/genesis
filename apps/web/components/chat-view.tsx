@@ -226,7 +226,9 @@ function AssistantBody({
       }
       // A Skill activation is a first-class event (BRO-1625) — premium badge,
       // distinct from a generic tool card. The Skill tool input is {skill, args}.
-      if (name === "Skill") {
+      // Case-insensitive to match a "skill"/"Skill" spelling either way (mirrors
+      // the AskUserQuestion alternate-spelling handling above) — CodeRabbit #64.
+      if (name.toLowerCase() === "skill") {
         return <SkillPart key={key} part={p} />;
       }
       return <ToolPart key={key} part={p} />;
