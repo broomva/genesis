@@ -48,6 +48,10 @@ export interface EngineSession {
   interrupt(): Promise<void>;
   alive(): Promise<boolean>;
   kill(): Promise<void>;
+  /** Flush the transcript tailer to EOF (BRO-1616) — drains the final assistant
+   *  message's extended-thinking before the turn finalizes. Optional so scripted
+   *  fakes (and non-transcript sessions) can omit it. */
+  drainTranscript?(): Promise<void>;
 }
 
 export interface InteractiveEngineConfig {
@@ -258,7 +262,7 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       finish();
     };
 
-    const unsubscribe = engineHub.onEvent((ir) => {
+    const unsubscribe = engineHub.onEvent(async (ir) => {
       if (ir.sessionId !== sessionId) return;
       if (ir.surface === "hook") entry.hookSeen = true;
       // Hook surface only: in TTY-interactive mode it is the sole live content
@@ -333,6 +337,17 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           return;
         case "turn.complete": {
           if (ir.surface !== "hook") return; // terminal kinds are hook-only too
+          // Flush the transcript BEFORE finalizing (BRO-1616): the Stop hook that
+          // fires this event outpaces the async tailer, so the final assistant
+          // message's extended-thinking (transcript-only) would land after the
+          // reduce stream closed. Draining now lets the existing `case "thinking"`
+          // push its `thinking_delta` in time. Best-effort — a flush failure must
+          // not strand the turn. Idempotent via the tailer's byte offset.
+          try {
+            await entry.session?.drainTranscript?.();
+          } catch {
+            // tolerate flush errors — finalize the turn regardless
+          }
           // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
           // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
           // print engine's independent turns) totals correctly instead of growing

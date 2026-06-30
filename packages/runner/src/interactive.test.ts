@@ -13,9 +13,13 @@ class FakeSession implements EngineSession {
   sent: string[] = [];
   killed = false;
   interrupted = 0;
+  drained = 0;
   constructor(
     public sessionId: string,
     private deliver: (sessionId: string) => void,
+    /** Emits transcript-only content (e.g. thinking) the way the real tailer
+     *  does when flushed — used to exercise the BRO-1616 drain. */
+    private onDrain?: (sessionId: string) => void,
   ) {}
   async send(text: string): Promise<void> {
     this.sent.push(text);
@@ -30,6 +34,10 @@ class FakeSession implements EngineSession {
   async kill(): Promise<void> {
     this.killed = true;
   }
+  async drainTranscript(): Promise<void> {
+    this.drained += 1;
+    this.onDrain?.(this.sessionId);
+  }
 }
 
 class FakeHub implements EngineHub {
@@ -37,8 +45,13 @@ class FakeHub implements EngineHub {
   sessions: FakeSession[] = [];
   createCalls = 0;
   stopped = false;
-  /** Script: IR events (minus sessionId) emitted after each spawn/send. */
-  constructor(private script: (sessionId: string) => IREvent[]) {}
+  /** Script: IR events (minus sessionId) emitted after each spawn/send.
+   *  `drainScript` (optional): transcript-only events the engine pulls in when it
+   *  flushes the transcript at turn.complete (BRO-1616). */
+  constructor(
+    private script: (sessionId: string) => IREvent[],
+    private drainScript?: (sessionId: string) => IREvent[],
+  ) {}
 
   start(): void {}
   async stop(): Promise<void> {
@@ -51,7 +64,13 @@ class FakeHub implements EngineHub {
   async createSession(opts: { sessionId?: string; initialPrompt?: string }): Promise<FakeSession> {
     this.createCalls += 1;
     const id = opts.sessionId ?? "fake-session";
-    const session = new FakeSession(id, (sid) => this.playScript(sid));
+    const drainScript = this.drainScript;
+    const onDrain = drainScript
+      ? (sid: string) => {
+          for (const e of drainScript(sid)) this.emit(e);
+        }
+      : undefined;
+    const session = new FakeSession(id, (sid) => this.playScript(sid), onDrain);
     this.sessions.push(session);
     if (opts.initialPrompt !== undefined) this.playScript(id);
     return session;
@@ -137,6 +156,70 @@ describe("createInteractiveEngine", () => {
     expect(states.at(-1)).toBe("done");
     await engine.shutdown();
     expect(hub.stopped).toBe(true);
+  });
+
+  test("flushes transcript-only thinking at turn.complete → reasoned + reasoning (BRO-1616)", async () => {
+    // Hook surface carries the answer + turn.complete but NOT the thinking —
+    // extended-thinking is transcript-only and the Stop hook outpaces the tailer.
+    // It lands only when the engine flushes the transcript at turn.complete.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "The answer is 33.",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "The answer is 33." },
+    ];
+    const drainTurn = (sid: string): IREvent[] => [
+      {
+        sessionId: sid,
+        observedAt: 1,
+        surface: "transcript",
+        kind: "thinking",
+        text: "I used inclusion-exclusion: 99 − 66 = 33.",
+      },
+    ];
+    const hub = new FakeHub(hookTurn, drainTurn);
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({
+      prompt: "count",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sr",
+    });
+    expect(hub.sessions[0]?.drained).toBeGreaterThan(0); // the engine flushed at turn.complete
+    expect(result.state.reasoned).toBe(true);
+    expect(result.state.reasoning ?? "").toContain("inclusion-exclusion");
+    await engine.shutdown();
+  });
+
+  test("without the flush, transcript-only thinking is lost (the BRO-1616 race)", async () => {
+    // Same hook turn, NO drainScript → models the pre-fix race where the thinking
+    // never lands before finalize. Guards that capture comes from the flush.
+    const hub = new FakeHub((sid) => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "The answer is 33.",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "The answer is 33." },
+    ]);
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({
+      prompt: "count",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sr2",
+    });
+    expect(result.state.reasoned).toBeFalsy();
+    expect(result.state.reasoning ?? "").toBe("");
+    await engine.shutdown();
   });
 
   test("tool ids flow through → a BUILT + FILLED tool part (BRO-1613 S2)", async () => {

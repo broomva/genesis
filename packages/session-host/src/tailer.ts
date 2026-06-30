@@ -61,6 +61,20 @@ export class TranscriptTailer {
     if (this.pollTimer !== undefined) clearInterval(this.pollTimer);
   }
 
+  /** Force an immediate read to EOF, awaiting any in-flight poll first, so all
+   *  complete lines written so far are delivered synchronously on return. Used
+   *  to flush the transcript before a turn is finalized (BRO-1616): the
+   *  hook-driven `turn.complete` outpaces the 250ms poll, so the final assistant
+   *  message's extended-thinking would otherwise be read after the turn closed.
+   *  Idempotent — `drain()` only emits bytes past the tracked offset. */
+  async flush(): Promise<void> {
+    // A concurrent poll tick may be mid-read; wait it out so our drain sees EOF.
+    for (let i = 0; this.reading && i < 200; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this.drain();
+  }
+
   /** Read any new bytes past the current offset and emit complete lines. */
   private async drain(): Promise<void> {
     if (this.stopped) return;
