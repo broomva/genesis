@@ -131,6 +131,27 @@ function applyToolResults(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
   return out;
 }
 
+/** On a terminal transition, reconcile any tool part still left `input-available`
+ *  — its result never arrived (process killed mid-command, stream truncated, or a
+ *  `turn.failed`/`result` landing before the tool's completion) — into
+ *  `output-error`, so the UI doesn't spin a tool forever on a finished run. A
+ *  clean run has none (every result arrived) → returns the same array (no-op).
+ *  Shared by both engines via the `result` branch; codex makes it materially more
+ *  likely (started/completed are two separate JSONL lines run under
+ *  `approval_policy=never`) — P20 BRO-1621. */
+export function reconcileStrandedParts(parts: TurnPart[] | undefined): TurnPart[] | undefined {
+  if (!parts || parts.length === 0) return parts;
+  let changed = false;
+  const out = parts.map((p) => {
+    if (p.type === "tool" && p.state === "input-available") {
+      changed = true;
+      return { ...p, state: "output-error" as const, output: p.output ?? "interrupted" };
+    }
+    return p;
+  });
+  return changed ? out : parts;
+}
+
 /** Clean per-turn token usage (BRO-1597) — the reducer's projection of the CLI's
  *  RawUsage. `input` excludes cache; cache tokens are tracked separately so the
  *  context-window meter can sum input+cacheRead+cacheCreation (the real prompt
@@ -337,6 +358,7 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           phase: "blocked",
           error: event.subtype ?? "error",
           pendingQuestion: undefined,
+          parts: reconcileStrandedParts(state.parts),
           usage,
           costUsd,
         };
@@ -351,6 +373,7 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
         phase: "done",
         lastText: event.result ?? state.lastText,
         pendingQuestion: undefined,
+        parts: reconcileStrandedParts(state.parts),
         usage,
         costUsd,
       };

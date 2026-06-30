@@ -18,6 +18,18 @@
 // user runs `codex login --device-auth` ON the host once; the agent NEVER logs
 // in. `codexEnv` keeps HOME/CODEX_HOME so that auth survives, and deliberately
 // strips OPENAI_API_KEY so codex can't silently fall back to metered API auth.
+//
+// Isolation, stated precisely (the env-scrub is NOT the whole story): the scrub
+// removes env-VAR secrets, but under the `-s workspace-write` sandbox the agent
+// can still READ the entire filesystem (only writes are confined to the
+// workspace) — so file-based secrets (`~/.codex/auth.json`, `~/.ssh/…`) are
+// readable by a prompt-injected turn. The two guards that actually hold are:
+// (1) `codexArgs` pins `network_access=false`, so a read can't be exfiltrated
+// over the network by a model-run command; (2) `approval_policy=never` denies
+// (never escalates) anything the sandbox blocks. NOTE: per-run git-worktree
+// isolation applies only when the deploy does NOT set `GENESIS_NO_WORKTREE=1`;
+// prod sets it (nested-repo workspaces), so there codex runs in the real
+// workspace tree — the network pin + write-confinement are the live boundary.
 
 import { type ExecutionHost, LocalHost } from "@genesis/host";
 import {
@@ -26,6 +38,7 @@ import {
   type RawUsage,
   type RunState,
   initialState,
+  reconcileStrandedParts,
   reduce,
 } from "@genesis/projection";
 import {
@@ -51,8 +64,8 @@ function codexRunId(): string {
  *     (approval policy is config-only) — `-a never` is an exit-2 usage error.
  *   - `resume <id>` has --json + --skip-git-repo-check + -c, but NO -s flag.
  *
- *   new    : codex exec --json --skip-git-repo-check -s workspace-write -c approval_policy=never -- <prompt>
- *   resume : codex exec resume <id> --json --skip-git-repo-check -c sandbox_mode=workspace-write -c approval_policy=never -- <prompt>
+ *   new    : codex exec --json --skip-git-repo-check -s workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=false -- <prompt>
+ *   resume : codex exec resume <id> --json --skip-git-repo-check -c sandbox_mode=workspace-write -c approval_policy=never -c sandbox_workspace_write.network_access=false -- <prompt>
  *
  * The prompt is a positional after `--` so a prompt starting with `-` can never
  * be parsed as a flag (defense-in-depth, mirrors claude's equals-form). The cwd
@@ -60,6 +73,20 @@ function codexRunId(): string {
  * `spawnStream({ cwd })`), which keeps new + resume identical AND lines up with
  * codex's cwd-scoped session filtering so `resume <id>` finds the thread.
  * `--json` emits the thread/turn/item JSONL we parse.
+ *
+ * `network_access=false` is pinned (not left to codex's default / the user's
+ * `~/.codex/config.toml`) as defense-in-depth: under `workspace-write` the agent
+ * can READ the whole filesystem (only writes are confined), so a prompt-injected
+ * turn could otherwise exfiltrate file-based secrets over the network. This pins
+ * the sandbox shut for model-RUN commands; codex's own API call to OpenAI is
+ * unaffected (it runs outside the command sandbox). P20 BRO-1621.
+ *
+ * `opts.extraArgs` is intentionally NOT forwarded — same reasoning as
+ * model/effort below. `extraArgs` is the supervisor's `GENESIS_AGENT_ARGS`,
+ * canonically claude flags (`--dangerously-skip-permissions`); codex's clap
+ * parser rejects an unknown flag with exit 2, which would brick EVERY codex
+ * turn on any host configured for claude. The engine boundary must not leak the
+ * other vendor's global knobs (P20 BRO-1621, Forge cross-vendor finding).
  *
  * v1 does NOT forward `opts.model` / `opts.effort`: codex models are auth-tier
  * gated (a subscription tier 400s on an unavailable model) and the per-turn
@@ -69,7 +96,7 @@ function codexRunId(): string {
 export function codexArgs(opts: RunOptions): string[] {
   const bin = opts.agentBin ?? "codex";
   if (opts.resumeSessionId) {
-    const args = [
+    return [
       bin,
       "exec",
       "resume",
@@ -80,12 +107,13 @@ export function codexArgs(opts: RunOptions): string[] {
       "sandbox_mode=workspace-write",
       "-c",
       "approval_policy=never",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
+      "--",
+      opts.prompt,
     ];
-    if (opts.extraArgs) args.push(...opts.extraArgs);
-    args.push("--", opts.prompt);
-    return args;
   }
-  const args = [
+  return [
     bin,
     "exec",
     "--json",
@@ -94,10 +122,11 @@ export function codexArgs(opts: RunOptions): string[] {
     "workspace-write",
     "-c",
     "approval_policy=never",
+    "-c",
+    "sandbox_workspace_write.network_access=false",
+    "--",
+    opts.prompt,
   ];
-  if (opts.extraArgs) args.push(...opts.extraArgs);
-  args.push("--", opts.prompt);
-  return args;
 }
 
 /**
@@ -161,7 +190,11 @@ interface CodexUsage {
 /** Map codex usage → Genesis RawUsage. codex `input_tokens` is the TOTAL prompt
  *  (cached + uncached); Genesis `input_tokens` excludes cache (the context meter
  *  sums input + cacheRead + cacheCreation), so subtract the cached portion to
- *  avoid double-counting. codex has no cache-creation split → 0. */
+ *  avoid double-counting. codex has no cache-creation split → 0. `reasoning_
+ *  output_tokens` is reported separately and intentionally NOT folded into
+ *  `output_tokens`: the context-window meter sums the PROMPT side (input + cache)
+ *  only, so reasoning tokens don't affect it, and codex turns are unpriced
+ *  (costUsd stays undefined) so there's no billing line they'd skew. */
 function mapCodexUsage(u: CodexUsage | undefined): RawUsage | undefined {
   if (!u || typeof u !== "object") return undefined;
   const total = typeof u.input_tokens === "number" ? u.input_tokens : 0;
@@ -264,6 +297,17 @@ export function parseCodexLine(line: string): AgentEvent[] {
     case "turn.started":
       return [];
     case "turn.completed":
+      // → a SUCCESS `result`, which the reducer treats as the absorbing terminal.
+      // Safe because `codex exec` is single-turn-per-invocation (verified live on
+      // 0.133.0: exactly one turn.started→turn.completed, then the process exits);
+      // the happy path NEEDS this to terminalize, since runCodex's post-loop only
+      // forces `blocked` on a NONZERO exit, so a clean zero-exit run would
+      // otherwise stay "running". The deliberate omission of a `result` field
+      // preserves the agent_message text as `lastText` (reducer: `event.result ??
+      // state.lastText`) — do NOT add one here or the final answer is clobbered.
+      // INVARIANT: if a future codex emits >1 turn per exec, this absorbs-drops
+      // everything after the first turn.completed → terminalize on process-exit
+      // instead (P20 BRO-1621, Forge finding).
       return [
         { type: "result", subtype: "success", usage: mapCodexUsage(value.usage as CodexUsage) },
       ];
@@ -291,15 +335,25 @@ export function parseCodexLine(line: string): AgentEvent[] {
         if (!completed) return [toolUse]; // started → input-available tool part
         // completed → re-emit the tool_use (idempotent in the reducer, so a
         // dropped `item.started` can't strand the result) + fill its output.
-        const isError = typeof item.exit_code === "number" && item.exit_code !== 0;
+        // Success requires an EXPLICIT zero exit: a completed command with a
+        // null/absent exit_code (killed / timed-out / unknown) is an error, not
+        // a silent green (P20 BRO-1621). NOTE: each codex item maps to its own
+        // assistant event, so RunState.turns counts items, not API turns — this
+        // is latent (turns isn't surfaced in DispatchResult/persistence) but
+        // means codex `turns` ≠ claude `turns`; don't compare them.
+        const isError = !(typeof item.exit_code === "number" && item.exit_code === 0);
         return [toolUse, userToolResult(id, item.aggregated_output ?? "", isError)];
       }
       // Any OTHER item type (file_change, mcp_tool_call, web_search, todo_list,
       // …): surface it as a generic tool part on completion so the work is
       // visible in the timeline without a per-type schema. Needs an id to join.
+      // The tool_use INPUT is just the type (not the whole item) so an item that
+      // embeds large bodies — e.g. a file_change with file contents — can't push
+      // an uncapped blob into the persisted timeline; the (capped) detail rides
+      // the result body instead (P20 BRO-1621, Forge finding).
       if (completed && id) {
         return [
-          asstToolUse(id, itemType || "item", item),
+          asstToolUse(id, itemType || "item", { type: itemType || "item" }),
           userToolResult(id, genericSummary(item), false),
         ];
       }
@@ -376,7 +430,14 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
     state.phase !== "awaiting" &&
     exitCode !== 0
   ) {
-    state = { ...state, phase: "blocked", error: `codex exited ${exitCode}` };
+    // Forced-blocked (nonzero exit with no terminal result): reconcile any tool
+    // part the truncated stream left "running" so the UI doesn't spin forever.
+    state = {
+      ...state,
+      phase: "blocked",
+      error: `codex exited ${exitCode}`,
+      parts: reconcileStrandedParts(state.parts),
+    };
   }
   return { state, events, worktreePath, branch, worktreePersistent, exitCode };
 }

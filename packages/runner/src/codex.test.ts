@@ -133,6 +133,47 @@ describe("parseCodexLine — units", () => {
     });
   });
 
+  test("completed command with a null exit_code is an error, not a silent success", () => {
+    // exit_code null on a COMPLETED item = killed/timed-out/unknown — must NOT
+    // render as a green success (distinct from the in_progress null on started).
+    const events = parseCodexLine(
+      '{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"x","aggregated_output":"","exit_code":null}}',
+    );
+    expect(events[1]).toMatchObject({
+      message: { content: [{ type: "tool_result", is_error: true }] },
+    });
+  });
+
+  test("a completed-only command (item.started dropped) still folds to output-available", () => {
+    // The idempotent re-emit means a lost item.started can't strand the result:
+    // item.completed alone yields [tool_use, tool_result], which reduce joins.
+    const state = reduceAll(
+      parseCodexLine(
+        '{"type":"item.completed","item":{"id":"c9","type":"command_execution","command":"echo hi","aggregated_output":"hi\\n","exit_code":0}}',
+      ),
+    );
+    const parts = state.parts ?? [];
+    expect(parts).toHaveLength(1);
+    expect(parts[0]).toMatchObject({
+      type: "tool",
+      toolCallId: "c9",
+      state: "output-available",
+      output: "hi\n",
+    });
+  });
+
+  test("generic-item tool_use input is the type only (no uncapped item blob)", () => {
+    const events = parseCodexLine(
+      '{"type":"item.completed","item":{"id":"f1","type":"file_change","changes":[{"path":"x.ts","body":"AAAAA"}]}}',
+    );
+    // input is a tiny {type} projection; the (capped) detail rides the result.
+    expect(events[0]).toMatchObject({
+      message: {
+        content: [{ type: "tool_use", name: "file_change", input: { type: "file_change" } }],
+      },
+    });
+  });
+
   test("command_execution started → tool_use only (input-available)", () => {
     const events = parseCodexLine(
       '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"sleep 1","exit_code":null,"status":"in_progress"}}',
@@ -202,6 +243,24 @@ describe("parseCodexLine — units", () => {
     ]);
   });
 
+  test("a command started but never completed is reconciled to output-error on terminal", () => {
+    // started → input-available; the turn then fails before item.completed. The
+    // reducer's terminal branch must not leave the tool spinning forever.
+    const events = [
+      ...parseCodexLine(
+        '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"sleep 99","exit_code":null,"status":"in_progress"}}',
+      ),
+      ...parseCodexLine('{"type":"turn.failed","error":{"message":"killed"}}'),
+    ];
+    const state = reduceAll(events);
+    expect(state.phase).toBe("blocked");
+    expect((state.parts ?? [])[0]).toMatchObject({
+      type: "tool",
+      toolCallId: "c1",
+      state: "output-error",
+    });
+  });
+
   test("turn.failed → errored result (folds to blocked)", () => {
     const events = parseCodexLine('{"type":"turn.failed","error":{"message":"rate limited"}}');
     expect(events).toEqual([{ type: "result", is_error: true, subtype: "rate limited" }]);
@@ -224,7 +283,7 @@ describe("parseCodexLine — units", () => {
 });
 
 describe("codexArgs", () => {
-  test("new turn: exec --json, sandbox flag + approval via -c, prompt after --", () => {
+  test("new turn: exec --json, sandbox + approval + network-off via -c, prompt after --", () => {
     expect(codexArgs({ prompt: "do it", cwd: "/repo" })).toEqual([
       "codex",
       "exec",
@@ -234,12 +293,14 @@ describe("codexArgs", () => {
       "workspace-write",
       "-c",
       "approval_policy=never",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
       "--",
       "do it",
     ]);
   });
 
-  test("resume: exec resume <id> with -c overrides (no -s flag on resume)", () => {
+  test("resume: exec resume <id> with -c overrides (no -s flag on resume), network off", () => {
     expect(codexArgs({ prompt: "more", cwd: "/repo", resumeSessionId: "tid-9" })).toEqual([
       "codex",
       "exec",
@@ -251,6 +312,8 @@ describe("codexArgs", () => {
       "sandbox_mode=workspace-write",
       "-c",
       "approval_policy=never",
+      "-c",
+      "sandbox_workspace_write.network_access=false",
       "--",
       "more",
     ]);
@@ -260,6 +323,26 @@ describe("codexArgs", () => {
     const args = codexArgs({ prompt: "--help me", cwd: "/repo" });
     expect(args[args.length - 2]).toBe("--");
     expect(args[args.length - 1]).toBe("--help me");
+  });
+
+  test("claude-shaped extraArgs are NOT forwarded to codex (would exit-2 brick it)", () => {
+    // GENESIS_AGENT_ARGS (e.g. --dangerously-skip-permissions) is a claude flag;
+    // codex's clap parser rejects unknown flags with exit 2. The engine boundary
+    // must not leak the other vendor's global knobs (Forge cross-vendor finding).
+    const newArgs = codexArgs({
+      prompt: "p",
+      cwd: "/repo",
+      extraArgs: ["--dangerously-skip-permissions", "--foo"],
+    });
+    const resumeArgs = codexArgs({
+      prompt: "p",
+      cwd: "/repo",
+      resumeSessionId: "tid",
+      extraArgs: ["--dangerously-skip-permissions"],
+    });
+    expect(newArgs).not.toContain("--dangerously-skip-permissions");
+    expect(newArgs).not.toContain("--foo");
+    expect(resumeArgs).not.toContain("--dangerously-skip-permissions");
   });
 });
 
@@ -293,6 +376,33 @@ class FakeMicroVMHost implements ExecutionHost {
   async writeFile() {}
 }
 
+// Local git host = exercises the real worktree path (ensureSessionWorktree).
+class FakeLocalHost implements ExecutionHost {
+  readonly kind = "local" as const;
+  readonly credentialTier = "subscription" as const;
+  execCalls: string[][] = [];
+  spawnCwd?: string;
+  spawnCmd?: string[];
+  spawnOpts?: ExecOpts;
+  constructor(private lines: string[]) {}
+  async exec(cmd: string[]): Promise<ExecResult> {
+    this.execCalls.push(cmd);
+    if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
+    if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" }; // isGitRepo
+    return { code: 0, stdout: "", stderr: "" }; // worktree list (empty) / add (ok)
+  }
+  spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
+    this.spawnCmd = cmd;
+    this.spawnCwd = opts?.cwd;
+    this.spawnOpts = opts;
+    return streamOf(this.lines);
+  }
+  async readFile() {
+    return "";
+  }
+  async writeFile() {}
+}
+
 describe("runCodex", () => {
   test("folds a codex stream to a done RunResult and scrubs the env", async () => {
     const host = new FakeMicroVMHost(FIXTURE_ANSWER.split("\n"));
@@ -316,6 +426,80 @@ describe("runCodex", () => {
     expect(r.state.sessionId).toBe("tid-42");
     expect(r.state.phase).toBe("done");
     expect(host.spawnCmd?.slice(0, 4)).toEqual(["codex", "exec", "resume", "tid-42"]);
+  });
+
+  test("scrubs the spawned env — OPENAI_API_KEY stripped, HOME/CODEX_HOME survive", async () => {
+    const prev = {
+      key: process.env.OPENAI_API_KEY,
+      ch: process.env.CODEX_HOME,
+      home: process.env.HOME,
+    };
+    process.env.OPENAI_API_KEY = "sk-should-be-stripped";
+    process.env.CODEX_HOME = "/home/x/.codex";
+    process.env.HOME = "/home/x";
+    try {
+      const host = new FakeMicroVMHost(FIXTURE_ANSWER.split("\n"));
+      await runCodex({ prompt: "p", cwd: "/x", host });
+      const env = host.spawnOpts?.env ?? {};
+      expect(env.OPENAI_API_KEY).toBeUndefined(); // forces subscription auth
+      expect(env.HOME).toBe("/home/x"); // ~/.codex/auth.json must be findable
+      expect(env.CODEX_HOME).toBe("/home/x/.codex");
+    } finally {
+      process.env.OPENAI_API_KEY = prev.key;
+      process.env.CODEX_HOME = prev.ch;
+      process.env.HOME = prev.home;
+    }
+  });
+
+  test("on a git host it cuts a per-session worktree and reports it persistent", async () => {
+    const host = new FakeLocalHost(FIXTURE_ANSWER.split("\n"));
+    const r = await runCodex({ prompt: "p", cwd: "/repo", host, sessionKey: "s1" });
+    expect(r.state.phase).toBe("done");
+    expect(r.worktreePath).toBe("/repo/.genesis-runs/session-s1");
+    expect(r.worktreePersistent).toBe(true);
+    expect(host.execCalls.some((c) => c.includes("worktree"))).toBe(true);
+    expect(host.spawnCwd).toBe("/repo/.genesis-runs/session-s1"); // ran IN the worktree
+  });
+
+  test("a mid-stream throw kills the child and rethrows (per-session worktree kept)", async () => {
+    const host = new FakeLocalHost([]);
+    let killed = false;
+    host.spawnStream = (cmd: string[], opts?: ExecOpts) => {
+      host.spawnCmd = cmd;
+      host.spawnCwd = opts?.cwd;
+      async function* gen(): AsyncGenerator<string> {
+        yield '{"type":"thread.started","thread_id":"t"}';
+        throw new Error("stream blew up");
+      }
+      return {
+        stdout: gen(),
+        exitCode: Promise.resolve(0),
+        kill: () => {
+          killed = true;
+        },
+      };
+    };
+    await expect(runCodex({ prompt: "p", cwd: "/repo", host, sessionKey: "s1" })).rejects.toThrow(
+      "stream blew up",
+    );
+    expect(killed).toBe(true);
+    // per-SESSION worktree must survive a transient turn failure (resume cwd).
+    expect(host.execCalls.some((c) => c.includes("worktree") && c.includes("remove"))).toBe(false);
+  });
+
+  test("a resumed turn that RE-EMITS thread.started keeps the same id (3-turn continuity)", async () => {
+    // codex `exec resume <id>` re-emits thread.started with the SAME id (verified
+    // live) — the capture must keep it, and the argv must target the resume id.
+    const host = new FakeMicroVMHost([
+      '{"type":"thread.started","thread_id":"A"}',
+      '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"r2"}}',
+      '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":1}}',
+    ]);
+    const r = await runCodex({ prompt: "again", cwd: "/x", host, resumeSessionId: "A" });
+    expect(r.state.sessionId).toBe("A");
+    expect(r.state.phase).toBe("done");
+    expect(host.spawnCmd).toContain("resume");
+    expect(host.spawnCmd).toContain("A");
   });
 
   test("a nonzero exit with no terminal result surfaces as blocked", async () => {

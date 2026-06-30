@@ -396,6 +396,21 @@ export class Supervisor {
     );
   }
 
+  /** The engine ids registered on this Supervisor (always includes `print`; plus
+   *  interactive/codex when the boot registered them). The api advertises these
+   *  via /health so a client can avoid OFFERING an engine the box can't run —
+   *  without that, a request for an unregistered engine binds the default engine
+   *  STICKY with no signal to the user (BRO-1620 cross-engine gap; the UI gating
+   *  that consumes this is the BRO-1622 follow-up). P20 BRO-1621. */
+  get engines(): string[] {
+    return Object.keys(this.runners);
+  }
+
+  /** The engine a thread binds when none (or an unavailable one) is requested. */
+  get defaultEngineId(): string {
+    return this.defaultEngine;
+  }
+
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
 
   /** The live-session control surface for a thread's bound engine (BRO-1620).

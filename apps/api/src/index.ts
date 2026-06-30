@@ -260,7 +260,8 @@ const runners: Record<string, typeof runCodex> = {};
 if (interactiveEngine) runners.interactive = interactiveEngine.run;
 if (codexAvailable) {
   runners.codex = runCodex;
-  engineLabel += ` + codex(exec, ${codexBin})`;
+  // Don't log the absolute binary path (filesystem-layout leak) — just the fact.
+  engineLabel += " + codex(exec)";
 }
 
 const { app, websocket } = build({
