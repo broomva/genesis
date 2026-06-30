@@ -120,10 +120,10 @@ export function build(opts: BuildOpts) {
       workspace: opts.workspaceRoot,
       engines: supervisor.engines,
       defaultEngine: supervisor.defaultEngineId,
-      // Selectable workspaces (BRO-1627) — parity with `engines`, so the client
-      // reading /health for capability gating also learns the workspace set.
-      workspaces: supervisor.listWorkspaces(),
-      defaultWorkspace: supervisor.defaultWorkspaceId,
+      // NOTE (BRO-1627 P20 M1): the workspace LIST is deliberately NOT here —
+      // /health is unauthenticated, and the list carries absolute rootPaths (a
+      // filesystem-layout recon aid). The list lives behind the bearer gate on
+      // GET /workspaces; /health stays a liveness probe (engine-capability only).
     }),
   );
 

@@ -567,10 +567,16 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
   });
 
   test("resolve binds the requested workspace at creation; default when omitted", async () => {
-    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: fakeRunner("x") });
+    // ws-b is REGISTERED so the sticky assertion isolates stickiness (P20 N4): if
+    // resolve weren't sticky, the second call WOULD rebind to the valid ws-b.
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      run: fakeRunner("x"),
+    });
     expect((await sup.resolve("r1", "ws-a")).workspaceId).toBe("ws-a");
     expect((await sup.resolve("r2")).workspaceId).toBe("ws-1");
-    // sticky: a second resolve with a different id keeps the first binding.
+    // sticky: a second resolve with a different REGISTERED id keeps the first.
     expect((await sup.resolve("r1", "ws-b")).workspaceId).toBe("ws-a");
   });
 
@@ -637,5 +643,54 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     });
     const sup = new Supervisor({ defaultWorkspace: ws, store, run: fakeRunner("x") });
     await expect(sup.dispatch("tgone", "next")).rejects.toThrow(/no longer available/);
+  });
+
+  test("a registry-missing workspace still in the DB ALSO errors on a ran thread (P20 S1)", async () => {
+    // The DB row survives (ensureWorkspace persisted it) but carries no worktree
+    // posture, so a ran thread can't be safely resumed even with a DB hit.
+    const store = new InMemoryStore();
+    await store.upsertWorkspace({ id: "ws-x", name: "x", rootPath: "/repos/x" });
+    await store.upsertSession({
+      id: "sess-x",
+      workspaceId: "ws-x", // in the DB, NOT in the boot registry
+      threadId: "tx",
+      phase: "done",
+      createdAt: new Date().toISOString(),
+      agentSessionId: "sid-x", // ran
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: fakeRunner("x") });
+    await expect(sup.dispatch("tx", "next")).rejects.toThrow(/no longer available/);
+  });
+
+  test("a registry-missing workspace on a NEVER-RAN thread falls back without error", async () => {
+    // never ran → no --resume to break → safe to run at the last-known DB path.
+    const sink: { cwd?: string } = {};
+    const store = new InMemoryStore();
+    await store.upsertWorkspace({ id: "ws-y", name: "y", rootPath: "/repos/y" });
+    await store.upsertSession({
+      id: "sess-y",
+      workspaceId: "ws-y",
+      threadId: "ty",
+      phase: "idle",
+      createdAt: new Date().toISOString(), // no agentSessionId → never ran
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: cwdRunner(sink) });
+    await sup.dispatch("ty", "first");
+    expect(sink.cwd).toBe("/repos/y");
+  });
+
+  test("an extra colliding with the default id is IGNORED (default can't be shadowed, P20 M2)", async () => {
+    const sink: { cwd?: string } = {};
+    const shadow = { id: "ws-1", name: "evil", rootPath: "/repos/evil" }; // ws-1 = default id
+    const sup = new Supervisor({
+      defaultWorkspace: ws, // id ws-1, rootPath /tmp/genesis-test
+      workspaces: [shadow],
+      run: cwdRunner(sink),
+    });
+    // The registry's ws-1 is still the GENUINE default, not the shadow.
+    expect(sup.listWorkspaces().find((w) => w.id === "ws-1")?.rootPath).toBe(ws.rootPath);
+    // A default-bound thread runs in the real default tree.
+    await sup.dispatch("t-shadow", "go");
+    expect(sink.cwd).toBe(ws.rootPath);
   });
 });

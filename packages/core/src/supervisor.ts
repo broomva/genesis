@@ -195,10 +195,21 @@ export class Supervisor {
     this.noWorktree = cfg.noWorktree ?? false;
     this.defaultWorkspace = cfg.defaultWorkspace;
     // Build the selectable registry (BRO-1627): default first, then the
-    // boot-discovered workspaces (a later entry with the same id wins, so an
-    // explicit GENESIS_WORKSPACES entry can override a scanned one).
+    // boot-discovered workspaces (a later entry with the same id wins among the
+    // EXTRAS, so an explicit GENESIS_WORKSPACES entry can override a scanned one).
     this.workspaceRegistry = new Map();
-    for (const w of [cfg.defaultWorkspace, ...(cfg.workspaces ?? [])]) {
+    this.workspaceRegistry.set(cfg.defaultWorkspace.id, cfg.defaultWorkspace);
+    for (const w of cfg.workspaces ?? []) {
+      // The default id is RESERVED (P20 M2): an extra with the same id — a repo
+      // that slugs to `ws-default`, or an explicit override — must not shadow the
+      // genuine default, or every default-bound thread would silently re-cwd into
+      // it. Skip + warn; the real default stays authoritative.
+      if (w.id === cfg.defaultWorkspace.id) {
+        console.warn(
+          `[genesis] workspace "${w.id}" collides with the default workspace id; ignoring (the default can't be overridden).`,
+        );
+        continue;
+      }
       this.workspaceRegistry.set(w.id, w);
     }
   }
@@ -277,18 +288,21 @@ export class Supervisor {
   ): Promise<DispatchResult> {
     const session = await this.resolve(threadId, turnOpts?.workspaceId);
     // Resolve the bound workspace registry-FIRST (BRO-1627) — the registry carries
-    // the richer noWorktree/isGitRepo the DB row doesn't. If it's fully deconfigured
-    // AND the thread already ran there, do NOT silently re-cwd into the default tree:
-    // that would corrupt --resume continuity. Surface an error instead (§edge-cases).
-    const known =
-      this.workspaceRegistry.get(session.workspaceId) ??
-      (await this.store.getWorkspace(session.workspaceId));
-    if (!known && session.agentSessionId !== undefined) {
+    // the richer noWorktree/isGitRepo the DB row does NOT. A thread that already RAN
+    // under a workspace no longer in the registry can't be safely resumed (P20 S1):
+    // the persisted DB row has only id/name/rootPath, so the worktree posture is
+    // lost — resuming could enable worktrees on a nested-repo workspace and run
+    // --resume against a broken tree. Error instead of silently re-cwd'ing. (A
+    // registry hit is fine; a never-ran thread can safely fall back — no resume to
+    // break — to its last-known DB row, else the default.)
+    const registered = this.workspaceRegistry.get(session.workspaceId);
+    if (!registered && session.agentSessionId !== undefined) {
       throw new Error(
         `This thread's workspace (${session.workspaceId}) is no longer available; it can't be resumed elsewhere. Start a new thread to pick a workspace.`,
       );
     }
-    const workspace = known ?? this.defaultWorkspace;
+    const workspace =
+      registered ?? (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
     // Per-workspace worktree posture wins over the supervisor global (BRO-1512):
     // a nested-monorepo workspace runs direct; a single-repo one may worktree.
     const noWorktree = workspace.noWorktree ?? this.noWorktree;
