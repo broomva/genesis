@@ -36,6 +36,10 @@ export interface TurnOptions {
   /** Requested agent engine (BRO-1620) — honored only on a thread's FIRST turn
    *  (sticky binding); ignored after. Unknown/unavailable → the default engine. */
   engine?: string;
+  /** Requested workspace (BRO-1627) — honored only at SESSION CREATION (a
+   *  thread's first turn, when the session row is minted); ignored after.
+   *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`. */
+  workspaceId?: string;
 }
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
@@ -59,8 +63,14 @@ export interface ControlResult {
 
 export interface SupervisorConfig {
   store?: Store;
-  /** Default workspace every new thread binds to (Phase 1: one workspace). */
+  /** Default workspace every new thread binds to when none is requested (and the
+   *  turn-1 fallback). Always present in the registry. */
   defaultWorkspace: Workspace;
+  /** Additional selectable workspaces (BRO-1627) — the boot-discovered registry
+   *  (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES override). Merged after the
+   *  default (later entries win on id collision). A new thread can bind any of
+   *  these via TurnOptions.workspaceId; the binding is sticky at session create. */
+  workspaces?: Workspace[];
   /** Resolves an ExecutionHost per session (e.g. a per-session microVM). When
    *  omitted, a StaticHostProvider wraps `host` (or a LocalHost). */
   hostProvider?: HostProvider;
@@ -125,6 +135,11 @@ export interface ThreadSummary {
    *  controls (model/effort) on the THREAD's actual engine, not the global pref.
    *  Absent on a never-run thread (it inherits the pref until its first turn). */
   engine?: string;
+  /** The thread's bound workspace (BRO-1627) — id + display name, so the drawer
+   *  + header can show which repo the thread runs in. `workspaceName` is absent if
+   *  the workspace was deconfigured since the thread bound it. */
+  workspaceId?: string;
+  workspaceName?: string;
 }
 
 /** First-user-turn → a short thread title (BRO-1592). First line, collapsed
@@ -150,9 +165,13 @@ export class Supervisor {
   private readonly remoteCwd?: string;
   private readonly noWorktree: boolean;
   private readonly defaultWorkspace: Workspace;
+  /** id → Workspace, the selectable registry (BRO-1627). Default first, then the
+   *  boot-discovered set (later entries win). Holds the richer registry-only
+   *  fields (noWorktree/isGitRepo) that never round-trip through the DB. */
+  private readonly workspaceRegistry: Map<string, Workspace>;
   /** Per-thread promise chain — serializes dispatches on the same session. */
   private readonly chains = new Map<string, Promise<unknown>>();
-  /** Memoized one-shot persistence of the default workspace (async ctor work). */
+  /** Memoized one-shot persistence of the workspace registry (async ctor work). */
   private workspaceEnsured?: Promise<void>;
 
   constructor(cfg: SupervisorConfig) {
@@ -175,13 +194,24 @@ export class Supervisor {
     this.remoteCwd = cfg.remoteCwd;
     this.noWorktree = cfg.noWorktree ?? false;
     this.defaultWorkspace = cfg.defaultWorkspace;
+    // Build the selectable registry (BRO-1627): default first, then the
+    // boot-discovered workspaces (a later entry with the same id wins, so an
+    // explicit GENESIS_WORKSPACES entry can override a scanned one).
+    this.workspaceRegistry = new Map();
+    for (const w of [cfg.defaultWorkspace, ...(cfg.workspaces ?? [])]) {
+      this.workspaceRegistry.set(w.id, w);
+    }
   }
 
   private ensureWorkspace(): Promise<void> {
-    // Clear the memo on rejection so a transient first-dispatch failure (e.g. a
-    // Postgres connect blip) doesn't poison every later dispatch (P20 #1).
-    this.workspaceEnsured ??= this.store
-      .upsertWorkspace(this.defaultWorkspace)
+    // Persist the WHOLE registry (BRO-1627), idempotently, so resolve→getWorkspace
+    // keeps working and a bound thread survives the workspace being deconfigured
+    // later (the DB retains the row). Clear the memo on rejection so a transient
+    // first-dispatch failure (e.g. a Postgres connect blip) doesn't poison every
+    // later dispatch (P20 #1).
+    this.workspaceEnsured ??= Promise.all(
+      [...this.workspaceRegistry.values()].map((w) => this.store.upsertWorkspace(w)),
+    )
       .then(() => {})
       .catch((e) => {
         this.workspaceEnsured = undefined;
@@ -190,14 +220,22 @@ export class Supervisor {
     return this.workspaceEnsured;
   }
 
-  /** chat-id/thread → Session (created + bound to the default workspace if new). */
-  async resolve(threadId: string): Promise<Session> {
+  /** chat-id/thread → Session. A NEW thread binds the requested workspace (BRO-1627)
+   *  if it's registered, else the default; an existing thread is returned unchanged
+   *  (the binding is sticky from session creation — switching = a new thread). */
+  async resolve(threadId: string, workspaceId?: string): Promise<Session> {
     await this.ensureWorkspace();
     const existing = await this.store.findSessionByThread(threadId);
     if (existing) return existing;
+    // Validate the requested id against the live registry at bind time (mirror the
+    // engine `this.runners[requested] ? …` discipline); unknown → default.
+    const bound =
+      workspaceId && this.workspaceRegistry.has(workspaceId)
+        ? workspaceId
+        : this.defaultWorkspace.id;
     return this.store.upsertSession({
       id: newId("sess"),
-      workspaceId: this.defaultWorkspace.id,
+      workspaceId: bound,
       threadId,
       phase: "idle", // a never-run session is idle, not done (F20)
       createdAt: isoNow(),
@@ -237,8 +275,23 @@ export class Supervisor {
     onState?: (state: RunState, event: AgentEvent) => void,
     turnOpts?: TurnOptions,
   ): Promise<DispatchResult> {
-    const session = await this.resolve(threadId);
-    const workspace = (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
+    const session = await this.resolve(threadId, turnOpts?.workspaceId);
+    // Resolve the bound workspace registry-FIRST (BRO-1627) — the registry carries
+    // the richer noWorktree/isGitRepo the DB row doesn't. If it's fully deconfigured
+    // AND the thread already ran there, do NOT silently re-cwd into the default tree:
+    // that would corrupt --resume continuity. Surface an error instead (§edge-cases).
+    const known =
+      this.workspaceRegistry.get(session.workspaceId) ??
+      (await this.store.getWorkspace(session.workspaceId));
+    if (!known && session.agentSessionId !== undefined) {
+      throw new Error(
+        `This thread's workspace (${session.workspaceId}) is no longer available; it can't be resumed elsewhere. Start a new thread to pick a workspace.`,
+      );
+    }
+    const workspace = known ?? this.defaultWorkspace;
+    // Per-workspace worktree posture wins over the supervisor global (BRO-1512):
+    // a nested-monorepo workspace runs direct; a single-repo one may worktree.
+    const noWorktree = workspace.noWorktree ?? this.noWorktree;
     await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
     // Derive a thread title from the first user turn (BRO-1592) — persisted with
@@ -289,7 +342,7 @@ export class Supervisor {
         // finds its cwd-scoped session (multi-turn continuity on LocalHost).
         // noWorktree → run directly in the workspace (BRO-1512: nested-repo cwd).
         sessionKey: session.id,
-        worktree: this.noWorktree ? false : undefined,
+        worktree: noWorktree ? false : undefined,
         onState: (state, event) => {
           session.phase = state.phase;
           // Tracing is side-channel — a throwing trace hook must NOT fail the
@@ -387,6 +440,8 @@ export class Supervisor {
           title: s.title,
           archived: s.archived ?? false,
           engine: s.engine,
+          workspaceId: s.workspaceId,
+          workspaceName: this.workspaceRegistry.get(s.workspaceId)?.name,
         };
       }),
     );
@@ -409,6 +464,18 @@ export class Supervisor {
   /** The engine a thread binds when none (or an unavailable one) is requested. */
   get defaultEngineId(): string {
     return this.defaultEngine;
+  }
+
+  /** The selectable workspaces (BRO-1627), default first. The api advertises
+   *  these via GET /workspaces so the client can offer a per-thread picker;
+   *  registry-backed (no Store round-trip — the live set is in memory). */
+  listWorkspaces(): Workspace[] {
+    return [...this.workspaceRegistry.values()];
+  }
+
+  /** The workspace a thread binds when none (or an unregistered one) is requested. */
+  get defaultWorkspaceId(): string {
+    return this.defaultWorkspace.id;
   }
 
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.

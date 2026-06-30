@@ -1,7 +1,7 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEvent, Store } from "@genesis/core";
+import type { AgentEvent, Store, Workspace } from "@genesis/core";
 import { reconcileInterruptedSessions } from "@genesis/core";
 import { createPgliteStore, createPostgresStore } from "@genesis/db";
 import {
@@ -122,6 +122,77 @@ async function selectStore(): Promise<{ store: Store; label: string }> {
 
 const workspaceRoot = process.env.GENESIS_WORKSPACE ?? process.cwd();
 const port = Number(process.env.PORT ?? 8787);
+
+/** id-safe slug for a discovered workspace name (matches the chat-sdk charset
+ *  guard `^[A-Za-z0-9][\w.-]*$` once prefixed with `ws-`). */
+function slugifyWorkspace(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "ws"
+  );
+}
+
+/** Discover selectable workspaces beyond the default (BRO-1627), from env:
+ *  - GENESIS_PROJECTS_ROOT: a dir whose immediate children containing a `.git`
+ *    become single-repo workspaces (isGitRepo, inheriting the global noWorktree).
+ *  - GENESIS_WORKSPACES: JSON `[{id,name,rootPath,noWorktree?,isGitRepo?}]`,
+ *    appended/overriding by id — the escape hatch to declare a nested-monorepo
+ *    workspace with `noWorktree:true`.
+ *  De-duped by id; the DEFAULT workspace is added by the Supervisor (not here).
+ *  Returns [] when neither is configured → today's single-workspace behavior. */
+function discoverWorkspaces(): Workspace[] {
+  const byId = new Map<string, Workspace>();
+  const root = process.env.GENESIS_PROJECTS_ROOT;
+  if (root) {
+    try {
+      for (const ent of readdirSync(root, { withFileTypes: true })) {
+        if (!ent.isDirectory()) continue;
+        const rootPath = join(root, ent.name);
+        if (!existsSync(join(rootPath, ".git"))) continue; // git repos only
+        const id = `ws-${slugifyWorkspace(ent.name)}`;
+        byId.set(id, { id, name: ent.name, rootPath, isGitRepo: true });
+      }
+    } catch (e) {
+      console.warn(
+        `[genesis] GENESIS_PROJECTS_ROOT scan failed (${root}): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  const json = process.env.GENESIS_WORKSPACES;
+  if (json) {
+    try {
+      const parsed = JSON.parse(json) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const w of parsed as Array<Record<string, unknown>>) {
+          if (
+            typeof w?.id === "string" &&
+            typeof w.name === "string" &&
+            typeof w.rootPath === "string"
+          ) {
+            byId.set(w.id, {
+              id: w.id,
+              name: w.name,
+              rootPath: w.rootPath,
+              isGitRepo: typeof w.isGitRepo === "boolean" ? w.isGitRepo : undefined,
+              noWorktree: typeof w.noWorktree === "boolean" ? w.noWorktree : undefined,
+            });
+          }
+        }
+      } else {
+        console.warn("[genesis] GENESIS_WORKSPACES must be a JSON array; ignoring.");
+      }
+    } catch (e) {
+      console.warn(
+        `[genesis] GENESIS_WORKSPACES is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  return [...byId.values()];
+}
+
+const workspaces = discoverWorkspaces();
 
 // NOTE (Phase 2 Slice A): dispatch is serialized per-thread IN-PROCESS only.
 // Run a SINGLE instance until Slice B adds Upstash slot-locks — two replicas on
@@ -278,6 +349,9 @@ else if (requestedDefault === "codex" && !codexAvailable) {
 
 const { app, websocket } = build({
   workspaceRoot,
+  // Selectable workspaces beyond the default (BRO-1627) — empty unless an operator
+  // sets GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES (then the picker self-shows).
+  workspaces,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
   store,

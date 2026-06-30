@@ -1,4 +1,10 @@
-import { type AgentEvent, type EngineControl, type Store, Supervisor } from "@genesis/core";
+import {
+  type AgentEvent,
+  type EngineControl,
+  type Store,
+  Supervisor,
+  type Workspace,
+} from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { Hono } from "hono";
@@ -58,6 +64,10 @@ export interface BuildOpts {
   /** Run the agent directly in the workspace (no per-session worktree) —
    *  required for workspaces with nested git repos (BRO-1512). */
   noWorktree?: boolean;
+  /** Additional selectable workspaces beyond the default (BRO-1627) — the
+   *  boot-discovered registry (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES
+   *  override). Forwarded to the Supervisor; surfaced via GET /workspaces. */
+  workspaces?: Workspace[];
   /** Per-event observability trace (print-engine parity, BRO-1524). */
   trace?: (sessionId: string, event: AgentEvent) => void;
 }
@@ -66,6 +76,7 @@ export function build(opts: BuildOpts) {
   const hub = new Hub();
   const supervisor = new Supervisor({
     defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
+    workspaces: opts.workspaces,
     hostProvider: opts.hostProvider,
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
@@ -109,6 +120,10 @@ export function build(opts: BuildOpts) {
       workspace: opts.workspaceRoot,
       engines: supervisor.engines,
       defaultEngine: supervisor.defaultEngineId,
+      // Selectable workspaces (BRO-1627) — parity with `engines`, so the client
+      // reading /health for capability gating also learns the workspace set.
+      workspaces: supervisor.listWorkspaces(),
+      defaultWorkspace: supervisor.defaultWorkspaceId,
     }),
   );
 
@@ -153,6 +168,17 @@ export function build(opts: BuildOpts) {
   app.get("/threads", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     return c.json({ threads: await supervisor.listThreads() });
+  });
+
+  // Selectable workspaces (BRO-1627) for the per-thread workspace picker. Same
+  // bearer gate; the client offers these as the "which repo does this thread run
+  // in" choice (bound sticky on the thread's first turn).
+  app.get("/workspaces", (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    return c.json({
+      workspaces: supervisor.listWorkspaces(),
+      defaultWorkspace: supervisor.defaultWorkspaceId,
+    });
   });
 
   app.get("/threads/:id", async (c) => {
@@ -236,7 +262,12 @@ export function build(opts: BuildOpts) {
             }
           }
         },
-        { model: incoming.model, effort: incoming.effort, engine: incoming.engine },
+        {
+          model: incoming.model,
+          effort: incoming.effort,
+          engine: incoming.engine,
+          workspaceId: incoming.workspaceId,
+        },
       );
       emit({
         kind: "reply",
