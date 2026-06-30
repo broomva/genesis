@@ -13,8 +13,8 @@ describe("sanitizePreferences (BRO-1618)", () => {
   test("valid full shape is preserved", () => {
     const p = {
       model: "opus",
-      effort: "high",
-      codexEffort: "minimal",
+      effort: "max",
+      codexEffort: "low",
       theme: "dark",
       showReasoning: false,
       engine: "print",
@@ -22,12 +22,12 @@ describe("sanitizePreferences (BRO-1618)", () => {
     expect(sanitizePreferences(p)).toEqual(p);
   });
 
-  test("codexEffort is a separate slot — a codex value survives reload (BRO-1623)", () => {
-    // codex-only "minimal" must round-trip (it's invalid for claude but valid for
-    // codex); the shared-slot clobber is gone because effort/codexEffort are split.
-    const out = sanitizePreferences({ effort: "max", codexEffort: "minimal" });
+  test("codexEffort is a separate slot — no cross-provider clobber (BRO-1623)", () => {
+    // effort + codexEffort are independent slots, so a codex pick (low) and a
+    // claude-only pick (max) coexist — the shared-slot clobber is gone.
+    const out = sanitizePreferences({ effort: "max", codexEffort: "low" });
     expect(out.effort).toBe("max"); // claude pick preserved
-    expect(out.codexEffort).toBe("minimal"); // codex pick preserved, independently
+    expect(out.codexEffort).toBe("low"); // codex pick preserved, independently
     // a missing codexEffort defaults (doesn't borrow `effort`)
     expect(sanitizePreferences({ effort: "high" }).codexEffort).toBe(
       DEFAULT_PREFERENCES.codexEffort,

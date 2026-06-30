@@ -136,10 +136,11 @@ export const CODEX_MODEL_OPTIONS: readonly SelectOption[] = [
 ];
 
 /** codex reasoning-effort picker → `-c model_reasoning_effort` (BRO-1623).
- *  `standard` omits the override (codex config default). `minimal` is codex-only. */
+ *  `standard` omits the override (codex config default). Levels VERIFIED against
+ *  gpt-5.5 on the live CLI: low/medium/high accepted, `minimal` rejected → not
+ *  offered (benchmark-the-real-engine). codex has no xhigh/max. */
 export const CODEX_EFFORT_OPTIONS: readonly SelectOption[] = [
   { value: "standard", label: "Default" },
-  { value: "minimal", label: "Minimal" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
