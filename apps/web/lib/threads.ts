@@ -34,6 +34,10 @@ export interface ThreadSummary {
   title?: string;
   /** Soft-archived → hidden from the default list (BRO-1592). */
   archived?: boolean;
+  /** The thread's bound agent engine (BRO-1620) — gates the composer's per-turn
+   *  model/effort controls on the THREAD's engine, not the global pref. Absent on
+   *  a never-run thread (it inherits the pref until its first turn binds it). */
+  engine?: string;
 }
 
 /** Mirror of the engine's TurnPart (packages/projection) — the persisted ordered

@@ -33,6 +33,9 @@ export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
 export interface TurnOptions {
   model?: string;
   effort?: EffortLevel;
+  /** Requested agent engine (BRO-1620) — honored only on a thread's FIRST turn
+   *  (sticky binding); ignored after. Unknown/unavailable → the default engine. */
+  engine?: string;
 }
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
@@ -67,9 +70,19 @@ export interface SupervisorConfig {
   /** Live-session control surface (interactive engine). Enables /control
    *  (reset/interrupt/status). Omit → those ops report "unsupported". */
   control?: EngineControl;
+  /** Engine REGISTRY (BRO-1620) — per-thread engine selection. `runners` maps an
+   *  engine id ("print" | "interactive") to its runner; `controls` maps the ids
+   *  that have a live-session control surface; `defaultEngine` is the engine a
+   *  thread inherits when the client doesn't request one. `print` (runAgent) is
+   *  ALWAYS registered as a baseline. The legacy single `run`/`control` still work
+   *  (keyed by `defaultEngine`). */
+  runners?: Record<string, RunnerFn>;
+  controls?: Record<string, EngineControl>;
+  defaultEngine?: string;
   /** Per-event observability tap (BRO-1524): every AgentEvent of every turn,
-   *  tagged with the session id. The interactive engine has its own IR-trace
-   *  observer, so wire this only for the print engine to get trace parity. */
+   *  tagged with the session id. The boot wires this for ALL turns now that both
+   *  engines coexist (BRO-1620) — interactive turns get both this AgentEvent trace
+   *  (a distinct *.events.jsonl file) and the engine's richer IR observer. */
   trace?: (sessionId: string, event: AgentEvent) => void;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
@@ -108,6 +121,10 @@ export interface ThreadSummary {
   lastText?: string;
   title?: string;
   archived: boolean;
+  /** The thread's bound engine (BRO-1620), so the client can gate per-turn
+   *  controls (model/effort) on the THREAD's actual engine, not the global pref.
+   *  Absent on a never-run thread (it inherits the pref until its first turn). */
+  engine?: string;
 }
 
 /** First-user-turn → a short thread title (BRO-1592). First line, collapsed
@@ -124,8 +141,9 @@ export function deriveTitle(text: string): string | undefined {
 
 export class Supervisor {
   private readonly store: Store;
-  private readonly run: RunnerFn;
-  private readonly control?: EngineControl;
+  private readonly runners: Record<string, RunnerFn>;
+  private readonly controls: Record<string, EngineControl>;
+  private readonly defaultEngine: string;
   private readonly trace?: (sessionId: string, event: AgentEvent) => void;
   private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
@@ -139,8 +157,17 @@ export class Supervisor {
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
-    this.run = cfg.run ?? runAgent;
-    this.control = cfg.control;
+    // Engine registry (BRO-1620). `print` (runAgent) is always available; explicit
+    // `runners` win; a legacy single `run` keys to defaultEngine.
+    this.defaultEngine = cfg.defaultEngine ?? "print";
+    this.runners = {
+      print: runAgent,
+      ...(cfg.runners ?? (cfg.run ? { [this.defaultEngine]: cfg.run } : {})),
+    };
+    this.controls = cfg.controls ?? (cfg.control ? { [this.defaultEngine]: cfg.control } : {});
+    // defaultEngine must resolve to a registered runner (e.g. interactive requested
+    // but unavailable on a microVM host → fall back to print).
+    if (!this.runners[this.defaultEngine]) this.defaultEngine = "print";
     this.trace = cfg.trace;
     this.hostProvider =
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
@@ -218,6 +245,18 @@ export class Supervisor {
     // the phase write below, so the drawer shows a stable label instead of a
     // running last-text preview. Never overwrites a title once set (or renamed).
     if (!session.title) session.title = deriveTitle(text);
+    // Bind the engine STICKY on the first turn (BRO-1620), reused for every later
+    // turn — so flipping the global default never reroutes a thread with a live
+    // session. A brand-new thread (never ran) takes the client's requested engine;
+    // an EXISTING thread with no engine (a pre-BRO-1620 row) is bound to the DEFAULT
+    // instead, preserving the engine it actually ran under (the deploy's
+    // GENESIS_ENGINE) so it can't be silently rerouted + lose --resume continuity.
+    if (!session.engine) {
+      const neverRan = session.agentSessionId === undefined;
+      const requested = turnOpts?.engine;
+      session.engine =
+        neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
+    }
     session.phase = "running";
     await this.store.upsertSession(session);
 
@@ -228,8 +267,15 @@ export class Supervisor {
 
     // Lease a host for THIS session (e.g. its own per-session microVM).
     const lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+    // Resolve the runner for this thread's (now-bound) engine; the default + the
+    // built-in print runner are the safety net (engine was validated at bind time,
+    // so this always hits the first — the fallbacks just satisfy the type checker).
+    const run =
+      this.runners[session.engine ?? this.defaultEngine] ??
+      this.runners[this.defaultEngine] ??
+      runAgent;
     try {
-      const result = await this.run({
+      const result = await run({
         prompt: text,
         cwd: workspace.rootPath,
         resumeSessionId: session.agentSessionId,
@@ -340,6 +386,7 @@ export class Supervisor {
           lastText: turns.at(-1)?.text,
           title: s.title,
           archived: s.archived ?? false,
+          engine: s.engine,
         };
       }),
     );
@@ -351,6 +398,12 @@ export class Supervisor {
 
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
 
+  /** The live-session control surface for a thread's bound engine (BRO-1620).
+   *  Only the interactive engine has one; the print engine resolves to undefined. */
+  private controlFor(session: Session | undefined): EngineControl | undefined {
+    return this.controls[session?.engine ?? this.defaultEngine];
+  }
+
   /** Reset a thread's agent session → next turn starts fresh (new
    *  conversation, same workspace). Engine-agnostic (BRO-1524): clearing the
    *  stored agentSessionId means the print engine drops `--resume`; the
@@ -360,7 +413,8 @@ export class Supervisor {
     if (s === undefined) return { ok: false, reason: "no-session" };
     // Interactive engine: abort + kill the live session (resolves any in-flight
     // turn as blocked immediately — B1). Print engine: no live process (had=false).
-    const had = this.control ? await this.control.reset(s.id) : false;
+    const ctrl = this.controlFor(s);
+    const had = ctrl ? await ctrl.reset(s.id) : false;
     // Wait for any in-flight dispatch on this thread to settle, so its
     // phase/agentSessionId write-back can't clobber our reset (B2 — the racing
     // runTurn finally-writes blocked + the OLD agentSessionId). Re-read after.
@@ -374,10 +428,11 @@ export class Supervisor {
 
   /** Interrupt the in-flight turn for a thread. */
   async interrupt(threadId: string): Promise<ControlResult> {
-    if (this.control === undefined) return { ok: false, reason: "unsupported" };
     const s = await this.store.findSessionByThread(threadId);
     if (s === undefined) return { ok: false, reason: "no-session" };
-    const live = await this.control.interrupt(s.id);
+    const ctrl = this.controlFor(s);
+    if (ctrl === undefined) return { ok: false, reason: "unsupported" };
+    const live = await ctrl.interrupt(s.id);
     return { ok: live, reason: live ? undefined : "no-session" };
   }
 
@@ -385,7 +440,8 @@ export class Supervisor {
   async status(threadId: string): Promise<ControlResult> {
     const s = await this.store.findSessionByThread(threadId);
     if (s === undefined) return { ok: false, reason: "no-session" };
-    const st = this.control ? await this.control.status(s.id) : { alive: false };
+    const ctrl = this.controlFor(s);
+    const st = ctrl ? await ctrl.status(s.id) : { alive: false };
     return { ok: true, phase: s.phase, alive: st.alive, sessionId: st.sessionId };
   }
 
@@ -425,7 +481,8 @@ export class Supervisor {
   deleteThread(threadId: string): Promise<ControlResult> {
     return this.store.findSessionByThread(threadId).then(async (s0) => {
       if (s0 === undefined) return { ok: false, reason: "no-session" } as ControlResult;
-      if (this.control) await this.control.reset(s0.id).catch(() => false);
+      const ctrl = this.controlFor(s0);
+      if (ctrl) await ctrl.reset(s0.id).catch(() => false);
       return this.enqueue(threadId, async () => {
         // Re-resolve in case the thread was recreated while the live turn drained.
         const fresh = await this.store.findSessionByThread(threadId);

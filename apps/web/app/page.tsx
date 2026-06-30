@@ -216,6 +216,10 @@ export default function ChatPage() {
             showReasoning={prefs.showReasoning}
             theme={prefs.theme}
             onThemeChange={(theme) => update({ theme })}
+            // The thread's BOUND engine gates the composer's per-turn controls
+            // (BRO-1620 P20 F); a never-run thread inherits the global pref until
+            // its first turn binds it.
+            engine={threads.find((t) => t.threadId === activeThreadId)?.engine ?? prefs.engine}
           />
         ) : (
           <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">

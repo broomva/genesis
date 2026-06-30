@@ -26,6 +26,7 @@ interface SessionRow {
   createdAt: string;
   archived?: boolean | null;
   title?: string | null;
+  engine?: string | null;
 }
 
 interface TurnRow {
@@ -68,6 +69,7 @@ function toSession(r: SessionRow): Session {
     createdAt: r.createdAt,
     archived: r.archived ?? false,
     title: r.title ?? undefined,
+    engine: r.engine ?? undefined,
   };
 }
 
@@ -119,6 +121,7 @@ export class DrizzleStore implements Store {
       createdAt: s.createdAt,
       archived: s.archived ?? false,
       title: s.title ?? null,
+      engine: s.engine ?? null,
     };
     await this.db
       .insert(sessions)
@@ -126,14 +129,15 @@ export class DrizzleStore implements Store {
       .onConflictDoUpdate({
         target: sessions.id,
         // The set-clause must list EVERY mutable column — anything omitted is
-        // silently dropped on update. archived/title (BRO-1592) join phase +
-        // agentSessionId here, or an archive/rename write would no-op.
+        // silently dropped on update. archived/title (BRO-1592) + engine (BRO-1620)
+        // join phase + agentSessionId here, or their writes would no-op.
         set: {
           agentSessionId: row.agentSessionId,
           phase: row.phase,
           workspaceId: row.workspaceId,
           archived: row.archived,
           title: row.title,
+          engine: row.engine,
         },
       });
     return s;

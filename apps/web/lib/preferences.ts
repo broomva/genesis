@@ -11,9 +11,11 @@
 
 import {
   DEFAULT_EFFORT,
+  DEFAULT_ENGINE,
   DEFAULT_MODEL,
   type SelectOption,
   isKnownEffort,
+  isKnownEngine,
   isKnownModel,
 } from "@/lib/chat-options";
 
@@ -41,6 +43,10 @@ export interface Preferences {
   theme: ThemeChoice;
   /** Render-gate for the reasoning ("Reasoned") panel (BRO-1614/1616). */
   showReasoning: boolean;
+  /** Default agent engine for NEW threads (BRO-1620) — "interactive" | "print".
+   *  A thread's engine is bound sticky on its first turn, so changing this never
+   *  reroutes an existing conversation. */
+  engine: string;
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -48,6 +54,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   effort: DEFAULT_EFFORT,
   theme: DEFAULT_THEME,
   showReasoning: true,
+  engine: DEFAULT_ENGINE,
 };
 
 /** Coerce ANY untrusted shape (localStorage blob, server JSON, partial PUT body)
@@ -62,5 +69,7 @@ export function sanitizePreferences(raw: unknown): Preferences {
     typeof o.effort === "string" && isKnownEffort(o.effort) ? o.effort : DEFAULT_EFFORT;
   const theme = isKnownTheme(o.theme) ? o.theme : DEFAULT_THEME;
   const showReasoning = typeof o.showReasoning === "boolean" ? o.showReasoning : true;
-  return { model, effort, theme, showReasoning };
+  const engine =
+    typeof o.engine === "string" && isKnownEngine(o.engine) ? o.engine : DEFAULT_ENGINE;
+  return { model, effort, theme, showReasoning, engine };
 }
