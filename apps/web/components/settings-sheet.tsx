@@ -24,9 +24,11 @@ import {
   modelOptionsFor,
   sanitizeEffortFor,
   sanitizeModelFor,
+  workspaceShowsPicker,
 } from "@/lib/chat-options";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
+import { type Workspace, resolveWorkspace } from "@/lib/workspaces";
 
 /** A titled settings group. */
 function Section({
@@ -111,11 +113,17 @@ export function SettingsSheet({
   onOpenChange,
   prefs,
   onUpdate,
+  workspaces,
+  defaultWorkspaceId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   prefs: Preferences;
   onUpdate: (partial: Partial<Preferences>) => void;
+  /** Selectable workspaces (BRO-1627) for the "Default workspace" row; the row
+   *  self-hides when there's ≤1. `defaultWorkspaceId` is the server fallback. */
+  workspaces: Workspace[];
+  defaultWorkspaceId: string;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -198,6 +206,27 @@ export function SettingsSheet({
                   ))}
                 </SegmentedControl>
               </Row>
+              {/* Default workspace (BRO-1627) — the repo new chats run in. Hidden
+                  when there's ≤1 workspace. A chat keeps the workspace it started
+                  in (bound on its first turn); change it per-chat in the composer. */}
+              {workspaceShowsPicker(workspaces.length) ? (
+                <Row
+                  label="Default workspace"
+                  hint="The repo new chats run in. Change it per chat in the composer; a chat keeps the workspace it started with."
+                >
+                  <PrefSelect
+                    value={resolveWorkspace(
+                      undefined,
+                      prefs.workspace,
+                      defaultWorkspaceId,
+                      workspaces,
+                    )}
+                    options={workspaces.map((w) => ({ value: w.id, label: w.name }))}
+                    onValueChange={(v) => onUpdate({ workspace: v })}
+                    ariaLabel="Default workspace"
+                  />
+                </Row>
+              ) : null}
               {/* Model/effort options follow the selected engine's PROVIDER
                   (BRO-1623) — claude aliases for print/interactive, OpenAI for
                   codex. The model row hides when the provider has a single model

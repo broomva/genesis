@@ -18,8 +18,15 @@ describe("sanitizePreferences (BRO-1618)", () => {
       theme: "dark",
       showReasoning: false,
       engine: "print",
+      workspace: "ws-alpha",
     };
     expect(sanitizePreferences(p)).toEqual(p);
+  });
+
+  test("workspace passes any string through (server-dynamic set); non-string → '' (BRO-1627)", () => {
+    expect(sanitizePreferences({ workspace: "ws-anything" }).workspace).toBe("ws-anything");
+    expect(sanitizePreferences({ workspace: 42 }).workspace).toBe("");
+    expect(sanitizePreferences({}).workspace).toBe("");
   });
 
   test("codexEffort is a separate slot — no cross-provider clobber (BRO-1623)", () => {

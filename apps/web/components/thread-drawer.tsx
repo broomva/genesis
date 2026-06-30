@@ -85,6 +85,7 @@ function ThreadRow({
   onArchive,
   onRename,
   onRequestDelete,
+  showWorkspace,
 }: {
   t: ThreadSummary;
   isActive: boolean;
@@ -92,6 +93,8 @@ function ThreadRow({
   onArchive: (threadId: string, archived: boolean) => void;
   onRename: (t: ThreadSummary) => void;
   onRequestDelete: (t: ThreadSummary) => void;
+  /** Show the thread's bound workspace name under the label (BRO-1627). */
+  showWorkspace: boolean;
 }) {
   const label = rowLabel(t);
   return (
@@ -126,7 +129,16 @@ function ThreadRow({
             className={cn("size-1.5 shrink-0 rounded-full", PHASE_DOT[t.phase] ?? PHASE_DOT.idle)}
           />
         )}
-        <span className="truncate">{label}</span>
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate">{label}</span>
+          {/* The bound workspace (BRO-1627) — only when >1 workspace, so a
+              single-workspace deploy doesn't repeat one name on every row. */}
+          {showWorkspace && t.workspaceName ? (
+            <span className="text-muted-foreground truncate text-[0.7rem] leading-tight">
+              {t.workspaceName}
+            </span>
+          ) : null}
+        </span>
       </button>
 
       <DropdownMenu>
@@ -193,6 +205,7 @@ export function ThreadDrawer({
   onDelete,
   onRename,
   onOpenSettings,
+  showWorkspace,
 }: {
   threads: ThreadSummary[];
   activeThreadId: string | null;
@@ -205,6 +218,9 @@ export function ThreadDrawer({
   onRename: (threadId: string, title: string) => void;
   /** Open the settings + personalization sheet (BRO-1618). */
   onOpenSettings: () => void;
+  /** Show a per-row workspace label (BRO-1627) — only when >1 workspace exists,
+   *  so single-workspace deploys aren't labelled with the same name on every row. */
+  showWorkspace: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -244,6 +260,7 @@ export function ThreadDrawer({
     onArchive,
     onRename: startRename,
     onRequestDelete: setConfirmDelete,
+    showWorkspace,
   };
 
   return (
