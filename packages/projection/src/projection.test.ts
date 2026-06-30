@@ -396,6 +396,20 @@ describe("projection reducer — parts timeline (BRO-1607)", () => {
     expect(s.parts).toEqual([{ type: "text", text: "Hello world" }]); // one part, not three
   });
 
+  test("a SHORTER text after a longer one appends, never swallows it (BRO-1613 S1)", () => {
+    // Only GROWTH (new startsWith last) collapses; a shorter text whose prefix
+    // happens to match must NOT replace the longer part with the shorter one.
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    });
+    s = reduce(s, { type: "assistant", message: { content: [{ type: "text", text: "Hello" }] } });
+    expect(s.parts).toEqual([
+      { type: "text", text: "Hello world" },
+      { type: "text", text: "Hello" },
+    ]);
+  });
+
   test("distinct (non-prefix) text blocks still append — print-engine multi-block (BRO-1613)", () => {
     let s = reduce(initialState, {
       type: "assistant",

@@ -76,6 +76,10 @@ interface LiveSession {
   session: EngineSession;
   /** Set once any hook event has been observed (trust dialog passed). */
   hookSeen: boolean;
+  /** Cumulative session cost (USD) as of the last completed turn (BRO-1613 P20):
+   *  the statusline reports CUMULATIVE cost, so we diff it per turn to emit a
+   *  per-turn cost the UI can sum (parity with the print engine). */
+  cumulativeCostUsd?: number;
   /** Abort the in-flight turn (set during a turn, cleared on completion). Lets
    *  reset() resolve a parked run() deterministically instead of leaving it to
    *  hang on turnDone until the turn timeout (P20 BRO-1493 B1). */
@@ -327,17 +331,27 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // breakdown; the meter ring-fill stays partial on this engine).
           if (typeof ir.costUsd === "number") lastCostUsd = ir.costUsd;
           return;
-        case "turn.complete":
+        case "turn.complete": {
           if (ir.surface !== "hook") return; // terminal kinds are hook-only too
+          // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
+          // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
+          // print engine's independent turns) totals correctly instead of growing
+          // triangularly.
+          let turnCostUsd: number | undefined;
+          if (lastCostUsd !== undefined) {
+            turnCostUsd = Math.max(0, lastCostUsd - (entry.cumulativeCostUsd ?? 0));
+            entry.cumulativeCostUsd = lastCostUsd;
+          }
           push({
             type: "result",
             subtype: "success",
             session_id: sessionId,
             result: ir.lastAssistantMessage ?? lastAssistant,
-            total_cost_usd: lastCostUsd,
+            total_cost_usd: turnCostUsd,
           });
           finish();
           return;
+        }
         case "error":
           if (ir.surface !== "hook") return;
           push({
