@@ -28,14 +28,20 @@ function agentAuthorized(req: Request): boolean {
   return provided.length > 0 && timingSafeEqual(provided, AGENT_TOKEN);
 }
 
-export type Principal = { ok: true; asAgent: boolean } | { ok: false };
+export type Principal =
+  // HUMAN — carries the Better Auth user id (BRO-1618) so per-user routes
+  // (e.g. /api/settings) can attribute without re-resolving the session.
+  | { ok: true; asAgent: false; userId: string }
+  // AGENT — a machine token; no user row to attribute to.
+  | { ok: true; asAgent: true }
+  | { ok: false };
 
 /** Authorize a BFF request as a human session OR the machine agent. The session
  *  check stays primary; the agent path is only consulted when there is no
  *  session, and only when AGENT_TOKEN is configured. */
 export async function authorizePrincipal(req: Request): Promise<Principal> {
   const session = await auth.api.getSession({ headers: req.headers });
-  if (session) return { ok: true, asAgent: false };
+  if (session) return { ok: true, asAgent: false, userId: session.user.id };
   if (agentAuthorized(req)) return { ok: true, asAgent: true };
   return { ok: false };
 }

@@ -7,11 +7,14 @@ import {
   Pencil,
   Plus,
   Search,
+  Settings,
   Trash2,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { AccountIdentity, AccountIdentityFallback } from "@/components/account-identity";
+import { ClientOnly } from "@/components/client-only";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -189,6 +192,7 @@ export function ThreadDrawer({
   onArchive,
   onDelete,
   onRename,
+  onOpenSettings,
 }: {
   threads: ThreadSummary[];
   activeThreadId: string | null;
@@ -199,6 +203,8 @@ export function ThreadDrawer({
   onArchive: (threadId: string, archived: boolean) => void;
   onDelete: (threadId: string) => void;
   onRename: (threadId: string, title: string) => void;
+  /** Open the settings + personalization sheet (BRO-1618). */
+  onOpenSettings: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -302,7 +308,7 @@ export function ThreadDrawer({
           </div>
         </div>
 
-        <nav className="min-h-0 flex-1 overflow-y-auto p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-2">
           {active.length === 0 && archived.length === 0 ? (
             <p className="text-muted-foreground px-2 py-6 text-center text-xs">
               {query.trim() ? "No matches." : "No conversations yet."}
@@ -349,6 +355,23 @@ export function ThreadDrawer({
             </div>
           ) : null}
         </nav>
+
+        {/* Account row (BRO-1618) — the sidebar's configuration + personalization
+            entry. Profile + a gear → opens the settings sheet. Pinned to the
+            bottom (the nav above is flex-1); carries the iOS home-indicator inset. */}
+        <div className="border-sidebar-border border-t p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="Settings and account"
+            className="group/acct flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-sidebar-accent/60 [@media(pointer:coarse)]:py-2.5"
+          >
+            <ClientOnly fallback={<AccountIdentityFallback compact />}>
+              <AccountIdentity compact />
+            </ClientOnly>
+            <Settings className="text-muted-foreground/80 size-4 shrink-0 transition-colors group-hover/acct:text-foreground" />
+          </button>
+        </div>
       </aside>
 
       {/* Delete confirm — Radix Dialog portals to body (escapes the sidebar's

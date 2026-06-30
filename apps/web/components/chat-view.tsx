@@ -54,6 +54,7 @@ import {
   modelToBody,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
+import type { ThemeChoice } from "@/lib/preferences";
 import { parseSlash, slashHelpText } from "@/lib/slash";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
 
@@ -156,6 +157,7 @@ function AssistantBody({
   isLast,
   onRetry,
   onAnswer,
+  showReasoning,
 }: {
   message: UIMessage;
   streaming: boolean;
@@ -163,6 +165,8 @@ function AssistantBody({
   isLast: boolean;
   onRetry?: () => void;
   onAnswer?: (text: string) => void;
+  /** User preference (BRO-1618) — hide the reasoning panel when off. */
+  showReasoning: boolean;
 }) {
   const parts = message.parts;
   let lastTextIdx = -1;
@@ -173,6 +177,7 @@ function AssistantBody({
   const nodes = parts.map((part, i) => {
     const key = `${message.id}-p${i}`;
     if (part.type === "reasoning") {
+      if (!showReasoning) return null;
       const note = (part as { text: string }).text;
       if (!note) return null;
       rendered++;
@@ -359,6 +364,9 @@ export function ChatView({
   effort,
   onModelChange,
   onEffortChange,
+  showReasoning,
+  theme,
+  onThemeChange,
 }: {
   threadId: string;
   initialMessages: UIMessage[];
@@ -372,6 +380,12 @@ export function ChatView({
   effort: string;
   onModelChange: (value: string) => void;
   onEffortChange: (value: string) => void;
+  /** Render-gate for the reasoning panel (BRO-1618 user preference). */
+  showReasoning: boolean;
+  /** Theme (BRO-1618) — the header quick-toggle is controlled by the prefs hook
+   *  so it never drifts from the settings sheet. */
+  theme: ThemeChoice;
+  onThemeChange: (theme: ThemeChoice) => void;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
   const { messages, sendMessage, status, error, stop, regenerate } = useChat({
@@ -489,7 +503,7 @@ export function ChatView({
         <span className="text-muted-foreground hidden text-sm sm:inline">Agent chat</span>
         <div className="ml-auto flex items-center gap-2">
           <RunningStatus status={status} />
-          <ThemeToggle />
+          <ThemeToggle theme={theme} onChange={onThemeChange} />
         </div>
       </header>
 
@@ -536,6 +550,7 @@ export function ChatView({
                           streaming={status === "streaming"}
                           busy={busy}
                           isLast={isLast}
+                          showReasoning={showReasoning}
                           onRetry={() =>
                             regenerate({
                               messageId: message.id,
