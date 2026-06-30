@@ -6,9 +6,10 @@
 //
 // Load order (no-flash + cross-device): read localStorage synchronously on mount
 // for an instant render (matches the pre-paint theme script), THEN GET
-// /api/settings once and let the server value win (cross-device truth). Every
-// change writes state + localStorage immediately (optimistic) and debounces a
-// PUT to the server.
+// /api/settings once and let the server value win — UNLESS the user already
+// changed something locally in the cold-load window (the `dirty` guard, P20).
+// Every change writes state + localStorage immediately (optimistic) and debounces
+// a PUT to the server.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -55,46 +56,63 @@ export interface UsePreferences {
 export function usePreferences(): UsePreferences {
   const [prefs, setPrefs] = useState<Preferences>(DEFAULT_PREFERENCES);
   const [ready, setReady] = useState(false);
+  // Latest committed prefs — read by `update` so rapid successive calls compose
+  // off the freshest value without a side-effecting setState updater (P20 #3).
+  const prefsRef = useRef<Preferences>(DEFAULT_PREFERENCES);
+  // The user changed something locally → the one-shot server GET must NOT clobber
+  // it (P20 #1). Their change is the truth; the debounced PUT ships it.
+  const dirty = useRef(false);
   const putTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const commit = useCallback((next: Preferences, applyThemeToo: boolean) => {
+    prefsRef.current = next;
+    setPrefs(next);
+    writeLocal(next);
+    if (applyThemeToo) applyTheme(next.theme);
+  }, []);
 
   // 1. localStorage → instant render (the pre-paint script already applied theme).
   useEffect(() => {
-    const local = readLocal();
-    setPrefs(local);
-    applyTheme(local.theme);
+    commit(readLocal(), true);
     setReady(true);
-  }, []);
+  }, [commit]);
 
-  // 2. Server wins (cross-device). One GET after the local read settles.
+  // 2. Server wins (cross-device) — but only if the user hasn't already edited in
+  //    the cold-load window. One GET after the local read settles.
   useEffect(() => {
     if (!ready) return;
     const ctrl = new AbortController();
     fetch("/api/settings", { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((server) => {
-        if (!server) return;
-        const next = sanitizePreferences(server);
-        setPrefs(next);
-        writeLocal(next);
-        applyTheme(next.theme);
+        if (!server || dirty.current) return; // user already changed something → keep it
+        commit(sanitizePreferences(server), true);
       })
       .catch(() => {
         // offline / unauthorized — localStorage already drives the UI.
       });
     return () => ctrl.abort();
-  }, [ready]);
+  }, [ready, commit]);
 
-  // 3. Track OS theme while the choice is "system".
+  // 3. Track OS theme while the choice is "system" (keeps the DOM class in sync).
   useEffect(() => {
     if (prefs.theme !== "system") return;
     return watchSystemTheme(() => applyTheme("system"));
   }, [prefs.theme]);
 
-  const update = useCallback((partial: Partial<Preferences>) => {
-    setPrefs((prev) => {
-      const next = sanitizePreferences({ ...prev, ...partial });
-      writeLocal(next);
-      if ("theme" in partial) applyTheme(next.theme);
+  // 4. Flush the pending PUT timer on unmount (cosmetic — the page-level hook
+  //    rarely unmounts, but avoids a dangling timer in dev/HMR).
+  useEffect(() => {
+    return () => {
+      if (putTimer.current) clearTimeout(putTimer.current);
+    };
+  }, []);
+
+  const update = useCallback(
+    (partial: Partial<Preferences>) => {
+      const next = sanitizePreferences({ ...prefsRef.current, ...partial });
+      dirty.current = true;
+      commit(next, "theme" in partial);
       if (putTimer.current) clearTimeout(putTimer.current);
       putTimer.current = setTimeout(() => {
         void fetch("/api/settings", {
@@ -103,9 +121,9 @@ export function usePreferences(): UsePreferences {
           body: JSON.stringify(next),
         }).catch(() => {});
       }, 400);
-      return next;
-    });
-  }, []);
+    },
+    [commit],
+  );
 
   return { prefs, ready, update };
 }

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { ThemeChoice } from "@/lib/preferences";
-import { resolvesDark } from "@/lib/theme";
+import { resolvesDark, watchSystemTheme } from "@/lib/theme";
 
 // Header quick-toggle for theme (BRO-1618). CONTROLLED by the prefs hook so it
 // never drifts from the settings sheet's three-way control; the heavy lifting
@@ -22,7 +22,14 @@ export function ThemeToggle({
   // Guard SSR↔hydration: `resolvesDark("system")` reads matchMedia (client-only),
   // so render a neutral placeholder until mounted to avoid a Sun↔Moon mismatch.
   const [mounted, setMounted] = useState(false);
+  // Re-render the icon when the OS theme flips while the choice is "system"
+  // (resolvesDark("system") reads matchMedia, which doesn't trigger React) — P20 #2.
+  const [, bump] = useState(0);
   useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (theme !== "system") return;
+    return watchSystemTheme(() => bump((n) => n + 1));
+  }, [theme]);
   const isDark = mounted && resolvesDark(theme);
 
   return (
