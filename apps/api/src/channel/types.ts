@@ -33,7 +33,7 @@ export interface IncomingMessage {
 /** Agent engines a client may request (BRO-1620). Validated in parseChatRequest;
  *  an unknown value is dropped so the supervisor falls back to its default engine.
  *  Keep in sync with the client's ENGINE_OPTIONS (apps/web lib/chat-options.ts). */
-export const ENGINE_IDS = ["print", "interactive"] as const;
+export const ENGINE_IDS = ["print", "interactive", "codex"] as const;
 
 /** Canonical outbound event — a live run transition or the final reply.
  *  `reasoning` is a short human-readable thinking INDICATOR note (BRO-1574) — not

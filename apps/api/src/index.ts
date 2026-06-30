@@ -11,7 +11,12 @@ import {
   aiGatewayEnv,
   allowListOmitsGatewayHost,
 } from "@genesis/host";
-import { type InteractiveEngine, RunLogger, createInteractiveEngine } from "@genesis/runner";
+import {
+  type InteractiveEngine,
+  RunLogger,
+  createInteractiveEngine,
+  runCodex,
+} from "@genesis/runner";
 import { build } from "./server";
 
 const defaultDataDir = () =>
@@ -235,9 +240,41 @@ if (localHost) {
   process.exit(1);
 }
 
-// Default engine new threads inherit (interactive only when it was built).
-const defaultEngine =
-  process.env.GENESIS_ENGINE === "interactive" && interactiveEngine ? "interactive" : "print";
+// Codex engine (BRO-1621) — the second one-shot harness (OpenAI codex CLI). Soft
+// -detected: registered only when the `codex` binary is on PATH AND the host is
+// local (the runner spawns codex on THIS box, so detecting it here proves it is
+// where dispatch runs — same locality constraint as interactive, minus tmux).
+// codex drives by ChatGPT subscription (`~/.codex/auth.json`); the user runs
+// `codex login --device-auth` on the box once. No control surface (one-shot,
+// like print) → runners only, never `controls`. Absent codex → silently skipped,
+// so a stale request for engine "codex" falls back to the default at dispatch.
+const codexBin = localHost ? Bun.which("codex") : null;
+const codexAvailable = codexBin !== null;
+// The engine registry the Supervisor binds per thread (BRO-1620). print is the
+// Supervisor's built-in baseline; these are the additional engines.
+const runners: Record<string, typeof runCodex> = {};
+if (interactiveEngine) runners.interactive = interactiveEngine.run;
+if (codexAvailable) {
+  runners.codex = runCodex;
+  // Don't log the absolute binary path (filesystem-layout leak) — just the fact.
+  engineLabel += " + codex(exec)";
+}
+
+// Default engine new threads inherit when the client omits one — GENESIS_ENGINE,
+// honored for ANY engine that was actually built (interactive / codex), else
+// print (CodeRabbit: a codex-available box with GENESIS_ENGINE=codex must NOT
+// silently default to print). A requested-but-unavailable default warns + falls
+// back; the Supervisor's own guard is the final net (it re-resolves to print if
+// the named default isn't registered).
+const requestedDefault = process.env.GENESIS_ENGINE;
+let defaultEngine = "print";
+if (requestedDefault === "interactive" && interactiveEngine) defaultEngine = "interactive";
+else if (requestedDefault === "codex" && codexAvailable) defaultEngine = "codex";
+else if (requestedDefault === "codex" && !codexAvailable) {
+  console.warn(
+    "[genesis] GENESIS_ENGINE=codex but codex was not found on PATH; defaulting to print.",
+  );
+}
 
 const { app, websocket } = build({
   workspaceRoot,
@@ -246,8 +283,9 @@ const { app, websocket } = build({
   store,
   hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,
-  // The registry: print is the Supervisor baseline; interactive when local (BRO-1620).
-  runners: interactiveEngine ? { interactive: interactiveEngine.run } : undefined,
+  // The registry: print is the Supervisor baseline; interactive + codex when
+  // available (BRO-1620/1621).
+  runners: Object.keys(runners).length > 0 ? runners : undefined,
   controls: interactiveEngine ? { interactive: interactiveEngine } : undefined,
   defaultEngine,
   // Run directly in the workspace (no worktree) — required for nested-repo

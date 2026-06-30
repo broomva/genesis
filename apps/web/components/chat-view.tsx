@@ -52,6 +52,7 @@ import {
   contextWindowFor,
   effortToBody,
   engineToBody,
+  engineUsesModelControls,
   modelToBody,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
@@ -639,9 +640,11 @@ export function ChatView({
                       </PromptInputActionMenu>
                       {/* Copy the current input (BRO-1610). */}
                       <ComposerCopyButton />
-                      {/* Interactive ignores per-turn model/effort (set at session
-                          spawn) — hide the selectors when it's active (BRO-1620). */}
-                      {engine !== "interactive" ? (
+                      {/* Some engines ignore per-turn model/effort — interactive
+                          pins them at session spawn, codex reads its own config
+                          (auth-tier-gated models). Hide the selectors for those;
+                          only print honors them (BRO-1620/1621). */}
+                      {engineUsesModelControls(engine) ? (
                         <>
                           <PromptInputSelect value={model} onValueChange={onModelChange}>
                             <PromptInputSelectTrigger aria-label="Model">

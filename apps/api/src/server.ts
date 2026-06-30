@@ -100,7 +100,17 @@ export function build(opts: BuildOpts) {
   };
 
   app.get("/", (c) => c.html(PAGE));
-  app.get("/health", (c) => c.json({ ok: true, workspace: opts.workspaceRoot }));
+  // /health doubles as the capability surface (BRO-1621): `engines` is the set
+  // the box can actually run, so a client can gate its engine picker instead of
+  // offering one that would silently bind the default (BRO-1622 consumes this).
+  app.get("/health", (c) =>
+    c.json({
+      ok: true,
+      workspace: opts.workspaceRoot,
+      engines: supervisor.engines,
+      defaultEngine: supervisor.defaultEngineId,
+    }),
+  );
 
   // Thread session control (BRO-1493): reset (fresh context) / interrupt /
   // status. Slash commands map here, never into the agent TUI.
