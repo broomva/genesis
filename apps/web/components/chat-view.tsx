@@ -337,15 +337,7 @@ function useInputHistory(history: readonly string[], setInput: (v: string) => vo
 // The composer textarea wired for input-history recall (BRO-1598). Renders inside
 // a PromptInputProvider so it can write recalled text through the controller.
 // `history` is the thread's user-message texts, oldest → newest.
-function RecallTextarea({
-  history,
-  onFocusChange,
-}: {
-  history: readonly string[];
-  /** Focus drives the composer auto-hide override on mobile (BRO-1626) — a
-   *  focused composer (keyboard open) never auto-hides. */
-  onFocusChange?: (focused: boolean) => void;
-}) {
+function RecallTextarea({ history }: { history: readonly string[] }) {
   const { textInput } = usePromptInputController();
   const { onKeyDown, onChange, announce } = useInputHistory(history, textInput.setInput);
   return (
@@ -357,8 +349,6 @@ function RecallTextarea({
         aria-label="Message the agent"
         onKeyDown={onKeyDown}
         onChange={onChange}
-        onFocus={() => onFocusChange?.(true)}
-        onBlur={() => onFocusChange?.(false)}
       />
       {/* Announce recall to assistive tech — a programmatic value swap isn't
           reliably read otherwise. <output> is an implicit aria-live=polite status. */}
@@ -437,9 +427,15 @@ export function ChatView({
   // so the ref is populated first). Resolving by data-slot avoids depending on
   // the message-scroller primitive forwarding a ref.
   useEffect(() => {
-    viewportRef.current =
+    const node =
       stageRef.current?.querySelector<HTMLDivElement>('[data-slot="message-scroller-viewport"]') ??
       null;
+    viewportRef.current = node;
+    if (!node && process.env.NODE_ENV !== "production") {
+      console.warn(
+        "[composer-autohide] scroll viewport not found ([data-slot=message-scroller-viewport]); auto-hide is disabled.",
+      );
+    }
   }, []);
 
   // Keep `--composer-h` in lockstep with the live composer height (it grows with a
@@ -594,7 +590,7 @@ export function ChatView({
         <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor">
           <MessageScroller className="min-h-0">
             <MessageScrollerViewport className="px-4">
-              <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[var(--composer-h,5rem)]">
+              <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[var(--composer-h,4.5rem)]">
                 {messages.length === 0 ? (
                   <div className="message-in flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
                     <p className="text-foreground text-[1.375rem] font-semibold">
@@ -664,6 +660,7 @@ export function ChatView({
             <MessageScrollerButton
               direction="end"
               style={{ bottom: "calc(var(--composer-h, 4.5rem) + 0.5rem)" }}
+              // (fallback agrees with the content's pb-[var(--composer-h,4.5rem)])
             />
           </MessageScroller>
         </MessageScrollerProvider>
@@ -677,6 +674,12 @@ export function ChatView({
           ref={composerRef}
           data-hidden={composerHidden ? "true" : undefined}
           inert={composerHidden || undefined}
+          // Capture-phase focus tracking for the WHOLE composer — textarea, the
+          // model/effort selects, attach menu, and send button. A focused composer
+          // never auto-hides (so we never inert + blur the control being used,
+          // which on mobile would collapse the keyboard mid-typing). P20 BRO-1626.
+          onFocusCapture={() => setComposerFocused(true)}
+          onBlurCapture={(e) => setComposerFocused(e.currentTarget.contains(e.relatedTarget))}
           className={cn(
             "absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
             "transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform motion-reduce:transition-none",

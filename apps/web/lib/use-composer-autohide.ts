@@ -144,12 +144,23 @@ export function useComposerAutoHide(
     // Re-evaluate when coarse/fine pointer changes (e.g. tablet rotation, devtools).
     const onMqChange = () => evaluate();
 
+    // Recover from a layout change that fires no scroll (orientation, the soft
+    // keyboard, browser-chrome show/hide): re-run the overrides so a resize that
+    // makes the content non-scrollable / near-bottom can un-hide — otherwise the
+    // composer could stay hidden + inert with no scrollable area to recover from.
+    // Scheduled through the same rAF throttle as scroll (P20 BRO-1626).
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(onScroll) : null;
+    ro?.observe(el);
+
     el.addEventListener("scroll", onScroll, { passive: true });
     mq.addEventListener("change", onMqChange);
+    window.addEventListener("resize", onScroll, { passive: true });
     return () => {
       if (raf) cancelAnimationFrame(raf);
+      ro?.disconnect();
       el.removeEventListener("scroll", onScroll);
       mq.removeEventListener("change", onMqChange);
+      window.removeEventListener("resize", onScroll);
     };
   }, [scrollRef]);
 
