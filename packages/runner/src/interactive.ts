@@ -76,6 +76,10 @@ interface LiveSession {
   session: EngineSession;
   /** Set once any hook event has been observed (trust dialog passed). */
   hookSeen: boolean;
+  /** Cumulative session cost (USD) as of the last completed turn (BRO-1613 P20):
+   *  the statusline reports CUMULATIVE cost, so we diff it per turn to emit a
+   *  per-turn cost the UI can sum (parity with the print engine). */
+  cumulativeCostUsd?: number;
   /** Abort the in-flight turn (set during a turn, cleared on completion). Lets
    *  reset() resolve a parked run() deterministically instead of leaving it to
    *  hang on turnDone until the turn timeout (P20 BRO-1493 B1). */
@@ -216,6 +220,9 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
     let state: RunState = { ...initialState, sessionId };
     const assistantAccum = new Map<string, string>();
     let lastAssistant: string | undefined;
+    // Latest cost from the statusline feed (BRO-1613) — folded onto the terminal
+    // result so the context meter shows the turn's running cost.
+    let lastCostUsd: number | undefined;
 
     let finish: () => void = () => {};
     const turnDone = new Promise<void>((resolve) => {
@@ -260,21 +267,35 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       switch (ir.kind) {
         case "tool.use":
           if (ir.surface !== "hook") return;
+          // Pass the tool id through (BRO-1613) — the projection parts timeline
+          // (BRO-1607) keys tool blocks on it; without it tools/per-tool rendering/
+          // files-changed/the HITL QuestionCard never build.
           push({
             type: "assistant",
             session_id: sessionId,
             message: {
               role: "assistant",
-              content: [{ type: "tool_use", name: ir.name, input: ir.input }],
+              content: [{ type: "tool_use", id: ir.toolUseId, name: ir.name, input: ir.input }],
             },
           });
           return;
         case "tool.result":
           if (ir.surface !== "hook") return;
+          // tool_use_id matches the result to its tool block; is_error tints it (BRO-1613).
           push({
             type: "user",
             session_id: sessionId,
-            message: { role: "user", content: [{ type: "tool_result", content: ir.content }] },
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: ir.toolUseId,
+                  content: ir.content,
+                  is_error: ir.isError,
+                },
+              ],
+            },
           });
           return;
         case "message.assistant": {
@@ -290,16 +311,47 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           });
           return;
         }
-        case "turn.complete":
+        case "thinking":
+          // Extended thinking (BRO-1613) — arrives on the transcript surface, not
+          // `hook`. Map to a thinking_delta so the reducer marks `reasoned` +
+          // accumulates prose (BRO-1608). May be empty/absent under subscription
+          // auth or if the transcript isn't live in tmux; harmless when so.
+          if (typeof ir.text !== "string" || ir.text.length === 0) return;
+          push({
+            type: "stream_event",
+            session_id: sessionId,
+            event: {
+              type: "content_block_delta",
+              delta: { type: "thinking_delta", thinking: ir.text },
+            },
+          });
+          return;
+        case "status":
+          // Statusline feed (BRO-1613) — carries the running cost (no token
+          // breakdown; the meter ring-fill stays partial on this engine).
+          if (typeof ir.costUsd === "number") lastCostUsd = ir.costUsd;
+          return;
+        case "turn.complete": {
           if (ir.surface !== "hook") return; // terminal kinds are hook-only too
+          // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
+          // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
+          // print engine's independent turns) totals correctly instead of growing
+          // triangularly.
+          let turnCostUsd: number | undefined;
+          if (lastCostUsd !== undefined) {
+            turnCostUsd = Math.max(0, lastCostUsd - (entry.cumulativeCostUsd ?? 0));
+            entry.cumulativeCostUsd = lastCostUsd;
+          }
           push({
             type: "result",
             subtype: "success",
             session_id: sessionId,
             result: ir.lastAssistantMessage ?? lastAssistant,
+            total_cost_usd: turnCostUsd,
           });
           finish();
           return;
+        }
         case "error":
           if (ir.surface !== "hook") return;
           push({

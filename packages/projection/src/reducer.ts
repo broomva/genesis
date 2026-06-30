@@ -75,7 +75,20 @@ function appendAssistantParts(prev: TurnPart[], msg: AgentMessage): TurnPart[] {
   const out = prev.slice();
   for (const b of contentBlocksOf(msg)) {
     if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
-      out.push({ type: "text", text: b.text });
+      // Collapse a CONSECUTIVE GROWING text part into one (BRO-1613): the
+      // interactive engine re-pushes the growing accumulated text per streaming
+      // chunk (acc, acc+more, …), which would otherwise append a cumulative
+      // duplicate each time. Strictly `new startsWith last` (growth) only — a
+      // SHORTER or non-prefix text always appends (so a distinct message is never
+      // swallowed). No-op for the print engine: it emits one assistant event per
+      // API turn, and consecutive assistant events are always tool-separated, so
+      // the last part before a new text is a tool, not text (P20 BRO-1613).
+      const last = out[out.length - 1];
+      if (last?.type === "text" && b.text.startsWith(last.text)) {
+        out[out.length - 1] = { type: "text", text: b.text };
+      } else {
+        out.push({ type: "text", text: b.text });
+      }
     } else if (
       b.type === "tool_use" &&
       typeof b.name === "string" &&

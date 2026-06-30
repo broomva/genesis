@@ -75,8 +75,20 @@ function happyTurn(sessionId: string, marker: string): IREvent[] {
   return [
     { ...base(sessionId), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
     { ...base(sessionId), kind: "message.user", text: `say ${marker}` },
-    { ...base(sessionId), kind: "tool.use", name: "Bash", input: { command: `echo ${marker}` } },
-    { ...base(sessionId), kind: "tool.result", content: { stdout: marker }, isError: false },
+    {
+      ...base(sessionId),
+      kind: "tool.use",
+      toolUseId: `tu-${marker}`,
+      name: "Bash",
+      input: { command: `echo ${marker}` },
+    },
+    {
+      ...base(sessionId),
+      kind: "tool.result",
+      toolUseId: `tu-${marker}`,
+      content: { stdout: marker },
+      isError: false,
+    },
     {
       ...base(sessionId),
       kind: "message.assistant",
@@ -125,6 +137,48 @@ describe("createInteractiveEngine", () => {
     expect(states.at(-1)).toBe("done");
     await engine.shutdown();
     expect(hub.stopped).toBe(true);
+  });
+
+  test("tool ids flow through → a BUILT + FILLED tool part (BRO-1613 S2)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "alpha"));
+    const engine = createInteractiveEngine({ hub });
+    const result = await engine.run({
+      prompt: "x",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sp",
+    });
+    const tools = (result.state.parts ?? []).filter((p) => p.type === "tool");
+    expect(tools).toHaveLength(1); // built (id present) — empty if the id passthrough regressed
+    expect(tools[0]).toMatchObject({ toolName: "Bash", state: "output-available" }); // filled by the result
+    await engine.shutdown();
+  });
+
+  test("multi-turn cost is a per-turn DELTA, not the cumulative statusline total (BRO-1613 P20 B1)", async () => {
+    let turn = 0;
+    const hub = new FakeHub((sid) => {
+      turn += 1;
+      const cumulative = 0.1 * turn; // statusline reports CUMULATIVE session cost
+      return [
+        { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t" },
+        {
+          sessionId: sid,
+          observedAt: 1,
+          surface: "statusline",
+          kind: "status",
+          costUsd: cumulative,
+          raw: {},
+        },
+        { ...base(sid), kind: "turn.complete", lastAssistantMessage: "ok" },
+      ];
+    });
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "sc" };
+    const r1 = await engine.run({ ...opts, prompt: "one" });
+    const r2 = await engine.run({ ...opts, prompt: "two" });
+    expect(r1.state.costUsd).toBeCloseTo(0.1); // turn 1: 0.10 − 0
+    expect(r2.state.costUsd).toBeCloseTo(0.1); // turn 2 DELTA: 0.20 − 0.10 (NOT the cumulative 0.20)
+    await engine.shutdown();
   });
 
   test("second dispatch on the same key reuses the live session (send, not spawn)", async () => {

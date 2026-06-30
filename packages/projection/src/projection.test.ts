@@ -383,6 +383,48 @@ describe("projection reducer — parts timeline (BRO-1607)", () => {
     expect(s.parts?.[0]).toMatchObject({ type: "tool", toolName: "AskUserQuestion" });
   });
 
+  test("consecutive prefix-extending text re-pushes collapse to one part (interactive engine, BRO-1613)", () => {
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hel" }] },
+    });
+    s = reduce(s, { type: "assistant", message: { content: [{ type: "text", text: "Hello" }] } });
+    s = reduce(s, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    });
+    expect(s.parts).toEqual([{ type: "text", text: "Hello world" }]); // one part, not three
+  });
+
+  test("a SHORTER text after a longer one appends, never swallows it (BRO-1613 S1)", () => {
+    // Only GROWTH (new startsWith last) collapses; a shorter text whose prefix
+    // happens to match must NOT replace the longer part with the shorter one.
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Hello world" }] },
+    });
+    s = reduce(s, { type: "assistant", message: { content: [{ type: "text", text: "Hello" }] } });
+    expect(s.parts).toEqual([
+      { type: "text", text: "Hello world" },
+      { type: "text", text: "Hello" },
+    ]);
+  });
+
+  test("distinct (non-prefix) text blocks still append — print-engine multi-block (BRO-1613)", () => {
+    let s = reduce(initialState, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Let me check." }] },
+    });
+    s = reduce(s, {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Found it." }] },
+    });
+    expect(s.parts).toEqual([
+      { type: "text", text: "Let me check." },
+      { type: "text", text: "Found it." },
+    ]);
+  });
+
   test("a re-emitted identical assistant message does not double-append a tool (idempotent by id)", () => {
     const assistant: AgentEvent = {
       type: "assistant",
