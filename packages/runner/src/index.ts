@@ -114,6 +114,16 @@ function agentArgs(opts: RunOptions): string[] {
     "stream-json",
     "--include-partial-messages",
     "--verbose",
+    // Always-on summarized extended thinking (BRO-1614). Opus 4.8 / Fable 5
+    // default `thinking.display` to "omitted" (empty thinking prose); these two
+    // HIDDEN flags (absent from `--help`) opt back into the summarized trace,
+    // which the projection then surfaces as reasoning parts (BRO-1608). Adaptive
+    // thinking is content-dependent — trivial turns produce no thinking, which is
+    // correct. A/B-verified: with flags 240-289 chars, baseline 0 (claude 2.1.191/196).
+    "--thinking",
+    "adaptive",
+    "--thinking-display",
+    "summarized",
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.extraArgs) args.push(...opts.extraArgs);

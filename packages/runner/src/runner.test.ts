@@ -40,15 +40,17 @@ class FakeLocalHost implements ExecutionHost {
   execCalls: string[][] = [];
   spawnCwd?: string;
   spawnOpts?: ExecOpts;
+  spawnCmd?: string[];
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
     if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
     if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" }; // isGitRepo → yes
     return { code: 0, stdout: "", stderr: "" };
   }
-  spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
+  spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
     this.spawnCwd = opts?.cwd;
     this.spawnOpts = opts;
+    this.spawnCmd = cmd;
     return streamOf(NDJSON);
   }
   async readFile() {
@@ -99,6 +101,18 @@ describe("runAgent — local host worktree", () => {
     expect("TELEGRAM_BOT_TOKEN" in env).toBe(false);
     // PATH survives so claude + tasks still run.
     expect(typeof env.PATH === "string" || !("PATH" in process.env)).toBe(true);
+  });
+
+  test("requests always-on summarized extended thinking (BRO-1614)", async () => {
+    const host = new FakeLocalHost();
+    await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
+    const cmd = host.spawnCmd ?? [];
+    // The hidden flag pair that defeats `thinking.display:"omitted"` on Opus 4.8 /
+    // Fable 5 — passed as adjacent flag/value pairs so claude parses them correctly.
+    expect(cmd.indexOf("--thinking")).toBeGreaterThan(-1);
+    expect(cmd[cmd.indexOf("--thinking") + 1]).toBe("adaptive");
+    expect(cmd.indexOf("--thinking-display")).toBeGreaterThan(-1);
+    expect(cmd[cmd.indexOf("--thinking-display") + 1]).toBe("summarized");
   });
 });
 
