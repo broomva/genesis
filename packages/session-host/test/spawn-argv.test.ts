@@ -36,4 +36,25 @@ describe("SessionHost.spawn — argv", () => {
     // Still interactive — never `-p` (the product invariant in session.ts:189).
     expect(argv).not.toContain("-p");
   });
+
+  test("enforces thinking flags AFTER extraArgs — operator cannot disable (BRO-1614)", async () => {
+    const actuator = new CapturingActuator();
+    const hub = { dispatch() {} } as unknown as SessionHub;
+    const host = new SessionHost(hub, "00000000-0000-0000-0000-000000000000", {
+      cwd: "/repo",
+      actuator,
+      // A disabling attempt through extraArgs must lose to the enforced pair.
+      extraArgs: ["--thinking", "disabled", "--thinking-display", "omitted"],
+    });
+
+    await host.spawn("/tmp/genesis-spawn-argv-enforce.sock");
+    const argv = actuator.spec?.argv ?? [];
+
+    // claude is last-wins, so the enforced value is the final occurrence.
+    expect(argv[argv.lastIndexOf("--thinking") + 1]).toBe("adaptive");
+    expect(argv[argv.lastIndexOf("--thinking-display") + 1]).toBe("summarized");
+    expect(argv.lastIndexOf("--thinking-display")).toBeGreaterThan(
+      argv.indexOf("--thinking-display"),
+    );
+  });
 });

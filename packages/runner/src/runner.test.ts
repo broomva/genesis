@@ -114,6 +114,27 @@ describe("runAgent — local host worktree", () => {
     expect(cmd.indexOf("--thinking-display")).toBeGreaterThan(-1);
     expect(cmd[cmd.indexOf("--thinking-display") + 1]).toBe("summarized");
   });
+
+  test("enforces thinking flags AFTER extraArgs — operator cannot disable (BRO-1614)", async () => {
+    const host = new FakeLocalHost();
+    // An operator who smuggles a disabling --thinking* through extraArgs must NOT
+    // win: claude is last-wins, so the enforced pair is appended last.
+    await runAgent({
+      prompt: "go",
+      cwd: "/repo",
+      host,
+      worktree: false,
+      extraArgs: ["--thinking", "disabled", "--thinking-display", "omitted"],
+    });
+    const cmd = host.spawnCmd ?? [];
+    // Last occurrence (the one claude honors) is the enforced value.
+    expect(cmd[cmd.lastIndexOf("--thinking") + 1]).toBe("adaptive");
+    expect(cmd[cmd.lastIndexOf("--thinking-display") + 1]).toBe("summarized");
+    // And the enforced pair really is positioned after the operator's attempt.
+    expect(cmd.lastIndexOf("--thinking-display")).toBeGreaterThan(
+      cmd.indexOf("--thinking-display"),
+    );
+  });
 });
 
 describe("scrubAgentEnv", () => {
