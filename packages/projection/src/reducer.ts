@@ -162,9 +162,12 @@ export interface RunState {
   costUsd?: number;
   /** Accumulated extended-thinking text from partial `thinking_delta` events
    *  (BRO-1571). Surfaced separately from `lastText` so the UI can render it in a
-   *  collapsible Reasoning panel rather than inline with the answer. NOTE: under
-   *  subscription/OAuth auth this is always "" (the prose is redacted) — use
-   *  `thinkingTokens` as the is-thinking signal instead (BRO-1574). */
+   *  collapsible Reasoning panel rather than inline with the answer. NOTE: the
+   *  prose is populated only when the spawn opts into summarized thinking via
+   *  `--thinking-display summarized` (BRO-1614, now always-on). WITHOUT that flag,
+   *  Opus 4.8 / Fable 5 redact it to "" (display defaults to "omitted") — and even
+   *  with it, a no-thinking turn leaves it "". When empty, use `reasoned` (or
+   *  `thinkingTokens`) as the is-thinking signal (BRO-1574). */
   reasoning?: string;
   /** Max thinking-token estimate seen this turn (BRO-1574). >0 ⇒ the model did
    *  extended thinking, even when the prose is redacted. The basis for the

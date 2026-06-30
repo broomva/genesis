@@ -186,6 +186,15 @@ export class SessionHost {
     const settings = JSON.stringify(buildSessionSettings({ socketPath }));
     const argv: string[] = ["--session-id", this.sessionId, "--settings", settings];
     if (this.opts.extraArgs) argv.push(...this.opts.extraArgs);
+    // Always-on summarized extended thinking (BRO-1614) — parity with the print
+    // engine. Pushed AFTER extraArgs so the always-on guarantee can't be silently
+    // disabled by an operator --thinking* in extraArgs (claude is last-wins).
+    // Opus 4.8 / Fable 5 default `thinking.display` to "omitted" (empty thinking);
+    // these HIDDEN flags opt back into the summarized trace, which the transcript
+    // adapter reads (`adapter.ts` `thinking` block) and the IR maps to a
+    // thinking_delta. Adaptive thinking is content-dependent (trivial turns produce
+    // none, by design). A/B-verified on the spawned `claude` binary.
+    argv.push("--thinking", "adaptive", "--thinking-display", "summarized");
     // Positional prompt LAST; never `-p` (interactive mode is the product).
     if (this.opts.initialPrompt !== undefined) argv.push(this.opts.initialPrompt);
 
