@@ -480,11 +480,18 @@ export class Supervisor {
     return this.defaultEngine;
   }
 
-  /** The selectable workspaces (BRO-1627), default first. The api advertises
-   *  these via GET /workspaces so the client can offer a per-thread picker;
-   *  registry-backed (no Store round-trip — the live set is in memory). */
-  listWorkspaces(): Workspace[] {
-    return [...this.workspaceRegistry.values()];
+  /** The selectable workspaces for the API surface (BRO-1627), default first — a
+   *  PUBLIC DTO that OMITS the filesystem `rootPath` (and the registry-only
+   *  `noWorktree`): the client picker needs only id + name, and a rootPath must
+   *  not leak past the engine even to an authenticated client (P20/CodeRabbit,
+   *  defense-in-depth). Internal cwd resolution reads the registry directly, never
+   *  this. Registry-backed (no Store round-trip — the live set is in memory). */
+  listWorkspaces(): Array<Pick<Workspace, "id" | "name" | "isGitRepo">> {
+    return [...this.workspaceRegistry.values()].map((w) => ({
+      id: w.id,
+      name: w.name,
+      isGitRepo: w.isGitRepo,
+    }));
   }
 
   /** The workspace a thread binds when none (or an unregistered one) is requested. */

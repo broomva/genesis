@@ -604,6 +604,15 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(sup.defaultWorkspaceId).toBe("ws-1");
   });
 
+  test("listWorkspaces is a public DTO — never exposes rootPath (P20/CodeRabbit)", () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: fakeRunner("x") });
+    for (const w of sup.listWorkspaces()) {
+      expect("rootPath" in w).toBe(false);
+      expect("noWorktree" in w).toBe(false);
+    }
+    expect(sup.listWorkspaces().map((w) => w.id)).toEqual(["ws-1", "ws-a"]);
+  });
+
   test("an explicit workspace overrides a same-id earlier entry (registry merge order)", async () => {
     const sink: { cwd?: string } = {};
     const dupe = { id: "ws-a", name: "alpha-override", rootPath: "/repos/alpha-2" };
@@ -612,7 +621,8 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       workspaces: [wsA, dupe], // later wins
       run: cwdRunner(sink),
     });
-    expect(sup.listWorkspaces().find((w) => w.id === "ws-a")?.rootPath).toBe("/repos/alpha-2");
+    // The override's rootPath wins — asserted via the actual run cwd (listWorkspaces
+    // no longer exposes rootPath; the cwd is the real behavior).
     await sup.dispatch("t-dupe", "go", undefined, { workspaceId: "ws-a" });
     expect(sink.cwd).toBe("/repos/alpha-2");
   });
@@ -687,9 +697,10 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       workspaces: [shadow],
       run: cwdRunner(sink),
     });
-    // The registry's ws-1 is still the GENUINE default, not the shadow.
-    expect(sup.listWorkspaces().find((w) => w.id === "ws-1")?.rootPath).toBe(ws.rootPath);
-    // A default-bound thread runs in the real default tree.
+    // ws-1 appears once (the shadow was dropped), and a default-bound thread runs
+    // in the GENUINE default tree — not the shadow's (asserted via the run cwd,
+    // since listWorkspaces no longer exposes rootPath).
+    expect(sup.listWorkspaces().filter((w) => w.id === "ws-1").length).toBe(1);
     await sup.dispatch("t-shadow", "go");
     expect(sink.cwd).toBe(ws.rootPath);
   });
