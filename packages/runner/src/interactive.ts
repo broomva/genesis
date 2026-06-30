@@ -264,6 +264,14 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
 
     const unsubscribe = engineHub.onEvent(async (ir) => {
       if (ir.sessionId !== sessionId) return;
+      if (ir.surface !== "hook")
+        console.error(
+          `[bro1616-diag] non-hook IR kind=${ir.kind} surface=${ir.surface} textlen=${
+            typeof (ir as { text?: unknown }).text === "string"
+              ? (ir as { text: string }).text.length
+              : "n/a"
+          }`,
+        );
       if (ir.surface === "hook") entry.hookSeen = true;
       // Hook surface only: in TTY-interactive mode it is the sole live content
       // source, and filtering prevents double-emit if a transcript ever
@@ -343,11 +351,15 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // reduce stream closed. Draining now lets the existing `case "thinking"`
           // push its `thinking_delta` in time. Best-effort — a flush failure must
           // not strand the turn. Idempotent via the tailer's byte offset.
+          console.error(
+            `[bro1616-diag] turn.complete: draining (session=${!!entry.session}, reasoned-before=${state.reasoned})`,
+          );
           try {
             await entry.session?.drainTranscript?.();
-          } catch {
-            // tolerate flush errors — finalize the turn regardless
+          } catch (e) {
+            console.error(`[bro1616-diag] drain threw: ${e}`);
           }
+          console.error(`[bro1616-diag] drain done, reasoned-after=${state.reasoned}`);
           // Statusline costUsd is CUMULATIVE session cost (BRO-1613 P20 B1) — emit
           // this turn's DELTA so the UI (which SUMS per-turn cost, parity with the
           // print engine's independent turns) totals correctly instead of growing
