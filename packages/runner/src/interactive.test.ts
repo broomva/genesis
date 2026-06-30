@@ -255,6 +255,79 @@ describe("createInteractiveEngine", () => {
     await engine.shutdown();
   });
 
+  test("the drain loop is BOUNDED — a turn whose transcript assistant never lands still finalizes (BRO-1616)", async () => {
+    // Models a tool_use-only ending (no `text` block → no transcript message.assistant
+    // → the flag never flips) or an unattached transcript. The bounded cap must let
+    // the turn finalize instead of hanging. Tiny cap so the test is fast.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "done",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "done" },
+    ];
+    // Drain delivers NOTHING (no transcript assistant ever lands).
+    const emptyDrain = (_sid: string): IREvent[] => [];
+    const hub = new FakeHub(hookTurn, emptyDrain);
+    const engine = createInteractiveEngine({ hub, drainMaxIters: 3, drainIntervalMs: 1 });
+    const result = await engine.run({
+      prompt: "x",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "scap",
+    });
+    // The cap bounded the loop and the turn finalized (did not hang), just without
+    // thinking — graceful degradation.
+    expect(result.state.phase).toBe("done");
+    expect(result.state.reasoned).toBeFalsy();
+    expect(hub.sessions[0]?.drained).toBe(3); // looped exactly drainMaxIters times
+    await engine.shutdown();
+  });
+
+  test("a timeout during the drain is NOT overwritten by the late turn.complete (BRO-1616 P20 #1)", async () => {
+    // The async drain keeps the listener live; a timeout firing mid-drain finalizes
+    // the turn (blocked). Without the `finished` guard the resumed turn.complete
+    // would push a SECOND result:success after run() returned, flipping blocked→done.
+    const hookTurn = (sid: string): IREvent[] => [
+      { ...base(sid), kind: "session.lifecycle", phase: "ready", transcriptPath: "/t.jsonl" },
+      {
+        ...base(sid),
+        kind: "message.assistant",
+        text: "done",
+        messageId: "m1",
+        streaming: { final: true },
+      },
+      { ...base(sid), kind: "turn.complete", lastAssistantMessage: "done" },
+    ];
+    const emptyDrain = (_sid: string): IREvent[] => []; // assistant never lands → drain spins
+    const hub = new FakeHub(hookTurn, emptyDrain);
+    // Drain (~200ms) outlives the 30ms timeout, so the timeout fires mid-drain.
+    const engine = createInteractiveEngine({
+      hub,
+      drainMaxIters: 20,
+      drainIntervalMs: 10,
+      turnTimeoutMs: 30,
+    });
+    const phases: string[] = [];
+    const result = await engine.run({
+      prompt: "x",
+      cwd: "/x",
+      worktree: false,
+      sessionKey: "sg",
+      onState: (s) => phases.push(s.phase),
+    });
+    expect(result.state.phase).not.toBe("done"); // timed out, stays terminal-error
+    // Let the drain loop run to its cap — it WOULD push a late success without the guard.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(phases.filter((p) => p === "done")).toHaveLength(0); // no late blocked→done flip
+    expect(result.events.filter((e) => e.type === "result")).toHaveLength(1); // exactly one terminal
+    await engine.shutdown();
+  });
+
   test("tool ids flow through → a BUILT + FILLED tool part (BRO-1613 S2)", async () => {
     const hub = new FakeHub((sid) => happyTurn(sid, "alpha"));
     const engine = createInteractiveEngine({ hub });
