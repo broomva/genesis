@@ -42,9 +42,11 @@ import {
   reduce,
 } from "@genesis/projection";
 import {
+  CODEX_EFFORT_LEVELS,
   type RunOptions,
   type RunResult,
   ensureSessionWorktree,
+  isCodexModel,
   isGitRepo,
   removeWorktree,
   scrubAgentEnv,
@@ -100,8 +102,13 @@ function codexRunId(): string {
  */
 function codexModelEffortArgs(opts: RunOptions): string[] {
   const extra: string[] = [];
-  if (opts.model) extra.push("-m", opts.model);
-  if (opts.effort) extra.push("-c", `model_reasoning_effort=${opts.effort}`);
+  // Vendor-boundary drop (BRO-1623, P20): only OpenAI-shaped models + codex
+  // reasoning levels reach codex's flags; a claude alias (sticky-engine
+  // divergence / raw curl) is dropped → codex's config default, never `-m opus`.
+  if (opts.model && isCodexModel(opts.model)) extra.push("-m", opts.model);
+  if (opts.effort && (CODEX_EFFORT_LEVELS as readonly string[]).includes(opts.effort)) {
+    extra.push("-c", `model_reasoning_effort=${opts.effort}`);
+  }
   return extra;
 }
 

@@ -32,7 +32,7 @@ import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { ToolPart } from "@/components/ai-elements/tool";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
-import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
+import { MessageActions, RunTimer } from "@/components/message-actions";
 import { QuestionCard } from "@/components/question-card";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
@@ -467,7 +467,9 @@ export function ChatView({
       {
         body: {
           model: modelToBody(effModel),
-          effort: effortToBody(effEffort),
+          // Only send effort for an engine that consumes it (interactive ignores
+          // it — persistent session, no per-launch knob) — BRO-1623 P20.
+          effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
           engine: engineToBody(engine),
         },
       },
@@ -577,7 +579,9 @@ export function ChatView({
                               messageId: message.id,
                               body: {
                                 model: modelToBody(effModel),
-                                effort: effortToBody(effEffort),
+                                effort: engineShowsEffort(engine)
+                                  ? effortToBody(effEffort)
+                                  : undefined,
                                 engine: engineToBody(engine),
                               },
                             })

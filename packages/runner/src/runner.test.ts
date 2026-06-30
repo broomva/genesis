@@ -115,6 +115,35 @@ describe("runAgent — local host worktree", () => {
     expect(cmd[cmd.indexOf("--thinking-display") + 1]).toBe("summarized");
   });
 
+  test("forwards a claude model/effort but DROPS a codex-shaped value (P20 Forge MUST-FIX)", async () => {
+    const host = new FakeLocalHost();
+    await runAgent({
+      prompt: "go",
+      cwd: "/repo",
+      host,
+      worktree: false,
+      model: "opus",
+      effort: "high",
+    });
+    const cmd = host.spawnCmd ?? [];
+    expect(cmd).toContain("--model=opus"); // a claude alias reaches --model
+    expect(cmd).toContain("--effort=high");
+    // A codex model + codex-only effort (sticky-engine divergence / curl) must NOT
+    // reach claude — would be `claude --model=gpt-5.5` / `--effort=minimal` (rejected).
+    const host2 = new FakeLocalHost();
+    await runAgent({
+      prompt: "go",
+      cwd: "/repo",
+      host: host2,
+      worktree: false,
+      model: "gpt-5.5",
+      effort: "minimal",
+    });
+    const cmd2 = host2.spawnCmd ?? [];
+    expect(cmd2.some((a) => a.startsWith("--model="))).toBe(false);
+    expect(cmd2.some((a) => a.startsWith("--effort="))).toBe(false);
+  });
+
   test("enforces thinking flags AFTER extraArgs — operator cannot disable (BRO-1614)", async () => {
     const host = new FakeLocalHost();
     // An operator who smuggles a disabling --thinking* through extraArgs must NOT

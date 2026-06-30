@@ -163,10 +163,13 @@ export function defaultEffortFor(_engine: string): string {
   return DEFAULT_EFFORT; // "standard" — omit the effort override
 }
 
-/** Whether the composer shows the model selector for an engine. All three do —
- *  but interactive's binds at spawn (see {@link modelIsSpawnPinned}). */
-export function engineShowsModel(_engine: string): boolean {
-  return true;
+/** Whether the composer shows the model selector for an engine. Hidden when the
+ *  provider offers only ONE model (BRO-1623, P20): codex on this subscription
+ *  serves a single model (gpt-5.5), so a one-option dropdown would be a dead
+ *  control that can't fire onChange and never sends `-m` — show it only when
+ *  there's a real choice. claude (print/interactive) has multiple aliases. */
+export function engineShowsModel(engine: string): boolean {
+  return modelOptionsFor(engine).length > 1;
 }
 
 /** Whether the composer shows the effort selector. Interactive has no clean

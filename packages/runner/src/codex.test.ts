@@ -350,6 +350,15 @@ describe("codexArgs", () => {
     expect(args.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
   });
 
+  test("DROPS a claude-shaped model/effort (vendor-boundary, P20 Forge MUST-FIX)", () => {
+    // sticky-engine divergence / raw curl can hand codex a claude value; it must
+    // not reach `-m`/`model_reasoning_effort` (would 400 / be rejected).
+    const args = codexArgs({ prompt: "p", cwd: "/repo", model: "opus", effort: "max" });
+    expect(args).not.toContain("-m"); // "opus" isn't an OpenAI model
+    expect(args).not.toContain("opus");
+    expect(args.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false); // "max" ∉ codex
+  });
+
   test("claude-shaped extraArgs are NOT forwarded to codex (would exit-2 brick it)", () => {
     // GENESIS_AGENT_ARGS (e.g. --dangerously-skip-permissions) is a claude flag;
     // codex's clap parser rejects unknown flags with exit 2. The engine boundary

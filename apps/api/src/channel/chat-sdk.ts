@@ -78,9 +78,12 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   const engineRaw = typeof b.engine === "string" ? b.engine.trim() : "";
   const engine = (ENGINE_IDS as readonly string[]).includes(engineRaw) ? engineRaw : undefined;
   // Effort is provider-specific (BRO-1623): codex reasoning effort
-  // (minimal/low/medium/high) vs claude --effort (low…max). Validate against the
-  // engine's set so `minimal` never reaches claude and `xhigh`/`max` never reach
-  // codex — a cross-provider value is dropped (engine uses its own default).
+  // (minimal/low/medium/high) vs claude --effort (low…max). This is a FIRST-pass
+  // validation against the REQUEST's engine — but the engine is bound sticky
+  // (BRO-1620), so the request engine is advisory after a thread's turn 1. The
+  // AUTHORITATIVE cross-provider guard is the vendor boundary in each runner
+  // (agentArgs / codexModelEffortArgs drop a value not in their own provider set,
+  // P20 Forge) — that holds for the resolved engine regardless of this parse.
   const effortRaw = typeof b.effort === "string" ? b.effort.trim() : "";
   const effortSet: readonly string[] = engine === "codex" ? CODEX_EFFORT_LEVELS : EFFORT_LEVELS;
   const effort = effortSet.includes(effortRaw) ? (effortRaw as EffortLevel) : undefined;
