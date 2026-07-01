@@ -301,6 +301,9 @@ const { app, websocket } = build({
   // Durable, runtime-mutable registry source (BRO-1629) — FS manifests when
   // GENESIS_WORKSPACES_DIR is set, else undefined → in-memory (env each boot).
   workspaceRepository,
+  // Allow-root for discover→pick self-serve add (BRO-1629) — GET /workspaces/
+  // available scans it; POST /workspaces registers a picked dir under it.
+  projectsRoot: process.env.GENESIS_PROJECTS_ROOT,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
   store,

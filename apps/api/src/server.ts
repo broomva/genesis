@@ -15,6 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { WorkspaceValidationError, availableWorkspaces, resolvePick } from "./workspace-provision";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
@@ -73,6 +74,12 @@ export interface BuildOpts {
    *  (BRO-1627 behaviour). The FS adapter makes the registry durable + runtime-
    *  mutable (survives restart, editable from the PWA). */
   workspaceRepository?: WorkspaceRepository;
+  /** The admin ALLOW-ROOT for discover→pick provisioning (BRO-1629, = GENESIS_
+   *  PROJECTS_ROOT). GET /workspaces/available scans it; POST /workspaces registers
+   *  a picked dir under it (server derives + validates the path — the client never
+   *  names a filesystem path). Omit → no self-serve add (the picker still lists
+   *  the registered set). */
+  projectsRoot?: string;
   /** Per-event observability trace (print-engine parity, BRO-1524). */
   trace?: (sessionId: string, event: AgentEvent) => void;
 }
@@ -100,6 +107,17 @@ export function build(opts: BuildOpts) {
     console.warn(
       "[genesis] WARNING: agent runs with --dangerously-skip-permissions and /message is unauthenticated. " +
         "Bind to localhost only, or set GENESIS_TOKEN. (Phase 2 wires Better Auth.)",
+    );
+  }
+  // Self-serve workspace mutation (BRO-1629) with no token → POST/DELETE /workspaces
+  // are OPEN. Behind the web BFF (better-auth) that's fine, but a direct :8787 hit
+  // could register/deregister agent working dirs under the allow-root. Warn loudly
+  // (P20 Forge SF3) — set GENESIS_TOKEN, or bind :8787 to localhost/tailnet only.
+  if (opts.projectsRoot && !opts.token) {
+    console.warn(
+      "[genesis] WARNING: GENESIS_PROJECTS_ROOT is set but GENESIS_TOKEN is not — " +
+        "POST/DELETE /workspaces are unauthenticated on a direct connection. Set " +
+        "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
     );
   }
 
@@ -185,6 +203,50 @@ export function build(opts: BuildOpts) {
       workspaces: await supervisor.listWorkspaces(),
       defaultWorkspace: supervisor.defaultWorkspaceId,
     });
+  });
+
+  // Discover→pick provisioning (BRO-1629). Git repos under the allow-root not yet
+  // registered — the "Add project" candidates. Same bearer gate. No rootPath leaves
+  // the server (only the dir name + the id it would register as).
+  app.get("/workspaces/available", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const registered = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
+    return c.json({ available: availableWorkspaces(opts.projectsRoot, registered) });
+  });
+
+  // Register a picked workspace at RUNTIME (BRO-1629) — no restart. The body carries
+  // a directory NAME (from /available), never a path; the server derives + validates
+  // the rootPath inside the allow-root (the load-bearing security boundary).
+  app.post("/workspaces", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const body = (await c.req.json().catch(() => ({}))) as { pick?: unknown };
+    try {
+      const taken = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
+      const saved = await supervisor.registerWorkspace(
+        resolvePick(opts.projectsRoot, body.pick, taken),
+      );
+      return c.json({ id: saved.id, name: saved.name, isGitRepo: saved.isGitRepo }, 201);
+    } catch (e) {
+      // A validation error (bad pick) is safe to echo → 400. Anything else is
+      // internal (FS EACCES/ENOSPC with an absolute path) → log server-side +
+      // return a GENERIC message, never leaking the filesystem layout (P20 SF2).
+      if (e instanceof WorkspaceValidationError) return c.json({ error: e.message }, 400);
+      console.error(`[genesis] register workspace failed: ${e instanceof Error ? e.stack : e}`);
+      return c.json({ error: "could not register workspace" }, 500);
+    }
+  });
+
+  // De-register a workspace (BRO-1629). Never deletes the underlying repo — just
+  // drops the manifest. The default is protected (removeWorkspace → false → 400);
+  // a malformed id is rejected downstream (fileFor) → 400, not a 500 (P20 N1).
+  app.delete("/workspaces/:id", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    try {
+      const ok = await supervisor.removeWorkspace(c.req.param("id"));
+      return ok ? c.json({ ok }) : c.json({ error: "cannot remove the default workspace" }, 400);
+    } catch {
+      return c.json({ error: "invalid workspace id" }, 400);
+    }
   });
 
   app.get("/threads/:id", async (c) => {
