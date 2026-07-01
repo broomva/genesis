@@ -15,6 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { availableWorkspaces, resolvePick } from "./workspace-provision";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
@@ -73,6 +74,12 @@ export interface BuildOpts {
    *  (BRO-1627 behaviour). The FS adapter makes the registry durable + runtime-
    *  mutable (survives restart, editable from the PWA). */
   workspaceRepository?: WorkspaceRepository;
+  /** The admin ALLOW-ROOT for discover→pick provisioning (BRO-1629, = GENESIS_
+   *  PROJECTS_ROOT). GET /workspaces/available scans it; POST /workspaces registers
+   *  a picked dir under it (server derives + validates the path — the client never
+   *  names a filesystem path). Omit → no self-serve add (the picker still lists
+   *  the registered set). */
+  projectsRoot?: string;
   /** Per-event observability trace (print-engine parity, BRO-1524). */
   trace?: (sessionId: string, event: AgentEvent) => void;
 }
@@ -185,6 +192,40 @@ export function build(opts: BuildOpts) {
       workspaces: await supervisor.listWorkspaces(),
       defaultWorkspace: supervisor.defaultWorkspaceId,
     });
+  });
+
+  // Discover→pick provisioning (BRO-1629). Git repos under the allow-root not yet
+  // registered — the "Add project" candidates. Same bearer gate. No rootPath leaves
+  // the server (only the dir name + the id it would register as).
+  app.get("/workspaces/available", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const registered = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
+    return c.json({ available: availableWorkspaces(opts.projectsRoot, registered) });
+  });
+
+  // Register a picked workspace at RUNTIME (BRO-1629) — no restart. The body carries
+  // a directory NAME (from /available), never a path; the server derives + validates
+  // the rootPath inside the allow-root (the load-bearing security boundary).
+  app.post("/workspaces", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const body = (await c.req.json().catch(() => ({}))) as { pick?: unknown };
+    try {
+      const taken = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
+      const saved = await supervisor.registerWorkspace(
+        resolvePick(opts.projectsRoot, body.pick, taken),
+      );
+      return c.json({ id: saved.id, name: saved.name, isGitRepo: saved.isGitRepo }, 201);
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : "bad request" }, 400);
+    }
+  });
+
+  // De-register a workspace (BRO-1629). Never deletes the underlying repo — just
+  // drops the manifest. The default is protected (removeWorkspace → false → 400).
+  app.delete("/workspaces/:id", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const ok = await supervisor.removeWorkspace(c.req.param("id"));
+    return ok ? c.json({ ok }) : c.json({ error: "cannot remove the default workspace" }, 400);
   });
 
   app.get("/threads/:id", async (c) => {
