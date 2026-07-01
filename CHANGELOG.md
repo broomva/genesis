@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased] — Durable interactive-session resume + actionable eviction (BRO-1630)
+
+### Fixed
+- **Session amnesia (RC1).** The interactive engine now RESUMES a thread's prior
+  Claude conversation after a daemon restart / eviction / idle-kill by respawning
+  `claude --resume <priorSessionId>` (instead of a fresh `--session-id`) when that
+  transcript is still on disk under the thread's cwd. Re-verified live on CLI
+  2.1.191/197: `--resume` without `--fork-session` PRESERVES the session id and
+  appends to the same transcript, so hook routing is unaffected — no re-keying
+  needed (this retires the stale BRO-1485 #2 concern). Safe-degrades to a fresh
+  session when no transcript is found. A loud, deduped alarm fires if the CLI ever
+  reverts to reassigning the id on resume (would otherwise silently hang a turn).
+- **Silent "(no output)" (RC2).** A send-eviction (send not acknowledged after an
+  awaiting/HITL turn, or a turn timeout) now returns an actionable reply
+  ("couldn't be delivered — resend; context is preserved") instead of a bare
+  "(no output)". The reducer's errored branch surfaces an error result's own
+  `result` as `lastText` (backward-compatible — error results carried none).
+
 ## [Unreleased] — Print engine as the bot default + control/observability parity (BRO-1524)
 
 ### Changed
@@ -189,6 +207,8 @@
   the tmux session.
 - `resumeSessionId` is ignored with a notice (resume re-keying: BRO-1485);
   daemon restart starts a fresh agent session in the same persistent worktree.
+  **(Superseded 2026-07-01 by BRO-1630 — durable `--resume` now restores prior
+  conversation context across a restart; see the top Unreleased entry.)**
 
 ## [Unreleased] — Path B session-host: contract-first wrap of interactive Claude Code (BRO-1484)
 

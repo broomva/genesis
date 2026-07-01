@@ -10,10 +10,17 @@
 // shapes the stream-json parser produces, so the existing projection reducer,
 // Supervisor, and /api/chat are untouched — this is just another RunnerFn.
 //
-// Continuity model: the live process IS the continuity (no `--resume`).
-// `resumeSessionId` is acknowledged with a notice and ignored; after a daemon
-// restart a fresh agent session starts in the SAME persistent worktree
-// (context re-derivable from the repo; full resume re-keying is BRO-1485).
+// Continuity model (BRO-1630): a LIVE session is its own continuity (later turns
+// feed the running process). When there is NO live session — after a daemon
+// restart, an eviction, or an idle-kill — the engine RESUMES the thread's prior
+// Claude conversation by respawning with `--resume <priorSessionId>` when that
+// transcript is still on disk under the same cwd. Verified on CLI 2.1.191/197:
+// `--resume` (without `--fork-session`) preserves the session id and appends to
+// the same transcript, so the hub's per-session hook routing is unaffected — no
+// re-keying handshake needed. If no resumable transcript is found, a genuinely
+// fresh session starts (safe degradation). This retired the old "no `--resume`,
+// context re-derivable from the repo" limitation that dropped all conversation
+// context on every restart.
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -56,6 +63,12 @@ export interface EngineHub {
  *  `claude --resume` is itself cwd-scoped, so a transcript under a different
  *  project dir is not resumable from here. */
 export function resumableTranscriptExists(cwd: string, sessionId: string): boolean {
+  // NOTE: `[/.]→-` is a KNOWN-INCOMPLETE mirror of Claude's project slugger — it
+  // matches every path Claude currently produces (verified against real
+  // `~/.claude/projects/` dirs incl. `/.cache`→`--cache`), but Claude may map
+  // other characters (`_`, spaces). A mismatch only produces a FALSE NEGATIVE →
+  // fresh spawn (the safe direction). Genesis cwds are workspace roots + the
+  // `<root>/.genesis-runs/session-<uuid>` worktree path, all covered by this rule.
   const slug = cwd.replace(/[/.]/g, "-");
   return existsSync(join(homedir(), ".claude", "projects", slug, `${sessionId}.jsonl`));
 }

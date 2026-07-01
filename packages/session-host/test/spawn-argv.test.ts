@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { InputActuator, SendOptions, SpawnSpec } from "../src/actuator";
-import { SessionHost, type SessionHub } from "../src/session";
+import type { IREvent } from "../src/ir";
+import { SessionHost, SessionHub } from "../src/session";
 
 /** Captures the SpawnSpec without touching tmux/PTY (the only side effect of spawn). */
 class CapturingActuator implements InputActuator {
@@ -87,5 +88,51 @@ describe("SessionHost.spawn — argv", () => {
     expect(argv.lastIndexOf("--thinking-display")).toBeGreaterThan(
       argv.indexOf("--thinking-display"),
     );
+  });
+});
+
+describe("SessionHub.dispatch — unknown-session alarm (BRO-1630 P20 #1)", () => {
+  const hookEvent = (sessionId: string): IREvent => ({
+    kind: "message.user",
+    sessionId,
+    observedAt: 1,
+    surface: "hook",
+    text: "hi",
+  });
+
+  test("a hook for an UNKNOWN session warns LOUDLY (once per id), never throws", () => {
+    const hub = new SessionHub({ socketPath: "/tmp/genesis-hub-unknown.sock" });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // No session registered for this id → the resume-reversion alarm fires.
+      expect(() => hub.dispatch(hookEvent("ghost-session-xyz"))).not.toThrow();
+      expect(warn).toHaveBeenCalledTimes(1);
+      // Deduped: a second hook for the SAME id does not re-warn (no log spam).
+      hub.dispatch(hookEvent("ghost-session-xyz"));
+      expect(warn).toHaveBeenCalledTimes(1);
+      // A DIFFERENT unknown id warns again.
+      hub.dispatch(hookEvent("ghost-session-abc"));
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("UNKNOWN session");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("a NON-hook event for an unknown session is silent (only hooks alarm)", () => {
+    const hub = new SessionHub({ socketPath: "/tmp/genesis-hub-nonhook.sock" });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      hub.dispatch({
+        kind: "status",
+        sessionId: "ghost",
+        observedAt: 1,
+        surface: "statusline",
+        raw: {},
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

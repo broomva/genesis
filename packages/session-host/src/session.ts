@@ -93,6 +93,8 @@ export class SessionHub {
   private readonly sessions = new Map<string, SessionHost>();
   private readonly listeners = new Set<(event: IREvent) => void>();
   private readonly defaultPolicy?: PermissionPolicy;
+  /** Ids we've already warned about (dedupe the unknown-session alarm). */
+  private readonly warnedUnknown = new Set<string>();
 
   constructor(opts: SessionHubOptions) {
     this.defaultPolicy = opts.policy;
@@ -145,7 +147,27 @@ export class SessionHub {
 
   /** @internal */
   dispatch(event: IREvent): void {
-    this.sessions.get(event.sessionId)?.ingest(event);
+    const host = this.sessions.get(event.sessionId);
+    // Resume-reversion alarm (BRO-1630 P20 finding #1): durable resume assumes
+    // `claude --resume <id>` PRESERVES the session id (verified on CLI 2.1.191/197
+    // — `--fork-session` is the opt-in that reassigns it). If a future CLI ever
+    // reverts to reassigning on resume, hooks would carry an UNKNOWN id, route to
+    // no SessionHost, and the turn would hang to timeout with zero events — a
+    // SILENT failure. Convert it to a LOUD, greppable diagnostic (once per id) so
+    // the regression is diagnosable instead of mysterious. Hooks are per-session
+    // and sessions are registered before spawn, so an unknown-session hook is a
+    // genuine anomaly, not normal traffic.
+    if (
+      host === undefined &&
+      event.surface === "hook" &&
+      !this.warnedUnknown.has(event.sessionId)
+    ) {
+      this.warnedUnknown.add(event.sessionId);
+      console.warn(
+        `[genesis] session-host: hook (kind=${event.kind}) for UNKNOWN session ${event.sessionId} — dropped. If this follows a --resume spawn, the CLI may have reassigned the session id (a --fork-session-style regression); durable-resume routing (BRO-1630) assumes it is preserved.`,
+      );
+    }
+    host?.ingest(event);
     for (const listener of this.listeners) listener(event);
   }
 }
