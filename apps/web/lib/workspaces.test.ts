@@ -3,6 +3,7 @@ import {
   type Workspace,
   addWorkspace,
   fetchAvailableWorkspaces,
+  fetchWorkspaces,
   removeWorkspace,
   resolveWorkspace,
 } from "./workspaces";
@@ -74,6 +75,36 @@ describe("fetchAvailableWorkspaces (BRO-1629 slice 3)", () => {
   test("thrown fetch → []", async () => {
     stubFetch(true, {}, { throws: true });
     expect(await fetchAvailableWorkspaces()).toEqual([]);
+  });
+});
+
+describe("fetchWorkspaces — availability passthrough (BRO-1630 RC3)", () => {
+  test("preserves `available` when the engine reports it", async () => {
+    stubFetch(true, {
+      workspaces: [
+        { id: "ws-1", name: "default", available: true },
+        { id: "ws-gone", name: "ghost", available: false },
+        { id: "ws-old", name: "legacy" }, // older engine omits it
+      ],
+      defaultWorkspace: "ws-1",
+    });
+    const { workspaces } = await fetchWorkspaces();
+    expect(workspaces.find((w) => w.id === "ws-1")?.available).toBe(true);
+    expect(workspaces.find((w) => w.id === "ws-gone")?.available).toBe(false);
+    // Omitted by an older engine → undefined (the UI treats it as available).
+    expect(workspaces.find((w) => w.id === "ws-old")?.available).toBeUndefined();
+  });
+
+  test("still drops malformed items (empty id) while carrying availability", async () => {
+    stubFetch(true, {
+      workspaces: [
+        { id: "", name: "bad", available: false },
+        { id: "ws-ok", name: "ok", available: false },
+      ],
+      defaultWorkspace: "ws-ok",
+    });
+    const { workspaces } = await fetchWorkspaces();
+    expect(workspaces).toEqual([{ id: "ws-ok", name: "ok", available: false }]);
   });
 });
 
