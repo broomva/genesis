@@ -37,6 +37,37 @@ describe("SessionHost.spawn — argv", () => {
     expect(argv).not.toContain("-p");
   });
 
+  test("fresh spawn pins the id via --session-id, never --resume (BRO-1630)", async () => {
+    const actuator = new CapturingActuator();
+    const hub = { dispatch() {} } as unknown as SessionHub;
+    const host = new SessionHost(hub, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", {
+      cwd: "/repo",
+      actuator,
+    });
+    await host.spawn("/tmp/genesis-spawn-fresh.sock");
+    const argv = actuator.spec?.argv ?? [];
+    expect(argv[argv.indexOf("--session-id") + 1]).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    expect(argv).not.toContain("--resume");
+  });
+
+  test("resume spawn uses --resume <id> and OMITS --session-id (mutually exclusive) (BRO-1630)", async () => {
+    const actuator = new CapturingActuator();
+    const hub = { dispatch() {} } as unknown as SessionHub;
+    const host = new SessionHost(hub, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", {
+      cwd: "/repo",
+      actuator,
+      resume: true,
+    });
+    await host.spawn("/tmp/genesis-spawn-resume.sock");
+    const argv = actuator.spec?.argv ?? [];
+    // `--session-id` + `--resume` errors without `--fork-session`, so resume replaces it.
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    expect(argv).not.toContain("--session-id");
+    // Still interactive, still always-on thinking.
+    expect(argv).not.toContain("-p");
+    expect(argv[argv.indexOf("--thinking-display") + 1]).toBe("summarized");
+  });
+
   test("enforces thinking flags AFTER extraArgs — operator cannot disable (BRO-1614)", async () => {
     const actuator = new CapturingActuator();
     const hub = { dispatch() {} } as unknown as SessionHub;

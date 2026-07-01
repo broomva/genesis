@@ -356,6 +356,12 @@ export function reduce(state: RunState, event: AgentEvent): RunState {
           ...state,
           sessionId,
           phase: "blocked",
+          // Honor an error result's own message as the reply text (BRO-1630 RC2):
+          // an engine can attach an actionable `result` on a terminal error (e.g.
+          // send-failed / turn-timeout eviction) so the UI renders that instead of
+          // a bare "(no output)". Backward-compatible: error results carry no
+          // `result` today → `?? state.lastText` keeps the prior behaviour exactly.
+          lastText: event.result ?? state.lastText,
           error: event.subtype ?? "error",
           pendingQuestion: undefined,
           parts: reconcileStrandedParts(state.parts),
