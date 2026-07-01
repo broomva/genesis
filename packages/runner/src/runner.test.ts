@@ -103,6 +103,23 @@ describe("runAgent — local host worktree", () => {
     expect(typeof env.PATH === "string" || !("PATH" in process.env)).toBe(true);
   });
 
+  test("passes the prompt via stdin, NOT argv (BRO-1642 — keeps large prompts under the OS arg cap)", async () => {
+    const host = new FakeLocalHost();
+    await runAgent({
+      prompt: "a very large prompt with inlined files",
+      cwd: "/repo",
+      host,
+      worktree: false,
+    });
+    const cmd = host.spawnCmd ?? [];
+    // The prompt must not appear anywhere on argv…
+    expect(cmd.some((a) => a.includes("very large prompt"))).toBe(false);
+    // …and `-p` is immediately followed by a flag (no positional prompt).
+    expect(cmd[cmd.indexOf("-p") + 1]).toBe("--output-format");
+    // …it rides stdin instead.
+    expect(host.spawnOpts?.input).toBe("a very large prompt with inlined files");
+  });
+
   test("requests always-on summarized extended thinking (BRO-1614)", async () => {
     const host = new FakeLocalHost();
     await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
@@ -195,6 +212,17 @@ describe("scrubAgentEnv", () => {
   test("drops undefined values", () => {
     const env = scrubAgentEnv({ A: "1", B: undefined });
     expect(env).toEqual({ A: "1" });
+  });
+
+  test("strips the nested-Claude markers so the child is a clean top-level session (BRO-1642)", () => {
+    const env = scrubAgentEnv({
+      PATH: "/usr/bin",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CLAUDECODE: "1",
+    });
+    expect(env.PATH).toBe("/usr/bin"); // kept
+    expect("CLAUDE_CODE_ENTRYPOINT" in env).toBe(false);
+    expect("CLAUDECODE" in env).toBe(false);
   });
 });
 

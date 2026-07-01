@@ -74,9 +74,16 @@ export class VercelSandboxHost implements ExecutionHost {
 
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
     if (cmd.length === 0) throw new Error("spawnStream: empty command");
+    // The sandbox SDK's runCommand has no stdin channel, so an `input` payload
+    // (the large-prompt-via-stdin path, BRO-1642) is appended as a trailing
+    // positional arg — `claude -p … <prompt>` — preserving the pre-BRO-1642
+    // behavior on the microVM host. (This retains the OS argv cap on the sandbox;
+    // lifting it there — writeFiles + `sh -c 'claude -p < file'` — is a follow-up.)
+    const args = cmd.slice(1);
+    if (opts?.input !== undefined) args.push(opts.input);
     const cmdPromise = this.sandbox.runCommand({
       cmd: cmd[0] as string,
-      args: cmd.slice(1),
+      args,
       cwd: opts?.cwd,
       env: opts?.env,
       detached: true,

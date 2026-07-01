@@ -11,6 +11,7 @@ import {
   parseLine,
   reduce,
 } from "@genesis/projection";
+import { resolveClaudeBinary } from "@genesis/session-host";
 
 /** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
  *  providers; the per-provider arrays below gate which reach which engine —
@@ -58,8 +59,14 @@ export interface RunOptions {
   /** Resume an existing agent session (Houston session_id continuity). */
   resumeSessionId?: string;
   host?: ExecutionHost;
-  /** CLI binary; default "claude". */
+  /** CLI binary; default resolves via {@link resolveClaudeBinary} (explicit path
+   *  wins). */
   agentBin?: string;
+  /** Pin a specific Claude Code version (BRO-1642) — resolves to the absolute
+   *  `~/.local/share/claude/versions/<pin>` if present (matching the interactive
+   *  engine), else warns + falls back to PATH `claude`. Prevents a stale PATH CLI
+   *  that rejects `--include-partial-messages`. Sourced from GENESIS_CLAUDE_PIN. */
+  pin?: string;
   /** Per-turn model override → `--model <name>` (claude alias or full id).
    *  Omitted → the engine default (claude-opus-4-8[1m]). */
   model?: string;
@@ -120,7 +127,16 @@ export async function isGitRepo(host: ExecutionHost, cwd: string): Promise<boole
 export function scrubAgentEnv(
   base: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  const DENY_EXACT = new Set(["TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME"]);
+  // + the two nested-Claude markers (BRO-1642): when genesis-api is itself launched
+  // under a claude agent, an inherited CLAUDE_CODE_ENTRYPOINT/CLAUDECODE makes the
+  // child `claude -p` detect it's nested and change behavior. Strip them so the
+  // spawned agent is always a clean top-level session (Houston does the same).
+  const DENY_EXACT = new Set([
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_BOT_USERNAME",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDECODE",
+  ]);
   const DENY_PREFIX = ["GENESIS_"];
   const DENY_PATTERN = /(_TOKEN|_KEY|_SECRET|_PASSWORD|_PASSWD|_CREDENTIAL)S?$/i;
   const out: Record<string, string> = {};
@@ -137,12 +153,14 @@ export function scrubAgentEnv(
 /** Build the agent argv. `--verbose` is required to stream NDJSON under `-p`;
  *  `--include-partial-messages` emits token-level `stream_event` deltas so the
  *  chat streams progressively instead of landing in one block (BRO-1571). */
-function agentArgs(opts: RunOptions): string[] {
-  const bin = opts.agentBin ?? "claude";
+function agentArgs(opts: RunOptions, bin: string): string[] {
+  // `bin` is resolved by the caller (BRO-1642: explicit agentBin > pinned > PATH).
+  // The prompt is NOT on argv — it rides stdin (runAgent passes it as `input`), so a
+  // large attachment-laden prompt can't exceed the OS argv cap. `claude -p` with no
+  // positional prompt reads it from stdin.
   const args = [
     bin,
     "-p",
-    opts.prompt,
     "--output-format",
     "stream-json",
     "--include-partial-messages",
@@ -239,10 +257,17 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // Scrub Genesis's own secrets from the agent's env (BRO-1527 #1): the agent
   // runs untrusted prompts, so it must not inherit the bot token / allowlist /
   // internal config. replaceEnv = the agent gets EXACTLY this env, not a merge.
-  const handle = host.spawnStream(agentArgs(opts), {
+  // Resolve the CLI binary once (BRO-1642): explicit agentBin > pinned version
+  // (opts.pin or GENESIS_CLAUDE_PIN, matching the interactive engine) > PATH claude.
+  // A stale PATH claude rejects --include-partial-messages and would kill the turn.
+  const bin = resolveClaudeBinary(opts.pin ?? process.env.GENESIS_CLAUDE_PIN, opts.agentBin);
+  const handle = host.spawnStream(agentArgs(opts, bin), {
     cwd: runCwd,
     env: scrubAgentEnv(),
     replaceEnv: true,
+    // The prompt rides stdin, not argv (BRO-1642) — keeps a large attachment-laden
+    // prompt under the OS argv cap. The host closes stdin after writing (EOF).
+    input: opts.prompt,
   });
   const events: AgentEvent[] = [];
   let state = initialState;

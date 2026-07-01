@@ -137,6 +137,20 @@ describe("VercelSandboxHost", () => {
     expect(sb.runCalls[0]).toMatchObject({ cmd: "claude", detached: true, cwd: "/vercel/sandbox" });
   });
 
+  test("appends `input` as a trailing arg (the sandbox SDK has no stdin, BRO-1642)", async () => {
+    const sb = new FakeSandbox(() => ({ logs: [{ stream: "stdout", data: "ok\n" }], exit: 0 }));
+    const host = new VercelSandboxHost(sb);
+    const handle = host.spawnStream(["claude", "-p", "--output-format", "stream-json"], {
+      input: "the prompt",
+    });
+    for await (const _l of handle.stdout) {
+      /* drain */
+    }
+    // The prompt still reaches claude as a positional arg (preserves pre-BRO-1642
+    // behavior on the microVM, where stdin can't be piped through runCommand).
+    expect(sb.runCalls[0]?.args).toEqual(["-p", "--output-format", "stream-json", "the prompt"]);
+  });
+
   test("readFile returns content and throws when the file is absent", async () => {
     const sb = new FakeSandbox(() => ({ logs: [] }), { "a.txt": "hello", "gone.txt": null });
     const host = new VercelSandboxHost(sb);
