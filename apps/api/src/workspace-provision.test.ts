@@ -321,6 +321,21 @@ describe("provisionFromGitUrl — clone then register (clone mocked)", () => {
     ).rejects.toThrow(/not produce a git repository/);
     expect(existsSync(join(dir, "empty"))).toBe(false);
   });
+
+  test("an INFRA error (git missing / ENOSPC) is rethrown as-is → route 500, not a 400", async () => {
+    const dir = root([]);
+    const clone = async () => {
+      const err = new Error("spawn git ENOENT") as Error & { code: string };
+      err.code = "ENOENT"; // string code = Node system error, not a git non-zero exit
+      throw err;
+    };
+    // NOT a WorkspaceValidationError (which the route would 400) — the raw error
+    // propagates so server.ts logs it + returns 500 (CodeRabbit: infra ≠ bad input).
+    await expect(
+      provisionFromGitUrl(dir, "https://github.com/x/y.git", new Set(), { policy: POLICY, clone }),
+    ).rejects.toThrow(/ENOENT/);
+    expect(existsSync(join(dir, "y"))).toBe(false); // temp still cleaned up
+  });
 });
 
 describe("purgeCloneTmp (P20 HIGH-2 — boot-sweep orphaned partial clones)", () => {

@@ -210,8 +210,9 @@ export function resolveGitUrl(
   // host is normalized (trailing FQDN dot stripped) to match the allowlist form.
   const host = normalizeHost(parsed.hostname);
   if (!policy.allowedHosts.has(host)) {
-    const allowed = [...policy.allowedHosts].sort().join(", ");
-    throw new WorkspaceValidationError(`git host "${host}" is not allowed (allowed: ${allowed})`);
+    // Echo the rejected host (client-supplied, safe) but NOT the allowlist —
+    // GENESIS_GIT_URL_HOSTS may name internal hosts (topology leak, CodeRabbit).
+    throw new WorkspaceValidationError(`git host "${host}" is not allowed`);
   }
   // Derive the dir name from the LAST path segment minus a .git suffix — exactly
   // what `git clone <url>` names the checkout, so the mental model is least-surprise.
@@ -245,29 +246,62 @@ function rmSafe(path: string): void {
   }
 }
 
+/** A Node system error (ENOENT/EACCES/ENOSPC/…) carries a STRING `code`; a non-zero
+ *  process exit carries a NUMERIC `code`, and a timeout kill carries `killed:true`
+ *  with a null code. Only the string-code case is an infra failure — git missing,
+ *  perms, disk full — which must surface as a 500, not be mislabeled a bad-URL 400
+ *  (CodeRabbit). A non-zero git exit / timeout IS client-actionable (bad or huge repo). */
+function isInfraError(e: unknown): boolean {
+  return typeof (e as { code?: unknown })?.code === "string";
+}
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** A HERMETIC environment for `git clone`: strip EVERY ambient git-config injection
+ *  channel so only our fixed settings apply, then pin global+system config to the null
+ *  device. Without this, an inherited `GIT_CONFIG_COUNT` + `GIT_CONFIG_KEY_n=url.<int>.
+ *  insteadOf` (or `http.extraHeader`) could rewrite the validated URL to an internal
+ *  host or smuggle a credential — defeating the allowlist + credential-less guarantees
+ *  (CodeRabbit / P20 LOW-1). `GIT_PROXY_COMMAND`/`GIT_ASKPASS` are dropped for the same
+ *  reason (proxy = SSRF pivot; askpass = credential injection). */
+function hermeticGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("GIT_CONFIG")) continue; // COUNT / KEY_* / VALUE_* / PARAMETERS / GLOBAL / SYSTEM
+    if (k === "GIT_PROXY_COMMAND" || k === "GIT_ASKPASS" || k === "GIT_SSH_COMMAND") continue;
+    env[k] = v;
+  }
+  env.GIT_TERMINAL_PROMPT = "0"; // never block on an auth prompt
+  env.GIT_CONFIG_NOSYSTEM = "1"; // ignore /etc/gitconfig
+  env.GIT_CONFIG_GLOBAL = devNull; // ignore ~/.gitconfig (insteadOf / cred helpers)
+  env.GIT_CONFIG_SYSTEM = devNull;
+  return env;
+}
+
 /** The real clone: non-interactive, credential-less, shallow, single-branch, bounded,
- *  and HERMETIC. GIT_TERMINAL_PROMPT=0 + an empty credential.helper guarantee it can
- *  never block waiting for auth (a private/typo'd URL fails fast). GIT_CONFIG_GLOBAL /
- *  _SYSTEM → /dev/null neutralize any ambient `url.<x>.insteadOf` rewrite (an SSRF
- *  vector — a poisoned gitconfig could redirect the validated URL to an internal host)
- *  and any ambient credential helper (P20 LOW-1). Async (execFile, not execFileSync)
- *  so a slow clone never pins the event loop; SIGKILL on timeout so a git that ignores
- *  SIGTERM is still reaped (P20 CRIT-2). `--` fixes the url/target as operands. */
+ *  and hermetic. Async (execFile, not execFileSync) so a slow clone never pins the
+ *  event loop; SIGKILL on timeout so a git that ignores SIGTERM is still reaped (P20
+ *  CRIT-2). `-c protocol.{ext,file}.allow=never` blocks the ext:: / file transports
+ *  (defense-in-depth — https is already the only validated scheme). `--` fixes the
+ *  url/target as operands. */
 async function gitClone(url: string, target: string, timeoutMs: number): Promise<void> {
   await execFileAsync(
     "git",
-    ["clone", "--depth", "1", "--single-branch", "--no-tags", "--", url, target],
-    {
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: devNull,
-        GIT_CONFIG_SYSTEM: devNull,
-      },
-    },
+    [
+      "-c",
+      "protocol.ext.allow=never",
+      "-c",
+      "protocol.file.allow=never",
+      "clone",
+      "--depth",
+      "1",
+      "--single-branch",
+      "--no-tags",
+      "--",
+      url,
+      target,
+    ],
+    { timeout: timeoutMs, killSignal: "SIGKILL", env: hermeticGitEnv() },
   );
 }
 
@@ -305,9 +339,16 @@ export async function provisionFromGitUrl(
 
   try {
     await clone(url, tmp, policy.cloneTimeoutMs);
-  } catch {
+  } catch (e) {
     rmSafe(tmp);
-    // Generic — never echo git's stderr (may carry the absolute target path).
+    // Infra failure (git binary missing, EACCES, ENOSPC) is NOT a client input error —
+    // log it + rethrow so the route returns 500, not a misleading "check the URL" 400.
+    if (isInfraError(e)) {
+      console.error(`[genesis] git clone infra error: ${errText(e)}`);
+      throw e;
+    }
+    // Otherwise git ran and exited non-zero (repo not found / private / timed out) — a
+    // client-actionable 400 with a generic message (never echoes git stderr / paths).
     throw new WorkspaceValidationError(
       "git clone failed (check the URL points to a public repository)",
     );
@@ -326,11 +367,19 @@ export async function provisionFromGitUrl(
   }
   try {
     renameSync(tmp, targetPath);
-  } catch {
+  } catch (e) {
     rmSafe(tmp);
-    throw new WorkspaceValidationError(
-      `a directory named "${name}" already exists under the projects root`,
-    );
+    // Only a genuine collision (a dir appeared at the target between the check + rename)
+    // is a 400; any other rename failure (EACCES/ENOSPC/EXDEV) is infra → log + rethrow
+    // → 500, not a misleading "already exists" (CodeRabbit).
+    const code = (e as { code?: unknown })?.code;
+    if (code === "EEXIST" || code === "ENOTEMPTY") {
+      throw new WorkspaceValidationError(
+        `a directory named "${name}" already exists under the projects root`,
+      );
+    }
+    console.error(`[genesis] workspace clone rename failed: ${errText(e)}`);
+    throw e;
   }
   return { id, name, rootPath: targetPath, isGitRepo: true };
 }
