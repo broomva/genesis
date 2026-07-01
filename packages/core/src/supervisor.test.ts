@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
 import { Supervisor, deriveTitle } from "./supervisor";
+import { InMemoryWorkspaceRepository } from "./workspace-repository";
 
 const ws = { id: "ws-1", name: "test", rootPath: "/tmp/genesis-test" };
 
@@ -600,17 +601,17 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       workspaces: [wsA, wsB],
       run: fakeRunner("x"),
     });
-    expect(sup.listWorkspaces().map((w) => w.id)).toEqual(["ws-1", "ws-a", "ws-b"]);
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-a", "ws-b"]);
     expect(sup.defaultWorkspaceId).toBe("ws-1");
   });
 
-  test("listWorkspaces is a public DTO — never exposes rootPath (P20/CodeRabbit)", () => {
+  test("listWorkspaces is a public DTO — never exposes rootPath (P20/CodeRabbit)", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: fakeRunner("x") });
-    for (const w of sup.listWorkspaces()) {
+    for (const w of await sup.listWorkspaces()) {
       expect("rootPath" in w).toBe(false);
       expect("noWorktree" in w).toBe(false);
     }
-    expect(sup.listWorkspaces().map((w) => w.id)).toEqual(["ws-1", "ws-a"]);
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-a"]);
   });
 
   test("an explicit workspace overrides a same-id earlier entry (registry merge order)", async () => {
@@ -700,8 +701,84 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     // ws-1 appears once (the shadow was dropped), and a default-bound thread runs
     // in the GENUINE default tree — not the shadow's (asserted via the run cwd,
     // since listWorkspaces no longer exposes rootPath).
-    expect(sup.listWorkspaces().filter((w) => w.id === "ws-1").length).toBe(1);
+    expect((await sup.listWorkspaces()).filter((w) => w.id === "ws-1").length).toBe(1);
     await sup.dispatch("t-shadow", "go");
     expect(sink.cwd).toBe(ws.rootPath);
+  });
+
+  test("registerWorkspace adds a workspace at runtime (no restart) — bindable + listed (BRO-1629)", async () => {
+    const sink: { cwd?: string } = {};
+    const sup = new Supervisor({ defaultWorkspace: ws, run: cwdRunner(sink) });
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1"]); // just the default
+    await sup.registerWorkspace({ id: "ws-live", name: "live", rootPath: "/repos/live" });
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-live"]);
+    // a NEW thread can bind the just-registered workspace immediately.
+    await sup.dispatch("t-live", "go", undefined, { workspaceId: "ws-live" });
+    expect(sink.cwd).toBe("/repos/live");
+  });
+
+  test("registerWorkspace rejects the reserved default id (BRO-1629)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    await expect(
+      sup.registerWorkspace({ id: "ws-1", name: "evil", rootPath: "/repos/evil" }),
+    ).rejects.toThrow(/reserved/);
+  });
+
+  test("removeWorkspace de-registers; the default can't be removed (BRO-1629)", async () => {
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      run: fakeRunner("x"),
+    });
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-a"]);
+    expect(await sup.removeWorkspace("ws-a")).toBe(true);
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1"]);
+    expect(await sup.removeWorkspace("ws-1")).toBe(false); // default is protected
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1"]);
+  });
+
+  test("a custom WorkspaceRepository is the source of truth; env seed is skipped when non-empty (BRO-1629)", async () => {
+    const repo = new InMemoryWorkspaceRepository([
+      { id: "ws-1", name: "genesis", rootPath: "/tmp/genesis-test" },
+      { id: "ws-fromrepo", name: "fromrepo", rootPath: "/repos/fromrepo" },
+    ]);
+    // env seed (workspaces:[wsA]) is IGNORED because the repo is already populated.
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      workspaceRepository: repo,
+      run: fakeRunner("x"),
+    });
+    expect((await sup.listWorkspaces()).map((w) => w.id).sort()).toEqual(["ws-1", "ws-fromrepo"]);
+  });
+
+  test("a repository entry sharing the default id can't SHADOW the genuine default (P20 Forge #1)", async () => {
+    const sink: { cwd?: string } = {};
+    // The repo carries a `ws-1` (the default id) with a DIFFERENT rootPath/name.
+    const repo = new InMemoryWorkspaceRepository([
+      { id: "ws-1", name: "SHADOW", rootPath: "/evil/shadow" },
+      { id: "ws-x", name: "x", rootPath: "/repos/x" },
+    ]);
+    const sup = new Supervisor({
+      defaultWorkspace: ws, // id ws-1, name "test", rootPath /tmp/genesis-test
+      workspaceRepository: repo,
+      run: cwdRunner(sink),
+    });
+    // listWorkspaces reports the GENUINE default (name "test"), not the shadow.
+    expect((await sup.listWorkspaces()).find((w) => w.id === "ws-1")?.name).toBe("test");
+    // A default-bound thread runs in the GENUINE default tree, never /evil/shadow.
+    await sup.dispatch("t-shadow-repo", "go");
+    expect(sink.cwd).toBe(ws.rootPath);
+  });
+
+  test("concurrent runtime registers don't lose an update (serialized refresh, P20/CR #2)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    // Two registers race — overlapping hydrations must not let a slower stale
+    // reload overwrite the cache and drop one. Both must survive.
+    await Promise.all([
+      sup.registerWorkspace({ id: "ws-p", name: "p", rootPath: "/p" }),
+      sup.registerWorkspace({ id: "ws-q", name: "q", rootPath: "/q" }),
+    ]);
+    expect((await sup.listWorkspaces()).map((w) => w.id).sort()).toEqual(["ws-1", "ws-p", "ws-q"]);
   });
 });

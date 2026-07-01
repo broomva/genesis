@@ -173,10 +173,10 @@ export function build(opts: BuildOpts) {
   // Selectable workspaces (BRO-1627) for the per-thread workspace picker. Same
   // bearer gate; the client offers these as the "which repo does this thread run
   // in" choice (bound sticky on the thread's first turn).
-  app.get("/workspaces", (c) => {
+  app.get("/workspaces", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     return c.json({
-      workspaces: supervisor.listWorkspaces(),
+      workspaces: await supervisor.listWorkspaces(),
       defaultWorkspace: supervisor.defaultWorkspaceId,
     });
   });
