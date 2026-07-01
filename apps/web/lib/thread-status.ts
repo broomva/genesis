@@ -22,31 +22,41 @@ export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 export type RunMode = "idle" | "streaming" | "working" | "reconnecting" | "error";
 
 /** Pure state machine: given the live-stream status, the last-known SERVER phase,
- *  and whether a reconcile fetch is in flight, decide what the UI should show. The
- *  server phase is authoritative for "is the turn running" — a live stream is just
- *  the nicer real-time view of it.
+ *  whether a reconcile fetch is in flight, and whether an error is UNRESOLVED (the
+ *  stream failed and we couldn't reach the engine to confirm the turn's fate), decide
+ *  what the UI shows. The server phase is authoritative for "is the turn running /
+ *  failed" — a live stream is just the nicer real-time view of it. Precedence matters:
  *
- *  - streaming: a live SSE stream is connected (submitted/streaming).
- *  - working:   no live stream, but the server says the turn is still running
- *               (backgrounded + returned, or opened an already-running thread).
- *  - reconnecting: the stream errored and we're fetching the durable result (transient).
- *  - error:     the stream errored AND the server turn is genuinely blocked (real fail).
- *  - idle:      settled, nothing running. */
+ *  - streaming:    a live SSE stream is connected (submitted/streaming).
+ *  - error(blocked): the SERVER says the turn is blocked — a real failure, surfaced
+ *                  even after clearError() un-wedged the composer (P20 CRIT-6).
+ *  - working:      no live stream, but the server says the turn is still running.
+ *  - reconnecting: a reconcile fetch is in flight (transient, calm — not danger).
+ *  - error(unresolved): the stream errored AND the engine was unreachable to confirm
+ *                  → a retryable error, NOT a silent idle (P20 CRIT-6 / HIGH-1).
+ *  - idle:         settled, nothing running. */
 export function deriveRunMode(input: {
   liveStatus: ChatStatus;
   serverPhase: ThreadPhase | null;
   reconciling: boolean;
+  /** The stream errored and a status fetch could NOT confirm the turn (engine
+   *  unreachable / null phase). Surfaced as a retryable error rather than swallowed. */
+  unresolved?: boolean;
 }): RunMode {
-  const { liveStatus, serverPhase, reconciling } = input;
+  const { liveStatus, serverPhase, reconciling, unresolved } = input;
   if (liveStatus === "submitted" || liveStatus === "streaming") return "streaming";
-  // Server truth wins for "still running" — even if the live stream dropped/erred.
+  // Server truth: a blocked turn is a real failure — show it even once the sticky
+  // useChat error was cleared to un-wedge the composer.
+  if (serverPhase === "blocked") return "error";
+  // Server truth: still running → working, even if the live stream dropped/erred.
   if (serverPhase === "running" || serverPhase === "awaiting") return "working";
-  // A reconcile fetch is in flight → transient, calm (not the danger hue).
+  // A reconcile fetch is in flight → transient, calm.
   if (reconciling) return "reconnecting";
-  // Stream errored with no running turn: a genuinely blocked turn is a real error;
-  // a done/idle/unknown phase means the error is stale (we're about to refetch) →
-  // treat as a brief reconnect, never a dead-end.
-  if (liveStatus === "error") return serverPhase === "blocked" ? "error" : "reconnecting";
+  // Errored + couldn't confirm via the server → a retryable error, never a silent idle.
+  if (unresolved) return "error";
+  // Pre-reconcile window (error not yet cleared): a done turn is about to be refetched
+  // (reconnect); anything else errored is surfaced.
+  if (liveStatus === "error") return serverPhase === "done" ? "reconnecting" : "error";
   return "idle";
 }
 

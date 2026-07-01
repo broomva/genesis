@@ -41,36 +41,54 @@ export function useThreadReconcile(opts: {
   const { threadId, liveStatus, error, initialPhase, setMessages, clearError } = opts;
   const [serverPhase, setServerPhase] = useState<ThreadPhase | null>(initialPhase ?? null);
   const [reconciling, setReconciling] = useState(false);
+  const [unresolved, setUnresolved] = useState(false); // errored + engine unconfirmable
   const inFlight = useRef(false); // guard against overlapping reconciles
 
-  // Latest callbacks in refs so `reconcile` stays identity-stable (it must not
+  // Latest callbacks/state in refs so `reconcile` stays identity-stable (it must not
   // re-subscribe the listeners / restart the poll on every parent re-render).
   const setMessagesRef = useRef(setMessages);
   const clearErrorRef = useRef(clearError);
+  const errorRef = useRef(error);
   setMessagesRef.current = setMessages;
   clearErrorRef.current = clearError;
+  errorRef.current = error;
   // Latest live state, read by the foreground handler to decide whether a reconcile
   // is even warranted (skip it for a settled idle thread — no need to refetch +
   // replace messages on every tab focus).
   const stateRef = useRef({ liveStatus, serverPhase });
   stateRef.current = { liveStatus, serverPhase };
+  // Guard async setState after unmount (thread switch remounts ChatView) — P20 HIGH-3b.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const reconcile = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
+    const hadError = errorRef.current != null; // capture before clearError propagates
     setReconciling(true);
-    clearErrorRef.current(); // un-wedge the composer immediately (status → ready)
+    clearErrorRef.current(); // un-wedge the composer (common case: background abort)
     try {
       const phase = await fetchThreadStatus(threadId);
+      if (!mounted.current) return;
       if (phase != null) setServerPhase(phase);
-      // Swap in the durable transcript only once the turn has SETTLED — while it's
-      // still running, keep the partial stream the user already sees. When terminal,
-      // the transcript carries the completed (or blocked) agent turn.
-      if (isTerminalPhase(phase)) {
-        setMessagesRef.current(await fetchThreadMessages(threadId));
+      // If the stream had errored and the engine couldn't confirm the turn (null
+      // phase → unreachable), surface a RETRYABLE error rather than a silent idle
+      // (P20 CRIT-6 / HIGH-1). A confirmed phase clears it.
+      setUnresolved(hadError && phase == null);
+      // Swap in the durable transcript only once the turn has SETTLED, and NEVER with
+      // an empty result — a transient/404 [] would wipe the user's prompt (P20 CRIT-2).
+      // While still running, keep the partial stream the user already sees.
+      if (phase === "done" || phase === "blocked") {
+        const msgs = await fetchThreadMessages(threadId);
+        if (mounted.current && msgs.length > 0) setMessagesRef.current(msgs);
       }
     } finally {
-      setReconciling(false);
+      if (mounted.current) setReconciling(false);
       inFlight.current = false;
     }
   }, [threadId]);
@@ -93,10 +111,14 @@ export function useThreadReconcile(opts: {
     document.addEventListener("visibilitychange", onForeground);
     window.addEventListener("pageshow", onForeground);
     window.addEventListener("online", onForeground);
+    // `focus` covers an iOS PWA restore path where visibilitychange doesn't fire
+    // (tapping the app icon to bring it to front) — P20 MED-8.
+    window.addEventListener("focus", onForeground);
     return () => {
       document.removeEventListener("visibilitychange", onForeground);
       window.removeEventListener("pageshow", onForeground);
       window.removeEventListener("online", onForeground);
+      window.removeEventListener("focus", onForeground);
     };
   }, [reconcile]);
 
@@ -120,13 +142,19 @@ export function useThreadReconcile(opts: {
   useEffect(() => {
     const prev = prevLive.current;
     prevLive.current = liveStatus;
-    if (liveStatus === "submitted" || liveStatus === "streaming") setServerPhase("running");
-    else if (liveStatus === "ready" && (prev === "submitted" || prev === "streaming"))
+    // A fresh stream means the turn is running again → clear any prior unresolved
+    // error. A clean completion (streaming → ready) settles it.
+    if (liveStatus === "submitted" || liveStatus === "streaming") {
+      setServerPhase("running");
+      setUnresolved(false);
+    } else if (liveStatus === "ready" && (prev === "submitted" || prev === "streaming")) {
       setServerPhase(null);
+      setUnresolved(false);
+    }
   }, [liveStatus]);
 
   return {
-    mode: deriveRunMode({ liveStatus, serverPhase, reconciling }),
+    mode: deriveRunMode({ liveStatus, serverPhase, reconciling, unresolved }),
     reconnect: () => void reconcile(),
   };
 }

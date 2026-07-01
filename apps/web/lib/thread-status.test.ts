@@ -25,8 +25,12 @@ describe("isTerminalPhase (BRO-1640)", () => {
 });
 
 describe("deriveRunMode (BRO-1640 — dropped stream ≠ crash)", () => {
-  const mode = (liveStatus: ChatStatus, serverPhase: ThreadPhase | null, reconciling = false) =>
-    deriveRunMode({ liveStatus, serverPhase, reconciling });
+  const mode = (
+    liveStatus: ChatStatus,
+    serverPhase: ThreadPhase | null,
+    reconciling = false,
+    unresolved = false,
+  ) => deriveRunMode({ liveStatus, serverPhase, reconciling, unresolved });
 
   test("a live stream always reads as streaming", () => {
     expect(mode("submitted", null)).toBe("streaming");
@@ -41,20 +45,29 @@ describe("deriveRunMode (BRO-1640 — dropped stream ≠ crash)", () => {
     expect(mode("ready", "awaiting")).toBe("working");
   });
 
+  test("a BLOCKED server turn is a real error even after clearError un-wedged (P20 CRIT-6)", () => {
+    // Server truth wins: blocked → error regardless of the live status (which is
+    // "ready" once clearError ran). The old code returned idle here → silent swallow.
+    expect(mode("ready", "blocked")).toBe("error");
+    expect(mode("error", "blocked")).toBe("error");
+  });
+
   test("errored while reconciling → reconnecting (transient, not a crash)", () => {
     expect(mode("error", null, true)).toBe("reconnecting");
     // Even a done phase, mid-reconcile, is a brief reconnect (about to refetch).
     expect(mode("error", "done", true)).toBe("reconnecting");
   });
 
-  test("errored with a genuinely blocked server turn → a real error", () => {
-    expect(mode("error", "blocked")).toBe("error");
+  test("errored + unconfirmable via the engine → a RETRYABLE error, never a silent idle (P20 CRIT-6/HIGH-1)", () => {
+    // The stream failed and a status fetch returned null (engine unreachable): don't
+    // pretend it's idle — surface a retryable error.
+    expect(mode("ready", null, false, true)).toBe("error");
+    expect(mode("error", "idle")).toBe("error");
+    expect(mode("error", null)).toBe("error");
   });
 
-  test("errored but the server turn already finished (done/idle/unknown) → reconnecting, never a dead-end", () => {
+  test("errored but the server turn already finished (done) → reconnecting (about to refetch)", () => {
     expect(mode("error", "done")).toBe("reconnecting");
-    expect(mode("error", "idle")).toBe("reconnecting");
-    expect(mode("error", null)).toBe("reconnecting");
   });
 
   test("settled → idle", () => {
