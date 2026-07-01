@@ -18,6 +18,7 @@ import {
   runCodex,
 } from "@genesis/runner";
 import { build } from "./server";
+import { purgeCloneTmp } from "./workspace-provision";
 import { FsWorkspaceRepository } from "./workspace-repository-fs";
 import { discoverWorkspaces } from "./workspaces";
 
@@ -138,6 +139,11 @@ const workspaces = discoverWorkspaces(process.env);
 const workspaceRepository = process.env.GENESIS_WORKSPACES_DIR
   ? new FsWorkspaceRepository(process.env.GENESIS_WORKSPACES_DIR)
   : undefined;
+
+// Boot-sweep the add-by-git-URL clone quarantine (BRO-1629 slice 5, P20 HIGH-2):
+// a hard kill mid-clone can orphan a partial checkout under .genesis-clone-tmp; the
+// process is fresh here (no in-flight clones), so it's safe to purge.
+purgeCloneTmp(process.env.GENESIS_PROJECTS_ROOT);
 
 // NOTE (Phase 2 Slice A): dispatch is serialized per-thread IN-PROCESS only.
 // Run a SINGLE instance until Slice B adds Upstash slot-locks — two replicas on

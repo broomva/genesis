@@ -15,7 +15,12 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
-import { WorkspaceValidationError, availableWorkspaces, resolvePick } from "./workspace-provision";
+import {
+  WorkspaceValidationError,
+  availableWorkspaces,
+  provisionFromGitUrl,
+  resolvePick,
+} from "./workspace-provision";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
@@ -214,17 +219,21 @@ export function build(opts: BuildOpts) {
     return c.json({ available: availableWorkspaces(opts.projectsRoot, registered) });
   });
 
-  // Register a picked workspace at RUNTIME (BRO-1629) — no restart. The body carries
-  // a directory NAME (from /available), never a path; the server derives + validates
-  // the rootPath inside the allow-root (the load-bearing security boundary).
+  // Register a workspace at RUNTIME (BRO-1629) — no restart. Two safe add shapes,
+  // both keeping the filesystem-path authority ON THE SERVER (the client never names
+  // a path): `{pick}` = a directory NAME from /available (discover→pick, slice 3);
+  // `{gitUrl}` = a public git URL the server clones into the allow-root then registers
+  // (add-by-git-URL, slice 5). A body with `gitUrl` takes the clone path; else pick.
   app.post("/workspaces", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const body = (await c.req.json().catch(() => ({}))) as { pick?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as { pick?: unknown; gitUrl?: unknown };
     try {
       const taken = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
-      const saved = await supervisor.registerWorkspace(
-        resolvePick(opts.projectsRoot, body.pick, taken),
-      );
+      const ws =
+        body.gitUrl !== undefined
+          ? await provisionFromGitUrl(opts.projectsRoot, body.gitUrl, taken)
+          : resolvePick(opts.projectsRoot, body.pick, taken);
+      const saved = await supervisor.registerWorkspace(ws);
       return c.json({ id: saved.id, name: saved.name, isGitRepo: saved.isGitRepo }, 201);
     } catch (e) {
       // A validation error (bad pick) is safe to echo → 400. Anything else is

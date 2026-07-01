@@ -1,10 +1,11 @@
 "use client";
 
-import { FolderGit2, Plus, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { FolderGit2, GitBranch, Plus, Trash2 } from "lucide-react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import {
   type AddWorkspaceResult,
@@ -26,6 +27,7 @@ export function WorkspacesManager({
   workspaces,
   defaultWorkspaceId,
   onAdd,
+  onAddByUrl,
   onRemove,
 }: {
   workspaces: Workspace[];
@@ -33,11 +35,17 @@ export function WorkspacesManager({
   defaultWorkspaceId: string;
   /** Register a picked dir; the parent refreshes the workspace list on success. */
   onAdd: (pick: string) => Promise<AddWorkspaceResult>;
+  /** Clone + register a public git URL (BRO-1629 slice 5); the parent refreshes the
+   *  workspace list on success. The engine validates the URL (https + host allowlist
+   *  + no credentials) — nothing is validated here beyond non-empty. */
+  onAddByUrl: (gitUrl: string) => Promise<AddWorkspaceResult>;
   /** De-register; the parent refreshes the workspace list on success. */
   onRemove: (id: string) => Promise<boolean>;
 }) {
   const [available, setAvailable] = useState<AvailableRepo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [url, setUrl] = useState("");
+  const [addingUrl, setAddingUrl] = useState(false);
   // Track in-flight mutations PER id/name (P20 Forge N1): a single-slot busy
   // marker would re-enable an already-clicked row the moment a second row's
   // action starts, opening a double-submit window. Sets keep each row's spinner
@@ -84,6 +92,25 @@ export function WorkspacesManager({
       await refetch(); // the just-added repo drops off the available list
     },
     [onAdd, refetch],
+  );
+
+  const doAddByUrl = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const gitUrl = url.trim();
+      if (!gitUrl || addingUrl) return;
+      setError(null);
+      setAddingUrl(true);
+      const res = await onAddByUrl(gitUrl);
+      setAddingUrl(false);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      setUrl(""); // clear on success; the parent refresh surfaces the new workspace
+      await refetch(); // keep the pickable list in sync (the clone may shadow a pick)
+    },
+    [url, addingUrl, onAddByUrl, refetch],
   );
 
   const doRemove = useCallback(
@@ -192,6 +219,42 @@ export function WorkspacesManager({
           })}
         </div>
       ) : null}
+
+      {/* Add-by-git-URL (BRO-1629 slice 5) — clone a public repo into the projects
+          root. The engine owns validation (https + host allowlist + no creds); here
+          we only block an empty submit. */}
+      <form onSubmit={doAddByUrl} className="space-y-1.5 pt-1">
+        <label htmlFor="ws-git-url" className="text-muted-foreground text-xs">
+          Clone from a git URL
+        </label>
+        <div className="flex items-center gap-1.5">
+          <div className="relative min-w-0 flex-1">
+            <GitBranch className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+            <Input
+              id="ws-git-url"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              placeholder="https://github.com/owner/repo"
+              value={url}
+              disabled={addingUrl}
+              onChange={(e) => setUrl(e.target.value)}
+              className="h-9 pl-8 text-sm"
+            />
+          </div>
+          <Button
+            type="submit"
+            size="sm"
+            variant="secondary"
+            disabled={addingUrl || url.trim().length === 0}
+            className="shrink-0"
+          >
+            {addingUrl ? <Spinner className="size-3.5" /> : "Clone"}
+          </Button>
+        </div>
+      </form>
 
       {error ? <p className="text-destructive text-xs leading-snug">{error}</p> : null}
     </section>
