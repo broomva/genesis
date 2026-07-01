@@ -100,6 +100,13 @@ describe("addWorkspace (BRO-1629 slice 3)", () => {
     expect(res.ok).toBe(false);
   });
 
+  test("ok but an EMPTY id/name → rejected (upholds the non-empty invariant, CodeRabbit)", async () => {
+    stubFetch(true, { id: "", name: "x" });
+    expect((await addWorkspace("x")).ok).toBe(false);
+    stubFetch(true, { id: "ws-x", name: "" });
+    expect((await addWorkspace("x")).ok).toBe(false);
+  });
+
   test("thrown fetch → a network-error result", async () => {
     stubFetch(true, {}, { throws: true });
     const res = await addWorkspace("x");

@@ -90,7 +90,17 @@ export async function addWorkspace(pick: string): Promise<AddWorkspaceResult> {
       body: JSON.stringify({ pick }),
     });
     const data = (await res.json().catch(() => ({}))) as Partial<Workspace> & { error?: unknown };
-    if (!res.ok || typeof data.id !== "string" || typeof data.name !== "string") {
+    // Uphold the same non-empty id+name invariant fetchWorkspaces /
+    // fetchAvailableWorkspaces enforce (CodeRabbit): an empty-string id in an
+    // otherwise-ok body would make AddWorkspaceResult.workspace carry the value
+    // the rest of the file guards against (Radix <SelectItem value=""> hazard).
+    if (
+      !res.ok ||
+      typeof data.id !== "string" ||
+      data.id.length === 0 ||
+      typeof data.name !== "string" ||
+      data.name.length === 0
+    ) {
       const error =
         typeof data.error === "string" && data.error ? data.error : "could not add this project";
       return { ok: false, error };
