@@ -297,6 +297,17 @@ export class Supervisor {
     if (ws.id === this.defaultWorkspace.id) {
       throw new Error(`workspace id "${ws.id}" is reserved for the default workspace`);
     }
+    // Idempotent by rootPath (BRO-1629; a P11 dogfood caught this): a sequential
+    // double-submit of the same pick resolves to a fresh DISAMBIGUATED id (the
+    // first registration made the clean id "taken") but the SAME rootPath —
+    // registering it would create a second workspace pointing at one directory.
+    // A directory IS the workspace, so if one is already registered at this
+    // rootPath, return it unchanged. (The concurrent case — both submissions see
+    // the clean id free → both resolve to it → the repository's register is
+    // idempotent-by-id, collapsing to one. So the two paths together close the
+    // gap review reasoned around by assuming exactly-once submission.)
+    const existing = [...this.workspaceRegistry.values()].find((w) => w.rootPath === ws.rootPath);
+    if (existing) return existing;
     const saved = await this.workspaceRepository.register(ws);
     await this.refreshRegistry();
     return saved;
