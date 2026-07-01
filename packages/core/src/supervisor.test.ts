@@ -770,4 +770,15 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     await sup.dispatch("t-shadow-repo", "go");
     expect(sink.cwd).toBe(ws.rootPath);
   });
+
+  test("concurrent runtime registers don't lose an update (serialized refresh, P20/CR #2)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    // Two registers race — overlapping hydrations must not let a slower stale
+    // reload overwrite the cache and drop one. Both must survive.
+    await Promise.all([
+      sup.registerWorkspace({ id: "ws-p", name: "p", rootPath: "/p" }),
+      sup.registerWorkspace({ id: "ws-q", name: "q", rootPath: "/q" }),
+    ]);
+    expect((await sup.listWorkspaces()).map((w) => w.id).sort()).toEqual(["ws-1", "ws-p", "ws-q"]);
+  });
 });

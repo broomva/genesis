@@ -257,19 +257,37 @@ export class Supervisor {
       await this.workspaceRepository.register(this.defaultWorkspace);
       all = await this.workspaceRepository.list();
     }
-    this.workspaceRegistry = new Map(all.map((w) => [w.id, w]));
-    // The boot default is AUTHORITATIVE (P20 M2, symmetric with the ctor seed
-    // reservation): a repository/manifest entry sharing the default id — a
-    // different rootPath/name — must NOT shadow the genuine default, or every
-    // default-bound thread would silently re-cwd into it. Force it after the
-    // cache build (Forge probe-confirmed this was reachable via a custom repo).
-    this.workspaceRegistry.set(this.defaultWorkspace.id, this.defaultWorkspace);
+    // Build the cache DEFAULT-FIRST + the genuine default AUTHORITATIVE
+    // (CodeRabbit L260 + P20 M2 Finding #1): a repository/manifest entry sharing the
+    // default id — a different rootPath/name — must NOT shadow the genuine default
+    // (else every default-bound thread re-cwds), and listWorkspaces() documents
+    // "default first" regardless of repository insertion order.
+    const nonDefault = all.filter((w) => w.id !== this.defaultWorkspace.id);
+    this.workspaceRegistry = new Map<string, Workspace>([
+      [this.defaultWorkspace.id, this.defaultWorkspace],
+      ...nonDefault.map((w) => [w.id, w] as [string, Workspace]),
+    ]);
     // Mirror the CORRECTED set into the Store (idempotent) so a thread bound to a
     // since-removed workspace keeps its last-known rootPath for the never-ran
     // fallback (S1) — and the mirrored default row is the genuine one, not a shadow.
     await Promise.all(
       [...this.workspaceRegistry.values()].map((w) => this.store.upsertWorkspace(w)),
     );
+  }
+
+  /** Serialized registry refresh (CodeRabbit/Forge #2). Chains the reload onto the
+   *  current hydration so two concurrent runtime mutations can't run overlapping
+   *  `loadRegistry`s and have the SLOWER one overwrite the cache with a stale
+   *  snapshot. Every registry read still awaits `ensureWorkspace()` = this chain. */
+  private refreshRegistry(): Promise<void> {
+    const next = (this.workspaceEnsured ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => this.loadRegistry());
+    this.workspaceEnsured = next.catch((e) => {
+      this.workspaceEnsured = undefined;
+      throw e;
+    });
+    return this.workspaceEnsured;
   }
 
   /** Register a workspace at RUNTIME (BRO-1629) — writes the source + refreshes the
@@ -280,8 +298,7 @@ export class Supervisor {
       throw new Error(`workspace id "${ws.id}" is reserved for the default workspace`);
     }
     const saved = await this.workspaceRepository.register(ws);
-    this.workspaceEnsured = undefined;
-    await this.ensureWorkspace();
+    await this.refreshRegistry();
     return saved;
   }
 
@@ -292,8 +309,7 @@ export class Supervisor {
   async removeWorkspace(id: string): Promise<boolean> {
     if (id === this.defaultWorkspace.id) return false;
     await this.workspaceRepository.remove(id);
-    this.workspaceEnsured = undefined;
-    await this.ensureWorkspace();
+    await this.refreshRegistry();
     return true;
   }
 
