@@ -1,6 +1,8 @@
-# Session Launcher (BRO-1635) — Phase A start: New Workspace by git URL
+# Session Launcher (BRO-1635) — Phase A DONE → Phase B next
 
-**TL;DR.** The Omnara-inspired Session Launcher is planned, spec'd, and ticketed; the prior session-resume incident (BRO-1630) is fully fixed + deployed + dogfooded. **First action:** build **BRO-1629 slice 5 — `POST /workspaces {gitUrl}`** (server-side URL validation → clone into the allow-root → register), starting from `apps/api/src/workspace-provision.ts` + `server.ts`, mirroring the existing discover→pick (`resolvePick`) security spine.
+**TL;DR.** **BRO-1629 slice 5 (add-by-git-URL) is shipped, merged (`a94fe54`, PR #78), deployed to the VPS, and dogfooded in production** — `POST /workspaces {gitUrl}` clones a public repo into the allow-root and registers it at runtime, with a full SSRF firewall (verified live: `localhost`/metadata-IP/`file://`/`?token=`/`ssh://` all 400). **First action for the next session:** **BRO-1636 — Session Launcher phase B** (configurator card + per-session root/worktree toggle + finish the BRO-1622 engine gating), built with a stable `data-testid`/E2E hook from day one (BRO-1634). Design spec: `docs/specs/2026-07-01-session-launcher.html`.
+
+*(Earlier state, for reference: the Omnara-inspired launcher was planned/spec'd/ticketed and BRO-1630 session-resume was fixed+deployed+dogfooded before this arc.)*
 
 ---
 
@@ -19,6 +21,7 @@
 | #75 | `b9587ad` | BRO-1630 RC1 durable `--resume` + RC2 actionable eviction (engine/session-host/reducer) |
 | #76 | `c9623f9` | BRO-1630 RC3 / BRO-1629 **slice 4** — workspace reconciliation: dispatch guard on vanished cwd + `available` DTO + PWA badge/picker gating |
 | #77 | `c2540ac` | fix-forward: RC3 guard broke 2 fake-path dispatch tests (evals harness + drizzle store) → `workspaceExists: () => true` bypass |
+| #78 | `a94fe54` | **BRO-1629 slice 5** — add-by-git-URL: `POST /workspaces {gitUrl}` (SSRF-safe clone→register), web "Clone from a git URL" field. P20 cross-review + CodeRabbit (3 Major) resolved. |
 
 BRO-1630 is **reproduced + fixed + validated end-to-end** (engine PERSIMMON dogfood + real-phone UI FALCON-7 recall across a daemon restart, server-confirmed). Design spec for the launcher: `docs/specs/2026-07-01-session-launcher.html`.
 
@@ -36,11 +39,18 @@ Build `POST /workspaces {gitUrl}`. Concrete steps:
 
 ## Pickup state (what's open, priority order)
 
-- [ ] **BRO-1629 slice 5** — add-by-git-URL (first action above).
-- [ ] **BRO-1636** — Session Launcher phase B (configurator card + root/worktree toggle + finish BRO-1622 engine gating).
+- [x] **BRO-1629 slice 5** — add-by-git-URL. **DONE** (PR #78 `a94fe54`, deployed + prod-dogfooded).
+- [ ] **BRO-1636** — Session Launcher phase B (configurator card + root/worktree toggle + finish BRO-1622 engine gating). ← **next**
 - [ ] **BRO-1637** — Session Launcher phase C (sidebar grouping Workspaces/Worktrees/Sessions).
 - [ ] **BRO-1631** — extend the RC3 workspace guard to `vps` ssh hosts (latent).
 - [ ] **BRO-1634** — composer `data-testid`/E2E hook (build launcher with this from day one).
+- [ ] **BRO-1638** — rate-limit `POST /workspaces` git-URL clones (P20 MED-3, defense-in-depth).
+- [ ] **BRO-1639** — surface the add-by-git-URL field on empty-allow-root single-workspace deploys (capability flag).
+
+### Slice 5 notes for the next agent
+- API: `apps/api/src/workspace-provision.ts` — `resolveGitUrl` (validator), `provisionFromGitUrl` (clone→register), `defaultGitUrlPolicy`, `purgeCloneTmp` (boot-sweep, wired in `index.ts`). Allowlist defaults to github/gitlab/bitbucket/codeberg; extend via `GENESIS_GIT_URL_HOSTS`. Timeout via `GENESIS_GIT_CLONE_TIMEOUT_MS` (≤10min).
+- Web: `addWorkspaceByUrl` (`lib/workspaces.ts`) + URL field in `workspaces-manager.tsx` → threaded through `settings-sheet.tsx` + `page.tsx`. The BFF (`app/api/workspaces/route.ts`) passes the body through untouched — no BFF change was needed.
+- Prod dogfood: `POST {gitUrl}` clones into `/home/agent/workspace/<slug>`; the clone quarantine is `<allow-root>/.genesis-clone-tmp` (temp→atomic-rename).
 
 ## Lessons (do not relearn these)
 
