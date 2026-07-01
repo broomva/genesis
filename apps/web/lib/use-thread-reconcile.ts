@@ -138,12 +138,31 @@ export function useThreadReconcile(opts: {
     return () => clearInterval(id);
   }, [serverPhase, unresolved, liveStatus, reconcile]);
 
-  // Adopt a running phase the PARENT observed (CodeRabbit): ChatView is keyed by
-  // threadId, so it does NOT remount when only the phase changes — the initial
-  // useState seed goes stale if the parent learns the thread is running AFTER mount
-  // (its list loaded late, or the turn started while the tab was hidden). Sync a
-  // parent-observed running/awaiting phase in, but ONLY when the local phase is still
-  // unknown (null) so a stale parent phase never downgrades a fresher local one.
+  // On thread OPEN (mount / switch), authoritatively fetch the true server phase once.
+  // ChatView is keyed by threadId, so switching TO a thread remounts this hook, seeding
+  // serverPhase from the parent's thread-list phase — which is STALE when a new turn
+  // started but the parent's 4s poll hasn't caught it (BRO-1640 dogfood: switch away
+  // from a running thread, then back → it read as idle because the list still said
+  // "done"). A running turn found here is adopted → the poll engages + the run signal
+  // shows + the result lands. Terminal/idle → left alone (the page already hydrated the
+  // final transcript). Cheap: one /control status call per thread open.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchThreadStatus(threadId).then((phase) => {
+      if (cancelled || !mounted.current) return;
+      if (phase === "running" || phase === "awaiting") setServerPhase(phase);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId]);
+
+  // Adopt a running phase the PARENT observed while ALREADY mounted (CodeRabbit): the
+  // parent can learn a thread is running after mount (list loaded late, or the turn
+  // started while the tab was hidden). Sync a parent-observed running/awaiting phase
+  // in, but ONLY when the local phase is still unknown (null) so a stale parent phase
+  // never downgrades a fresher local one. (Switch-back-to-running is handled by the
+  // authoritative mount fetch above, which isn't subject to this null-guard.)
   useEffect(() => {
     if (initialPhase === "running" || initialPhase === "awaiting") {
       setServerPhase((prev) => prev ?? initialPhase);
