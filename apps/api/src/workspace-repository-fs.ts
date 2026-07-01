@@ -33,18 +33,15 @@ export class FsWorkspaceRepository implements WorkspaceRepository {
     mkdirSync(dir, { recursive: true });
   }
 
-  /** `<dir>/<id>.json`, with the id validated as a single safe path component
-   *  (defense-in-depth — the id is already wire-charset-guarded, but a manifest
-   *  filename must never escape the dir). */
+  /** `<dir>/<id>.json`, with the id validated as a single safe path component.
+   *  Positive charset (matches the wire guard): first char alphanumeric, then
+   *  `[\w.-]` — rejects "", ".", "..", ".hidden", "-flag", and any separator; the
+   *  startsWith check is the escape backstop (defense-in-depth, P20 Forge). */
+  private static readonly SAFE_ID = /^[A-Za-z0-9][\w.-]*$/;
   private fileFor(id: string): string {
     const base = resolve(this.dir);
     const file = resolve(this.dir, `${id}.json`);
-    if (
-      id.includes("/") ||
-      id.includes("\\") ||
-      id.includes("..") ||
-      !file.startsWith(base + sep)
-    ) {
+    if (!FsWorkspaceRepository.SAFE_ID.test(id) || !file.startsWith(base + sep)) {
       throw new Error(`unsafe workspace id for a manifest filename: ${JSON.stringify(id)}`);
     }
     return file;
@@ -74,8 +71,18 @@ export class FsWorkspaceRepository implements WorkspaceRepository {
       if (!MANIFEST_RE.test(f)) continue;
       try {
         const ws = this.coerce(JSON.parse(readFileSync(resolve(this.dir, f), "utf8")));
-        if (ws) out.push(ws);
-        else console.warn(`[genesis] workspace manifest ${f} missing required fields; skipping.`);
+        if (!ws) {
+          console.warn(`[genesis] workspace manifest ${f} missing required fields; skipping.`);
+          continue;
+        }
+        // Enforce filename == internal id (register guarantees it) so get()/list()
+        // can NEVER disagree for an externally-authored / git-synced manifest —
+        // get() keys on the filename, list() on the field (P20 Forge).
+        if (ws.id !== f.replace(MANIFEST_RE, "")) {
+          console.warn(`[genesis] workspace manifest ${f} id "${ws.id}" ≠ filename; skipping.`);
+          continue;
+        }
+        out.push(ws);
       } catch (e) {
         console.warn(
           `[genesis] unreadable workspace manifest ${f}: ${e instanceof Error ? e.message : String(e)}`,
@@ -99,8 +106,10 @@ export class FsWorkspaceRepository implements WorkspaceRepository {
   async register(ws: Workspace): Promise<Workspace> {
     const file = this.fileFor(ws.id);
     const rec = this.coerce({ ...ws }) ?? ws;
-    // Write to a temp file + rename → the manifest is never observed half-written.
-    const tmp = `${file}.tmp`;
+    // Write to a pid-scoped temp file + rename → the manifest is never observed
+    // half-written, and two writers can't collide on a shared temp name. `.tmp`
+    // fails MANIFEST_RE, so list() ignores an orphaned temp from a crash.
+    const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, `${JSON.stringify(rec, null, 2)}\n`);
     renameSync(tmp, file);
     this.commit(`register workspace ${ws.id}`);
@@ -120,7 +129,10 @@ export class FsWorkspaceRepository implements WorkspaceRepository {
   private commit(message: string): void {
     if (!this.git) return;
     try {
-      execFileSync("git", ["-C", this.dir, "add", "-A"], { stdio: "ignore" });
+      // Bound the pathspec to `.` (relative to `-C dir`) so a mis-set
+      // GENESIS_WORKSPACES_DIR pointing INSIDE a larger repo can't sweep unrelated
+      // (possibly secret) worktree files into a genesis commit (P20 Forge SF1).
+      execFileSync("git", ["-C", this.dir, "add", "-A", "--", "."], { stdio: "ignore" });
       execFileSync(
         "git",
         [

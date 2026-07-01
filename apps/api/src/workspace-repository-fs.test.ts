@@ -73,4 +73,26 @@ describe("FsWorkspaceRepository (BRO-1629)", () => {
     );
     expect(await repo(dir).get("ws-c")).toEqual({ id: "ws-c", name: "c", rootPath: "/c" });
   });
+
+  test("register is idempotent UPSERT — same id twice → one manifest, updated fields (port contract, P20)", async () => {
+    const dir = tmp();
+    const r = repo(dir);
+    await r.register({ id: "ws-up", name: "v1", rootPath: "/v1" });
+    await r.register({ id: "ws-up", name: "v2", rootPath: "/v2" });
+    const all = await r.list();
+    expect(all.length).toBe(1); // updated, not appended
+    expect(all[0]?.name).toBe("v2");
+    expect((await r.get("ws-up"))?.rootPath).toBe("/v2");
+  });
+
+  test("skips a manifest whose internal id ≠ its filename (get/list can't diverge, P20 Forge)", async () => {
+    const dir = tmp();
+    writeFileSync(
+      join(dir, "filenameX.json"),
+      JSON.stringify({ id: "internalY", name: "y", rootPath: "/y" }),
+    );
+    const r = repo(dir);
+    await r.register({ id: "ws-ok", name: "ok", rootPath: "/ok" });
+    expect((await r.list()).map((w) => w.id)).toEqual(["ws-ok"]); // filenameX dropped
+  });
 });
