@@ -466,8 +466,7 @@ export class Supervisor {
       // workspace, never its rootPath (that path must not leak past the engine).
       if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
         throw new Error(
-          `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. ` +
-            "Recreate it, or start a new thread in another workspace.",
+          `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
         );
       }
       const result = await run({
