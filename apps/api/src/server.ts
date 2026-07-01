@@ -4,6 +4,7 @@ import {
   type Store,
   Supervisor,
   type Workspace,
+  type WorkspaceRepository,
 } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
@@ -66,8 +67,12 @@ export interface BuildOpts {
   noWorktree?: boolean;
   /** Additional selectable workspaces beyond the default (BRO-1627) — the
    *  boot-discovered registry (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES
-   *  override). Forwarded to the Supervisor; surfaced via GET /workspaces. */
+   *  override). SEEDS the repository when empty; surfaced via GET /workspaces. */
   workspaces?: Workspace[];
+  /** Workspace registry source (BRO-1629). Omit → in-memory, seeded from env
+   *  (BRO-1627 behaviour). The FS adapter makes the registry durable + runtime-
+   *  mutable (survives restart, editable from the PWA). */
+  workspaceRepository?: WorkspaceRepository;
   /** Per-event observability trace (print-engine parity, BRO-1524). */
   trace?: (sessionId: string, event: AgentEvent) => void;
 }
@@ -77,6 +82,7 @@ export function build(opts: BuildOpts) {
   const supervisor = new Supervisor({
     defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
     workspaces: opts.workspaces,
+    workspaceRepository: opts.workspaceRepository,
     hostProvider: opts.hostProvider,
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
