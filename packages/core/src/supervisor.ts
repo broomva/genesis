@@ -24,6 +24,7 @@ import {
 } from "@genesis/runner";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, TokenUsage, Turn, Workspace } from "./types";
+import { InMemoryWorkspaceRepository, type WorkspaceRepository } from "./workspace-repository";
 
 export type RunnerFn = (opts: RunOptions) => Promise<RunResult>;
 
@@ -67,10 +68,15 @@ export interface SupervisorConfig {
    *  turn-1 fallback). Always present in the registry. */
   defaultWorkspace: Workspace;
   /** Additional selectable workspaces (BRO-1627) — the boot-discovered registry
-   *  (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES override). Merged after the
-   *  default (later entries win on id collision). A new thread can bind any of
-   *  these via TurnOptions.workspaceId; the binding is sticky at session create. */
+   *  (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES override). Used to SEED the
+   *  repository when it's empty (env → seed, not source of truth — BRO-1629). A new
+   *  thread can bind any registered workspace via TurnOptions.workspaceId; the
+   *  binding is sticky at session create. */
   workspaces?: Workspace[];
+  /** The workspace registry source (BRO-1629, Phase 2.5). Omit → an in-memory
+   *  adapter seeded from `defaultWorkspace` + `workspaces` (the BRO-1627 behaviour).
+   *  The FS adapter (manifest-in-git) makes the registry runtime-mutable. */
+  workspaceRepository?: WorkspaceRepository;
   /** Resolves an ExecutionHost per session (e.g. a per-session microVM). When
    *  omitted, a StaticHostProvider wraps `host` (or a LocalHost). */
   hostProvider?: HostProvider;
@@ -165,10 +171,16 @@ export class Supervisor {
   private readonly remoteCwd?: string;
   private readonly noWorktree: boolean;
   private readonly defaultWorkspace: Workspace;
-  /** id → Workspace, the selectable registry (BRO-1627). Default first, then the
-   *  boot-discovered set (later entries win). Holds the richer registry-only
-   *  fields (noWorktree/isGitRepo) that never round-trip through the DB. */
-  private readonly workspaceRegistry: Map<string, Workspace>;
+  /** id → Workspace CACHE (BRO-1627/1629). Hydrated from the repository by
+   *  `ensureWorkspace()`, so the per-turn hot path (resolve/runTurn) reads it
+   *  synchronously. Holds the richer registry-only fields (noWorktree/isGitRepo)
+   *  that never round-trip through the DB. */
+  private workspaceRegistry: Map<string, Workspace> = new Map();
+  /** Source of truth for the registry (BRO-1629). Mutations write through here. */
+  private readonly workspaceRepository: WorkspaceRepository;
+  /** Env-derived seed (default + extras, ws-default reserved) — registered into an
+   *  EMPTY repository on first use, migrating the env snapshot into the source. */
+  private readonly workspaceSeed: readonly Workspace[];
   /** Per-thread promise chain — serializes dispatches on the same session. */
   private readonly chains = new Map<string, Promise<unknown>>();
   /** Memoized one-shot persistence of the workspace registry (async ctor work). */
@@ -194,41 +206,86 @@ export class Supervisor {
     this.remoteCwd = cfg.remoteCwd;
     this.noWorktree = cfg.noWorktree ?? false;
     this.defaultWorkspace = cfg.defaultWorkspace;
-    // Build the selectable registry (BRO-1627): default first, then the
-    // boot-discovered workspaces (a later entry with the same id wins among the
-    // EXTRAS, so an explicit GENESIS_WORKSPACES entry can override a scanned one).
-    this.workspaceRegistry = new Map();
-    this.workspaceRegistry.set(cfg.defaultWorkspace.id, cfg.defaultWorkspace);
+    // Build the env-derived SEED (BRO-1627 order preserved): default first, then the
+    // boot-discovered workspaces (a later extra with the same id wins). The default
+    // id is RESERVED (P20 M2): an extra colliding with it — a repo that slugs to
+    // `ws-default`, or an explicit override — must not shadow the genuine default,
+    // or every default-bound thread would silently re-cwd. Skip + warn.
+    const seed = new Map<string, Workspace>();
+    seed.set(cfg.defaultWorkspace.id, cfg.defaultWorkspace);
     for (const w of cfg.workspaces ?? []) {
-      // The default id is RESERVED (P20 M2): an extra with the same id — a repo
-      // that slugs to `ws-default`, or an explicit override — must not shadow the
-      // genuine default, or every default-bound thread would silently re-cwd into
-      // it. Skip + warn; the real default stays authoritative.
       if (w.id === cfg.defaultWorkspace.id) {
         console.warn(
           `[genesis] workspace "${w.id}" collides with the default workspace id; ignoring (the default can't be overridden).`,
         );
         continue;
       }
-      this.workspaceRegistry.set(w.id, w);
+      seed.set(w.id, w);
     }
+    this.workspaceSeed = [...seed.values()];
+    // The repository is the source of truth (BRO-1629). Default: in-memory, seeded
+    // from env (== the BRO-1627 registry). The FS adapter makes it runtime-mutable.
+    this.workspaceRepository =
+      cfg.workspaceRepository ?? new InMemoryWorkspaceRepository(this.workspaceSeed);
   }
 
   private ensureWorkspace(): Promise<void> {
-    // Persist the WHOLE registry (BRO-1627), idempotently, so resolve→getWorkspace
-    // keeps working and a bound thread survives the workspace being deconfigured
-    // later (the DB retains the row). Clear the memo on rejection so a transient
-    // first-dispatch failure (e.g. a Postgres connect blip) doesn't poison every
-    // later dispatch (P20 #1).
-    this.workspaceEnsured ??= Promise.all(
-      [...this.workspaceRegistry.values()].map((w) => this.store.upsertWorkspace(w)),
-    )
-      .then(() => {})
-      .catch((e) => {
-        this.workspaceEnsured = undefined;
-        throw e;
-      });
+    // Memoized registry hydration (BRO-1629). Clear the memo on rejection so a
+    // transient first-dispatch failure (e.g. a Postgres/FS blip) doesn't poison
+    // every later dispatch (P20 #1).
+    this.workspaceEnsured ??= this.loadRegistry().catch((e) => {
+      this.workspaceEnsured = undefined;
+      throw e;
+    });
     return this.workspaceEnsured;
+  }
+
+  /** Hydrate the cache from the repository (BRO-1629). Seeds an EMPTY repository
+   *  from the env seed (migrating the boot snapshot into the source of truth),
+   *  always ensures the default is present, refreshes the in-memory cache, and
+   *  mirrors the set into the Store's workspaces table (the deconfigured-workspace
+   *  DB fallback, BRO-1627 S1). Re-runnable; register/remove invalidate the memo. */
+  private async loadRegistry(): Promise<void> {
+    let all = await this.workspaceRepository.list();
+    // Seed an empty repository (first boot / fresh FS root) from the env snapshot.
+    if (all.length === 0 && this.workspaceSeed.length > 0) {
+      for (const w of this.workspaceSeed) await this.workspaceRepository.register(w);
+      all = await this.workspaceRepository.list();
+    }
+    // The default workspace is ALWAYS present (register it if the source lacks it).
+    if (!all.some((w) => w.id === this.defaultWorkspace.id)) {
+      await this.workspaceRepository.register(this.defaultWorkspace);
+      all = await this.workspaceRepository.list();
+    }
+    this.workspaceRegistry = new Map(all.map((w) => [w.id, w]));
+    // Mirror into the Store (idempotent) so a thread bound to a since-removed
+    // workspace keeps its last-known rootPath for the never-ran fallback (S1).
+    await Promise.all(all.map((w) => this.store.upsertWorkspace(w)));
+  }
+
+  /** Register a workspace at RUNTIME (BRO-1629) — writes the source + refreshes the
+   *  live cache, no restart. The caller (an auth-gated endpoint) MUST derive +
+   *  validate `rootPath` server-side; the client never names a filesystem path. */
+  async registerWorkspace(ws: Workspace): Promise<Workspace> {
+    if (ws.id === this.defaultWorkspace.id) {
+      throw new Error(`workspace id "${ws.id}" is reserved for the default workspace`);
+    }
+    const saved = await this.workspaceRepository.register(ws);
+    this.workspaceEnsured = undefined;
+    await this.ensureWorkspace();
+    return saved;
+  }
+
+  /** De-register a workspace (BRO-1629). The default can't be removed. A thread
+   *  already bound to a removed workspace keeps its binding and errors on its next
+   *  turn if it ran (the BRO-1627 S1 guard) — removal is safe for the registry,
+   *  not retroactive on live threads. Returns false if id is the default. */
+  async removeWorkspace(id: string): Promise<boolean> {
+    if (id === this.defaultWorkspace.id) return false;
+    await this.workspaceRepository.remove(id);
+    this.workspaceEnsured = undefined;
+    await this.ensureWorkspace();
+    return true;
   }
 
   /** chat-id/thread → Session. A NEW thread binds the requested workspace (BRO-1627)
@@ -442,6 +499,7 @@ export class Supervisor {
    *  last turn per session for a preview — N+1 over sessions, fine at single-user
    *  scale (one owner, a handful of threads); revisit with a JOIN if it grows. */
   async listThreads(): Promise<ThreadSummary[]> {
+    await this.ensureWorkspace(); // hydrate the cache so workspaceName resolves (BRO-1629)
     const sessions = await this.store.listSessions();
     const summaries = await Promise.all(
       sessions.map(async (s): Promise<ThreadSummary> => {
@@ -486,7 +544,8 @@ export class Supervisor {
    *  not leak past the engine even to an authenticated client (P20/CodeRabbit,
    *  defense-in-depth). Internal cwd resolution reads the registry directly, never
    *  this. Registry-backed (no Store round-trip — the live set is in memory). */
-  listWorkspaces(): Array<Pick<Workspace, "id" | "name" | "isGitRepo">> {
+  async listWorkspaces(): Promise<Array<Pick<Workspace, "id" | "name" | "isGitRepo">>> {
+    await this.ensureWorkspace();
     return [...this.workspaceRegistry.values()].map((w) => ({
       id: w.id,
       name: w.name,
