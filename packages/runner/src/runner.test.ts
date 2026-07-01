@@ -20,12 +20,14 @@ class FakeMicroVMHost implements ExecutionHost {
   readonly credentialTier = "keyed" as const;
   execCalls: string[][] = [];
   spawnCwd?: string;
+  spawnCmd?: string[];
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
     return { code: 0, stdout: "", stderr: "" };
   }
-  spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
+  spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
     this.spawnCwd = opts?.cwd;
+    this.spawnCmd = cmd;
     return streamOf(NDJSON);
   }
   async readFile() {
@@ -74,6 +76,15 @@ describe("runAgent — microVM host", () => {
     await runAgent({ prompt: "go", cwd: "/irrelevant", host, remoteCwd: "/vercel/sandbox/app" });
     expect(host.spawnCwd).toBe("/vercel/sandbox/app");
   });
+
+  test("does NOT resolve a host-LOCAL pinned path on a non-local host (BRO-1642 CodeRabbit)", async () => {
+    const host = new FakeMicroVMHost();
+    // A pin would resolve to ~/.local/share/claude/versions/<pin> on THIS box — that
+    // absolute path doesn't exist in the sandbox. The runner must pass a plain name.
+    await runAgent({ prompt: "go", cwd: "/irrelevant", host, pin: "2.1.999" });
+    expect(host.spawnCmd?.[0]).toBe("claude"); // not an absolute versions/ path
+    expect(host.spawnCmd?.[0]).not.toContain("/versions/");
+  });
 });
 
 describe("runAgent — local host worktree", () => {
@@ -101,6 +112,23 @@ describe("runAgent — local host worktree", () => {
     expect("TELEGRAM_BOT_TOKEN" in env).toBe(false);
     // PATH survives so claude + tasks still run.
     expect(typeof env.PATH === "string" || !("PATH" in process.env)).toBe(true);
+  });
+
+  test("passes the prompt via stdin, NOT argv (BRO-1642 — keeps large prompts under the OS arg cap)", async () => {
+    const host = new FakeLocalHost();
+    await runAgent({
+      prompt: "a very large prompt with inlined files",
+      cwd: "/repo",
+      host,
+      worktree: false,
+    });
+    const cmd = host.spawnCmd ?? [];
+    // The prompt must not appear anywhere on argv…
+    expect(cmd.some((a) => a.includes("very large prompt"))).toBe(false);
+    // …and `-p` is immediately followed by a flag (no positional prompt).
+    expect(cmd[cmd.indexOf("-p") + 1]).toBe("--output-format");
+    // …it rides stdin instead.
+    expect(host.spawnOpts?.input).toBe("a very large prompt with inlined files");
   });
 
   test("requests always-on summarized extended thinking (BRO-1614)", async () => {
@@ -195,6 +223,17 @@ describe("scrubAgentEnv", () => {
   test("drops undefined values", () => {
     const env = scrubAgentEnv({ A: "1", B: undefined });
     expect(env).toEqual({ A: "1" });
+  });
+
+  test("strips the nested-Claude markers so the child is a clean top-level session (BRO-1642)", () => {
+    const env = scrubAgentEnv({
+      PATH: "/usr/bin",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CLAUDECODE: "1",
+    });
+    expect(env.PATH).toBe("/usr/bin"); // kept
+    expect("CLAUDE_CODE_ENTRYPOINT" in env).toBe(false);
+    expect("CLAUDECODE" in env).toBe(false);
   });
 });
 

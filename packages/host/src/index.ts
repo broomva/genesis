@@ -15,6 +15,12 @@ export interface ExecOpts {
    *  cannot read the host's operational secrets (BRO-1527 #1). Default false
    *  (extend) keeps framework git/exec calls working with the full host env. */
   replaceEnv?: boolean;
+  /** Content to write to the child's stdin, then close it (EOF). Used to keep a
+   *  LARGE payload (the agent prompt, which inlines file attachments) OFF argv —
+   *  a single argv element over the OS cap (Linux MAX_ARG_STRLEN = 128 KiB;
+   *  Windows 32,767 chars) fails the spawn with E2BIG. `claude -p` with no
+   *  positional prompt reads it from stdin (BRO-1642, Houston channel-split). */
+  input?: string;
 }
 
 export interface ExecResult {
@@ -85,12 +91,32 @@ export class LocalHost implements ExecutionHost {
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
     // stderr is "ignore" (not "pipe"): an undrained pipe would deadlock the
     // child once its stderr buffer fills, stalling stdout/the reducer (F15).
+    // stdin is piped only when `input` is supplied (the large-prompt path,
+    // BRO-1642); otherwise "ignore" (child gets /dev/null → immediate EOF). NOT
+    // "inherit": a headless server must never hand its own stdin to a child (a
+    // non-input caller like the codex runner would otherwise read the server's
+    // stdin and could hang on a TTY/pipe). "ignore" matches Bun's headless default.
     const proc = Bun.spawn(cmd, {
       cwd: opts?.cwd,
       env: opts?.replaceEnv ? (opts.env ?? {}) : { ...process.env, ...opts?.env },
+      stdin: opts?.input !== undefined ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "ignore",
     });
+    if (opts?.input !== undefined && proc.stdin) {
+      // Write the whole payload then close stdin so the child sees EOF and starts.
+      // Swallow pipe errors (EPIPE if the child exits before reading stdin) so they
+      // don't become an unhandled rejection — the turn still resolves via exitCode
+      // (CodeRabbit).
+      try {
+        proc.stdin.write(opts.input);
+        // end() returns number | Promise<number> — normalize so a rejected flush
+        // (broken pipe) is caught rather than becoming an unhandled rejection.
+        void Promise.resolve(proc.stdin.end()).catch(() => {});
+      } catch {
+        // child closed stdin before we finished writing — proceed; exitCode reports it.
+      }
+    }
     return { stdout: toLines(proc.stdout), exitCode: proc.exited, kill: () => proc.kill() };
   }
 
@@ -145,9 +171,13 @@ export class VpsHost implements ExecutionHost {
   // here is LocalHost's inherited process.env. Passed through for interface
   // parity so a scrubbed-env caller behaves consistently across hosts.
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
+    // `input` is forwarded to the LOCAL ssh process's stdin; ssh relays it to the
+    // remote command's stdin, so the large-prompt-via-stdin path (BRO-1642) works
+    // transparently over the VPS host too.
     return this.local.spawnStream(this.wrap(cmd), {
       env: opts?.env,
       replaceEnv: opts?.replaceEnv,
+      input: opts?.input,
     });
   }
   exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult> {
