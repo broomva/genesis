@@ -717,6 +717,26 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(sink.cwd).toBe("/repos/live");
   });
 
+  test("registerWorkspace is idempotent by rootPath — a double-submit never dups a directory (BRO-1629, P11 dogfood)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    const first = await sup.registerWorkspace({
+      id: "ws-proj",
+      name: "proj",
+      rootPath: "/repos/proj",
+    });
+    // A second add of the SAME dir resolves to a DISAMBIGUATED id (the clean id
+    // is now taken) but the same rootPath — must return the EXISTING workspace,
+    // not append a second entry for one directory.
+    const second = await sup.registerWorkspace({
+      id: "ws-proj-abc123",
+      name: "proj",
+      rootPath: "/repos/proj",
+    });
+    expect(second.id).toBe("ws-proj"); // the existing id, not the new one
+    expect(second).toEqual(first);
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-proj"]);
+  });
+
   test("registerWorkspace rejects the reserved default id (BRO-1629)", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
     await expect(
