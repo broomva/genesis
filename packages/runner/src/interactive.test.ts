@@ -3,9 +3,17 @@
 // produces (the Supervisor cannot tell the engines apart).
 
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { reduceAll } from "@genesis/projection";
 import type { IREvent } from "@genesis/session-host";
-import { type EngineHub, type EngineSession, createInteractiveEngine } from "./interactive";
+import {
+  type EngineHub,
+  type EngineSession,
+  createInteractiveEngine,
+  resumableTranscriptExists,
+} from "./interactive";
 
 type Listener = (e: IREvent) => void;
 
@@ -45,8 +53,13 @@ class FakeHub implements EngineHub {
   sessions: FakeSession[] = [];
   createCalls = 0;
   /** The opts of the most recent createSession — lets a test assert spawn args
-   *  (e.g. the BRO-1623 `--model` injection). */
-  lastCreateOpts?: { sessionId?: string; initialPrompt?: string; extraArgs?: string[] };
+   *  (e.g. the BRO-1623 `--model` injection, the BRO-1630 `resume` decision). */
+  lastCreateOpts?: {
+    sessionId?: string;
+    resume?: boolean;
+    initialPrompt?: string;
+    extraArgs?: string[];
+  };
   stopped = false;
   /** Script: IR events (minus sessionId) emitted after each spawn/send.
    *  `drainScript` (optional): transcript-only events the engine pulls in when it
@@ -66,6 +79,7 @@ class FakeHub implements EngineHub {
   }
   async createSession(opts: {
     sessionId?: string;
+    resume?: boolean;
     initialPrompt?: string;
     extraArgs?: string[];
   }): Promise<FakeSession> {
@@ -669,6 +683,98 @@ describe("createInteractiveEngine", () => {
       }),
     ).rejects.toThrow(/local-host only.*microvm/);
     await engine.shutdown();
+  });
+
+  // ── Durable resume + actionable eviction (BRO-1630) ────────────────────────
+
+  test("durable resume: a respawn with a resumable transcript uses --resume + the prior id (BRO-1630 RC1)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "res1"));
+    const engine = createInteractiveEngine({ hub, transcriptExists: () => true });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "sres1" };
+    // Turn 1 spawns fresh (no resumeSessionId) — the id is minted, not resumed.
+    await engine.run({ ...opts, prompt: "one" });
+    expect(hub.lastCreateOpts?.resume).toBeFalsy();
+    // Simulate a daemon restart / eviction: the live process is gone.
+    await hub.sessions[0]?.kill();
+    // Turn 2 carries the persisted agentSessionId; its transcript "exists" → the
+    // engine RESUMES that exact id (keeps hook routing + continuity stable).
+    const r2 = await engine.run({ ...opts, prompt: "two", resumeSessionId: "prior-abc" });
+    expect(hub.createCalls).toBe(2);
+    expect(hub.lastCreateOpts?.resume).toBe(true);
+    expect(hub.lastCreateOpts?.sessionId).toBe("prior-abc");
+    expect(r2.state.sessionId).toBe("prior-abc"); // NOT a fresh random id — no amnesia
+    await engine.shutdown();
+  });
+
+  test("no resumable transcript → a fresh id, not a resume (BRO-1630 RC1 safe fallback)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "res2"));
+    const engine = createInteractiveEngine({ hub, transcriptExists: () => false });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "sres2" };
+    await engine.run({ ...opts, prompt: "one" });
+    await hub.sessions[0]?.kill();
+    const r2 = await engine.run({ ...opts, prompt: "two", resumeSessionId: "prior-xyz" });
+    expect(hub.lastCreateOpts?.resume).toBeFalsy();
+    expect(hub.lastCreateOpts?.sessionId).not.toBe("prior-xyz"); // fresh, not resumed
+    expect(r2.state.sessionId).not.toBe("prior-xyz");
+    await engine.shutdown();
+  });
+
+  test("a resume spawn suppresses per-turn --model (already bound in the resumed session) (BRO-1630)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "res3"));
+    const engine = createInteractiveEngine({ hub, transcriptExists: () => true });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "sres3" };
+    await engine.run({ ...opts, prompt: "one" });
+    await hub.sessions[0]?.kill();
+    await engine.run({ ...opts, prompt: "two", resumeSessionId: "prior-m", model: "sonnet" });
+    expect(hub.lastCreateOpts?.resume).toBe(true);
+    // --resume + --model is redundant-to-risky; the resumed session keeps its model.
+    expect(hub.lastCreateOpts?.extraArgs ?? []).not.toContain("--model");
+    await engine.shutdown();
+  });
+
+  test("a send-eviction returns an ACTIONABLE reply, not a silent (no output) (BRO-1630 RC2)", async () => {
+    const hub = new FakeHub((sid) => happyTurn(sid, "rc2"));
+    const engine = createInteractiveEngine({ hub });
+    const opts = { cwd: "/x", worktree: false as const, sessionKey: "src2" };
+    await engine.run({ ...opts, prompt: "one" });
+    const session = hub.sessions[0];
+    if (!session) throw new Error("no session");
+    session.send = async () => {
+      throw new Error("send() not acknowledged by UserPromptSubmit after 3 attempts");
+    };
+    const r2 = await engine.run({ ...opts, prompt: "two" });
+    expect(r2.state.phase).toBe("blocked");
+    // Was undefined → the UI rendered "(no output)". Now a real, resend-guiding message.
+    expect(r2.state.lastText ?? "").toContain("couldn't be delivered");
+    await engine.shutdown();
+  });
+
+  test("a turn timeout returns an actionable reply, not (no output) (BRO-1630 RC2)", async () => {
+    const hub = new FakeHub(() => []); // never completes → timeout fires
+    const engine = createInteractiveEngine({ hub, turnTimeoutMs: 60 });
+    const r = await engine.run({ prompt: "hang", cwd: "/x", worktree: false, sessionKey: "stto" });
+    expect(r.state.phase).toBe("blocked");
+    expect(r.state.lastText ?? "").toContain("time limit");
+    await engine.shutdown();
+  });
+
+  test("resumableTranscriptExists — true iff <cwd-slug>/<id>.jsonl exists (BRO-1630)", () => {
+    // Claude stores transcripts at ~/.claude/projects/<slug>/<id>.jsonl, slug =
+    // cwd with `/` and `.` → `-`. Create one at that exact path and assert the hit;
+    // isolated to a uniquely-named project dir and removed in finally.
+    const cwd = `/tmp/genesis-res-probe-${process.pid}`;
+    const id = "11111111-2222-3333-4444-555555555555";
+    const slug = cwd.replace(/[/.]/g, "-");
+    const dir = join(homedir(), ".claude", "projects", slug);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${id}.jsonl`), "{}\n");
+    try {
+      expect(resumableTranscriptExists(cwd, id)).toBe(true);
+      expect(resumableTranscriptExists(cwd, "no-such-id")).toBe(false);
+      expect(resumableTranscriptExists("/tmp/genesis-res-probe-nonexistent", id)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("transcript-surface assistant events are ignored (no double-emit)", async () => {

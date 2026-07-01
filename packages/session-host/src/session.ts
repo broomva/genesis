@@ -40,12 +40,20 @@ export interface CreateSessionOptions {
   bin?: string;
   /** Initial prompt (positional — interactive mode, never `-p`). */
   initialPrompt?: string;
-  /** Claude session UUID (default: random). */
+  /** Claude session UUID (default: random). Doubles as the resume target when
+   *  `resume` is set. */
   sessionId?: string;
-  // NOTE: `resume` was removed (P20 review B2): Claude Code assigns a NEW
-  // session_id to resumed sessions, which would silently break per-session
-  // routing (hub keys events by session_id). Resume support requires a
-  // SessionStart re-keying handshake — tracked as a follow-up.
+  /** Resume the conversation identified by `sessionId` — spawn `--resume
+   *  <sessionId>` INSTEAD of `--session-id <sessionId>` (BRO-1630). Re-verified
+   *  live on CLI 2.1.191: `claude --resume <id>` (no `--fork-session`) keeps the
+   *  SAME session_id and APPENDS to the same `<id>.jsonl` (no new file, no
+   *  re-key) — so the hub's per-session hook routing (keyed on session_id) stays
+   *  valid with no handshake. This retires the stale P20-B2 concern that resume
+   *  reassigned the id (true on the ~2026-06 CLI, no longer). `--session-id` and
+   *  `--resume` are MUTUALLY EXCLUSIVE without `--fork-session` (the CLI errors),
+   *  so resume replaces it. The caller ensures the transcript for `sessionId`
+   *  exists under `cwd` (else claude has nothing to resume — spawn fresh instead). */
+  resume?: boolean;
   /** Extra CLI args appended verbatim. */
   extraArgs?: string[];
   /** Per-session permission policy (overrides hub default). */
@@ -85,6 +93,8 @@ export class SessionHub {
   private readonly sessions = new Map<string, SessionHost>();
   private readonly listeners = new Set<(event: IREvent) => void>();
   private readonly defaultPolicy?: PermissionPolicy;
+  /** Ids we've already warned about (dedupe the unknown-session alarm). */
+  private readonly warnedUnknown = new Set<string>();
 
   constructor(opts: SessionHubOptions) {
     this.defaultPolicy = opts.policy;
@@ -137,7 +147,27 @@ export class SessionHub {
 
   /** @internal */
   dispatch(event: IREvent): void {
-    this.sessions.get(event.sessionId)?.ingest(event);
+    const host = this.sessions.get(event.sessionId);
+    // Resume-reversion alarm (BRO-1630 P20 finding #1): durable resume assumes
+    // `claude --resume <id>` PRESERVES the session id (verified on CLI 2.1.191/197
+    // — `--fork-session` is the opt-in that reassigns it). If a future CLI ever
+    // reverts to reassigning on resume, hooks would carry an UNKNOWN id, route to
+    // no SessionHost, and the turn would hang to timeout with zero events — a
+    // SILENT failure. Convert it to a LOUD, greppable diagnostic (once per id) so
+    // the regression is diagnosable instead of mysterious. Hooks are per-session
+    // and sessions are registered before spawn, so an unknown-session hook is a
+    // genuine anomaly, not normal traffic.
+    if (
+      host === undefined &&
+      event.surface === "hook" &&
+      !this.warnedUnknown.has(event.sessionId)
+    ) {
+      this.warnedUnknown.add(event.sessionId);
+      console.warn(
+        `[genesis] session-host: hook (kind=${event.kind}) for UNKNOWN session ${event.sessionId} — dropped. If this follows a --resume spawn, the CLI may have reassigned the session id (a --fork-session-style regression); durable-resume routing (BRO-1630) assumes it is preserved.`,
+      );
+    }
+    host?.ingest(event);
     for (const listener of this.listeners) listener(event);
   }
 }
@@ -184,7 +214,14 @@ export class SessionHost {
   async spawn(socketPath: string): Promise<void> {
     const bin = resolveClaudeBinary(this.opts.pin, this.opts.bin);
     const settings = JSON.stringify(buildSessionSettings({ socketPath }));
-    const argv: string[] = ["--session-id", this.sessionId, "--settings", settings];
+    // Resume vs fresh (BRO-1630): `--resume <id>` reloads the prior conversation
+    // AND keeps the same session_id on CLI 2.1.191 (verified — appends to the same
+    // <id>.jsonl), so hook routing is unaffected. `--session-id` and `--resume` are
+    // mutually exclusive without `--fork-session`, so a resume spawn omits the
+    // former. A fresh spawn pins the id via `--session-id` as before.
+    const argv: string[] = this.opts.resume
+      ? ["--resume", this.sessionId, "--settings", settings]
+      : ["--session-id", this.sessionId, "--settings", settings];
     if (this.opts.extraArgs) argv.push(...this.opts.extraArgs);
     // Always-on summarized extended thinking (BRO-1614) — parity with the print
     // engine. Pushed AFTER extraArgs so the always-on guarantee can't be silently

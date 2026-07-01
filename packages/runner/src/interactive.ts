@@ -10,13 +10,21 @@
 // shapes the stream-json parser produces, so the existing projection reducer,
 // Supervisor, and /api/chat are untouched — this is just another RunnerFn.
 //
-// Continuity model: the live process IS the continuity (no `--resume`).
-// `resumeSessionId` is acknowledged with a notice and ignored; after a daemon
-// restart a fresh agent session starts in the SAME persistent worktree
-// (context re-derivable from the repo; full resume re-keying is BRO-1485).
+// Continuity model (BRO-1630): a LIVE session is its own continuity (later turns
+// feed the running process). When there is NO live session — after a daemon
+// restart, an eviction, or an idle-kill — the engine RESUMES the thread's prior
+// Claude conversation by respawning with `--resume <priorSessionId>` when that
+// transcript is still on disk under the same cwd. Verified on CLI 2.1.191/197:
+// `--resume` (without `--fork-session`) preserves the session id and appends to
+// the same transcript, so the hub's per-session hook routing is unaffected — no
+// re-keying handshake needed. If no resumable transcript is found, a genuinely
+// fresh session starts (safe degradation). This retired the old "no `--resume`,
+// context re-derivable from the repo" limitation that dropped all conversation
+// context on every restart.
 
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalHost } from "@genesis/host";
 import { type AgentEvent, type RunState, initialState, reduce } from "@genesis/projection";
@@ -34,11 +42,35 @@ export interface EngineHub {
   createSession(opts: {
     cwd: string;
     sessionId?: string;
+    /** Resume the conversation identified by `sessionId` (BRO-1630) — spawn
+     *  `--resume <sessionId>` instead of `--session-id`. The caller guarantees
+     *  the transcript exists under `cwd`. */
+    resume?: boolean;
     pin?: string;
     bin?: string;
     initialPrompt?: string;
     extraArgs?: string[];
   }): Promise<EngineSession>;
+}
+
+/** Does a resumable Claude transcript for `sessionId` exist under `cwd`? Claude
+ *  stores transcripts at `~/.claude/projects/<slug>/<sessionId>.jsonl`, where the
+ *  project slug is the cwd with `/` and `.` replaced by `-` (verified live on CLI
+ *  2.1.191). This gates the resume decision: a hit → spawn `--resume`; a miss →
+ *  spawn fresh. SAFE DEGRADATION (BRO-1630): if the slug rule is ever wrong for an
+ *  exotic path this returns false → a fresh spawn (today's behaviour), never a
+ *  crash or a wrong-session resume. Deliberately cwd-scoped (never a global scan):
+ *  `claude --resume` is itself cwd-scoped, so a transcript under a different
+ *  project dir is not resumable from here. */
+export function resumableTranscriptExists(cwd: string, sessionId: string): boolean {
+  // NOTE: `[/.]→-` is a KNOWN-INCOMPLETE mirror of Claude's project slugger — it
+  // matches every path Claude currently produces (verified against real
+  // `~/.claude/projects/` dirs incl. `/.cache`→`--cache`), but Claude may map
+  // other characters (`_`, spaces). A mismatch only produces a FALSE NEGATIVE →
+  // fresh spawn (the safe direction). Genesis cwds are workspace roots + the
+  // `<root>/.genesis-runs/session-<uuid>` worktree path, all covered by this rule.
+  const slug = cwd.replace(/[/.]/g, "-");
+  return existsSync(join(homedir(), ".claude", "projects", slug, `${sessionId}.jsonl`));
 }
 
 export interface EngineSession {
@@ -81,6 +113,11 @@ export interface InteractiveEngineConfig {
    *  diagnostics for failures the hooks can't surface (send-not-acknowledged,
    *  turn-timeout, reset/interrupt, eviction, spawn). Wire a RunLogger here. */
   observer?: (event: IREvent) => void;
+  /** Predicate gating durable resume (BRO-1630): does a resumable transcript for
+   *  `sessionId` exist under `cwd`? Default: the real filesystem check
+   *  (`resumableTranscriptExists`). Injected in tests to exercise the resume vs
+   *  fresh decision without touching `~/.claude`. */
+  transcriptExists?: (cwd: string, sessionId: string) => boolean;
 }
 
 interface LiveSession {
@@ -214,19 +251,35 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
       }
     }
 
-    // Reuse only a LIVE session; a dead one gets a fresh sessionId (re-spawning
-    // an already-used --session-id collides with the on-disk session registry).
+    // Session id + resume decision (BRO-1630). Three cases:
+    //  1. A LIVE session exists → reuse it (the live process IS continuity; the
+    //     already-open conversation needs no resume). Keep its id.
+    //  2. No live session BUT the thread's prior Claude transcript is still on
+    //     disk under this cwd → DURABLE RESUME: respawn `--resume <priorId>`,
+    //     which keeps the same id (CLI 2.1.191) so hook routing + the persisted
+    //     agentSessionId stay stable across a daemon restart / eviction / idle-kill.
+    //  3. Neither → a genuinely fresh session with a new id.
+    // This retires the old "continuity is only the live process" limitation that
+    // dropped all context on every restart (the reported amnesia bug).
     const prior = live.get(key);
     const reuse = prior !== undefined && (await prior.session.alive());
-    const sessionId = reuse ? prior.session.sessionId : randomUUID();
-
-    // P20 round-2 #2: only warn on a GENUINE resume attempt (the Supervisor
-    // echoes agentSessionId back on every turn ≥2; matching the live session
-    // is normal operation, not a resume).
-    if (opts.resumeSessionId !== undefined && opts.resumeSessionId !== sessionId) {
-      console.warn(
-        "[genesis] interactive engine: resumeSessionId ignored — continuity is the live session (resume re-keying: BRO-1485)",
-      );
+    let sessionId: string;
+    let resume = false;
+    if (reuse) {
+      sessionId = (prior as LiveSession).session.sessionId;
+    } else if (
+      opts.resumeSessionId !== undefined &&
+      (cfg.transcriptExists ?? resumableTranscriptExists)(runCwd, opts.resumeSessionId)
+    ) {
+      sessionId = opts.resumeSessionId;
+      resume = true;
+    } else {
+      sessionId = randomUUID();
+      if (opts.resumeSessionId !== undefined) {
+        console.warn(
+          `[genesis] interactive engine: no resumable transcript for ${opts.resumeSessionId} under ${runCwd} — starting a fresh session`,
+        );
+      }
     }
 
     // Per-turn translation state (events + reducer, exactly like runAgent).
@@ -447,7 +500,16 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
         elapsedMs: Date.now() - turnStart,
         lastAssistant: lastAssistant?.slice(0, 120),
       });
-      push({ type: "result", subtype: "turn-timeout", is_error: true, session_id: sessionId });
+      push({
+        type: "result",
+        subtype: "turn-timeout",
+        is_error: true,
+        session_id: sessionId,
+        // Actionable reply instead of a bare "(no output)" (BRO-1630 RC2): with
+        // durable resume the next send re-attaches the same conversation.
+        result:
+          "⚠️ This turn ran past its time limit and the agent session was reset. Send your message again to continue — your conversation context is preserved.",
+      });
       live.delete(key);
       void entry.session?.kill().catch(() => {});
       finish();
@@ -477,7 +539,19 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // timeout path); the next dispatch respawns fresh.
           live.delete(key);
           void entry.session.kill().catch(() => {});
-          push({ type: "result", subtype: "send-failed", is_error: true, session_id: sessionId });
+          push({
+            type: "result",
+            subtype: "send-failed",
+            is_error: true,
+            session_id: sessionId,
+            // Surface an actionable message rather than a silent "(no output)"
+            // (BRO-1630 RC2). The session was evicted but its transcript persists,
+            // so the resend re-attaches via `--resume` (BRO-1630 RC1) — no lost
+            // context. Previously this turn returned lastText=undefined → the UI
+            // rendered a bare "(no output)" bubble and the user's message vanished.
+            result:
+              "⚠️ Your message couldn't be delivered to the agent session, so it was reset. Send it again — your conversation context is preserved and will resume.",
+          });
           finish();
           diag(sessionId, `send not acknowledged — session evicted: ${String(sendError)}`, {
             sessionKey: key,
@@ -487,6 +561,9 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
         entry.session = await engineHub.createSession({
           cwd: runCwd,
           sessionId,
+          // Resume the prior conversation when respawning a thread whose Claude
+          // transcript survived (BRO-1630) — spawns `--resume <sessionId>`.
+          resume,
           pin: cfg.pin,
           bin: cfg.bin,
           initialPrompt: opts.prompt,
@@ -496,9 +573,11 @@ export function createInteractiveEngine(cfg: InteractiveEngineConfig = {}): Inte
           // (the UI locks the selector once the thread has run). Only a claude-
           // shaped model is injected (vendor-boundary drop, P20) — a stray codex
           // id never reaches claude's --model. Appended after extraArgs so a
-          // caller-supplied --model would still win (last-wins).
+          // caller-supplied --model would still win (last-wins). SUPPRESSED on a
+          // resume spawn (BRO-1630): the resumed session already carries its bound
+          // model, and `--model` alongside `--resume` is redundant-to-risky.
           extraArgs:
-            opts.model && isClaudeModel(opts.model)
+            !resume && opts.model && isClaudeModel(opts.model)
               ? [...(opts.extraArgs ?? []), "--model", opts.model]
               : opts.extraArgs,
         });

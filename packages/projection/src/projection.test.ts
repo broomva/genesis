@@ -127,6 +127,33 @@ describe("projection reducer — RunPhase state machine", () => {
     expect(s.error).toBe("error_max_turns");
   });
 
+  test("an error result's own `result` becomes lastText (BRO-1630 RC2)", () => {
+    // The interactive engine attaches an actionable message on a send-failed /
+    // turn-timeout eviction; the errored branch must surface it as the reply text
+    // instead of leaving lastText undefined (which rendered a bare "(no output)").
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, {
+      type: "result",
+      subtype: "send-failed",
+      is_error: true,
+      result: "⚠️ Your message couldn't be delivered — resend.",
+    });
+    expect(s.phase).toBe("blocked");
+    expect(s.lastText).toBe("⚠️ Your message couldn't be delivered — resend.");
+  });
+
+  test("an error result WITHOUT a message leaves lastText untouched (BRO-1630 RC2 back-compat)", () => {
+    let s = reduce(initialState, { type: "system", session_id: "s" });
+    s = reduce(s, {
+      type: "assistant",
+      session_id: "s",
+      message: { role: "assistant", content: [{ type: "text", text: "partial" }] },
+    });
+    s = reduce(s, { type: "result", subtype: "error_max_turns", is_error: true });
+    expect(s.phase).toBe("blocked");
+    expect(s.lastText).toBe("partial"); // preserved — no `result` on the error event
+  });
+
   test("reduce is pure — replaying the same events yields the same state", () => {
     const evs = fixture("tool.ndjson");
     expect(reduceAll(evs)).toEqual(reduceAll(evs));
