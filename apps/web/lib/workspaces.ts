@@ -46,6 +46,89 @@ export async function fetchWorkspaces(signal?: AbortSignal): Promise<WorkspaceLi
   }
 }
 
+/** A pickable repo the engine discovered under its allow-root but hasn't
+ *  registered yet (GET /workspaces/available, BRO-1629). Only a display name +
+ *  the id it would register as — never a filesystem path. */
+export interface AvailableRepo {
+  id: string;
+  name: string;
+}
+
+/** Fetch the repos the user can add (git repos under the projects root not yet
+ *  registered). Empty on any failure OR when no projects root is configured —
+ *  the "Add a project" affordance then shows nothing to add. */
+export async function fetchAvailableWorkspaces(signal?: AbortSignal): Promise<AvailableRepo[]> {
+  try {
+    const res = await fetch("/api/workspaces/available", { signal });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { available?: unknown };
+    return Array.isArray(data.available)
+      ? data.available.filter(
+          (r): r is AvailableRepo =>
+            typeof r?.id === "string" &&
+            r.id.length > 0 &&
+            typeof r?.name === "string" &&
+            r.name.length > 0, // a blank name → blank "Add" button + POST {pick:""} (P20 Forge N2)
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The outcome of an add — the new workspace on success, or the engine's SAFE
+ *  400 message on a rejected pick (bad name / traversal / not-a-repo). */
+export type AddWorkspaceResult = { ok: true; workspace: Workspace } | { ok: false; error: string };
+
+/** Register a picked directory as a workspace (POST /workspaces). The client
+ *  sends only the directory NAME; the engine derives + validates the path. */
+export async function addWorkspace(pick: string): Promise<AddWorkspaceResult> {
+  try {
+    const res = await fetch("/api/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pick }),
+    });
+    const data = (await res.json().catch(() => ({}))) as Partial<Workspace> & { error?: unknown };
+    // Uphold the same non-empty id+name invariant fetchWorkspaces /
+    // fetchAvailableWorkspaces enforce (CodeRabbit): an empty-string id in an
+    // otherwise-ok body would make AddWorkspaceResult.workspace carry the value
+    // the rest of the file guards against (Radix <SelectItem value=""> hazard).
+    if (
+      !res.ok ||
+      typeof data.id !== "string" ||
+      data.id.length === 0 ||
+      typeof data.name !== "string" ||
+      data.name.length === 0
+    ) {
+      const error =
+        typeof data.error === "string" && data.error ? data.error : "could not add this project";
+      return { ok: false, error };
+    }
+    return {
+      ok: true,
+      workspace: {
+        id: data.id,
+        name: data.name,
+        ...(typeof data.isGitRepo === "boolean" ? { isGitRepo: data.isGitRepo } : {}),
+      },
+    };
+  } catch {
+    return { ok: false, error: "network error — could not add this project" };
+  }
+}
+
+/** De-register a workspace (DELETE /workspaces/:id). The repo directory is left
+ *  on disk; only the registry entry + its manifest are removed. */
+export async function removeWorkspace(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve the workspace a thread should show/send: the thread's bound id if it
  *  has one, else the user's default pref, else the server default — always
  *  clamped to the live list so a stale/removed id never selects nothing. Returns
