@@ -15,7 +15,13 @@ import {
   renameThread,
 } from "@/lib/threads";
 import { usePreferences } from "@/lib/use-preferences";
-import { type Workspace, fetchWorkspaces, resolveWorkspace } from "@/lib/workspaces";
+import {
+  type Workspace,
+  addWorkspace,
+  fetchWorkspaces,
+  removeWorkspace,
+  resolveWorkspace,
+} from "@/lib/workspaces";
 
 // localStorage key for the active thread (restore the conversation on reload).
 // Owned here, not in ChatView, because ChatView remounts per thread (key=threadId).
@@ -94,18 +100,42 @@ export default function ChatPage() {
     void refreshThreads();
   }, [refreshThreads]);
 
-  // Fetch the selectable workspaces once (BRO-1627). On failure the list stays
-  // empty and the picker self-hides (single-workspace behavior, unchanged).
+  // Fetch the selectable workspaces (BRO-1627). On failure the list stays empty
+  // and the picker self-hides (single-workspace behavior, unchanged). Extracted
+  // so add/remove (BRO-1629 slice 3) can re-pull the live list after mutating.
+  const refreshWorkspaces = useCallback(async (signal?: AbortSignal) => {
+    const list = await fetchWorkspaces(signal);
+    if (signal?.aborted) return;
+    setWorkspaces(list.workspaces);
+    setDefaultWorkspaceId(list.defaultWorkspace);
+  }, []);
+
   useEffect(() => {
     const ctrl = new AbortController();
-    fetchWorkspaces(ctrl.signal)
-      .then((list) => {
-        setWorkspaces(list.workspaces);
-        setDefaultWorkspaceId(list.defaultWorkspace);
-      })
-      .catch(() => {});
+    refreshWorkspaces(ctrl.signal).catch(() => {});
     return () => ctrl.abort();
-  }, []);
+  }, [refreshWorkspaces]);
+
+  // Self-serve workspace add/remove (BRO-1629 slice 3) — register a discovered
+  // repo or de-register one, then re-pull the live list so the composer picker,
+  // default-workspace pref, and manager all reflect the change without a reload.
+  const onAddWorkspace = useCallback(
+    async (pick: string) => {
+      const res = await addWorkspace(pick);
+      if (res.ok) await refreshWorkspaces();
+      return res;
+    },
+    [refreshWorkspaces],
+  );
+
+  const onRemoveWorkspace = useCallback(
+    async (id: string) => {
+      const ok = await removeWorkspace(id);
+      if (ok) await refreshWorkspaces();
+      return ok;
+    },
+    [refreshWorkspaces],
+  );
 
   // Hydrate the active thread's transcript whenever it changes. ChatView is
   // remounted by key once messages are ready, so useChat seeds with them.
@@ -276,6 +306,8 @@ export default function ChatPage() {
         onUpdate={update}
         workspaces={workspaces}
         defaultWorkspaceId={defaultWorkspaceId}
+        onAddWorkspace={onAddWorkspace}
+        onRemoveWorkspace={onRemoveWorkspace}
       />
     </div>
   );

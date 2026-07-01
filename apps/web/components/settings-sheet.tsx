@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { WorkspacesManager } from "@/components/workspaces-manager";
 import {
   ENGINE_OPTIONS,
   type SelectOption,
@@ -28,7 +29,7 @@ import {
 } from "@/lib/chat-options";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
-import { type Workspace, resolveWorkspace } from "@/lib/workspaces";
+import { type AddWorkspaceResult, type Workspace, resolveWorkspace } from "@/lib/workspaces";
 
 /** A titled settings group. */
 function Section({
@@ -115,6 +116,8 @@ export function SettingsSheet({
   onUpdate,
   workspaces,
   defaultWorkspaceId,
+  onAddWorkspace,
+  onRemoveWorkspace,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -124,6 +127,10 @@ export function SettingsSheet({
    *  self-hides when there's ≤1. `defaultWorkspaceId` is the server fallback. */
   workspaces: Workspace[];
   defaultWorkspaceId: string;
+  /** Register a picked project dir (BRO-1629 slice 3); parent refreshes the list. */
+  onAddWorkspace: (pick: string) => Promise<AddWorkspaceResult>;
+  /** De-register a workspace; parent refreshes the list. */
+  onRemoveWorkspace: (id: string) => Promise<boolean>;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -261,6 +268,15 @@ export function SettingsSheet({
                 />
               </Row>
             </Section>
+
+            {/* Projects (BRO-1629 slice 3) — add/remove the repos the agent runs
+                in, live (no restart). Self-hides when there's nothing to manage. */}
+            <WorkspacesManager
+              workspaces={workspaces}
+              defaultWorkspaceId={defaultWorkspaceId}
+              onAdd={onAddWorkspace}
+              onRemove={onRemoveWorkspace}
+            />
 
             <Section icon={Info} title="About">
               <p className="text-muted-foreground text-xs leading-relaxed">
