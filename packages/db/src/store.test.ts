@@ -122,6 +122,7 @@ describe("Supervisor + DrizzleStore — sessions become selves", () => {
     const sup1 = new Supervisor({
       defaultWorkspace: ws,
       store: store1,
+      workspaceExists: () => true, // fake ws rootPath — bypass the RC3 vanished-cwd guard
       run: fakeRunner("hello", "claude-sess-1"),
     });
     await sup1.dispatch("chat-42", "first message");
@@ -134,6 +135,7 @@ describe("Supervisor + DrizzleStore — sessions become selves", () => {
     const sup2 = new Supervisor({
       defaultWorkspace: ws,
       store: store2,
+      workspaceExists: () => true, // fake ws rootPath — bypass the RC3 vanished-cwd guard
       run: async (o) => {
         resumedWith = o.resumeSessionId;
         return {
