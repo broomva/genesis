@@ -11,6 +11,11 @@ export interface Workspace {
   id: string;
   name: string;
   isGitRepo?: boolean;
+  /** Does the workspace's directory still exist on the server? (BRO-1629 slice 4 /
+   *  BRO-1630 RC3.) Computed server-side; absent on older engines → treat as
+   *  available. `false` → the repo dir vanished; binding a new thread to it will
+   *  error at run time, so the UI marks it and blocks selection. */
+  available?: boolean;
 }
 
 export interface WorkspaceList {
@@ -34,10 +39,19 @@ export async function fetchWorkspaces(signal?: AbortSignal): Promise<WorkspaceLi
       // on an empty value, white-screening the composer. Defensive — the hardened
       // server won't, but every untrusted-input path here is rigorous.
       workspaces: Array.isArray(data.workspaces)
-        ? data.workspaces.filter(
-            (w): w is Workspace =>
-              typeof w?.id === "string" && w.id.length > 0 && typeof w?.name === "string",
-          )
+        ? data.workspaces
+            .filter(
+              (w): w is Workspace =>
+                typeof w?.id === "string" && w.id.length > 0 && typeof w?.name === "string",
+            )
+            // Preserve `available` when the engine reports it (BRO-1630 RC3); an
+            // older engine omits it → undefined → the UI treats it as available.
+            .map((w) => ({
+              id: w.id,
+              name: w.name,
+              ...(typeof w.isGitRepo === "boolean" ? { isGitRepo: w.isGitRepo } : {}),
+              ...(typeof w.available === "boolean" ? { available: w.available } : {}),
+            }))
         : [],
       defaultWorkspace: typeof data.defaultWorkspace === "string" ? data.defaultWorkspace : "",
     };

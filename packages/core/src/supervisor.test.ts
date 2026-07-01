@@ -1,10 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
 import { Supervisor, deriveTitle } from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
 
 const ws = { id: "ws-1", name: "test", rootPath: "/tmp/genesis-test" };
+
+// The default test workspace's rootPath must EXIST so the BRO-1630 RC3 vanished-
+// workspace guard (enforced on local hosts) lets dispatch through. Tests that use
+// OTHER fake rootPaths inject `workspaceExists: () => true` to bypass the guard.
+beforeAll(() => mkdirSync(ws.rootPath, { recursive: true }));
 
 function fakeRunner(
   reply: string,
@@ -537,6 +543,7 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       defaultWorkspace: ws,
       workspaces: [wsA, wsB],
       store,
+      workspaceExists: () => true, // fake /repos/* paths — bypass the RC3 guard
       run: cwdRunner(sink),
     });
     await sup.dispatch("t-ws", "go", undefined, { workspaceId: "ws-a" });
@@ -558,6 +565,7 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       defaultWorkspace: ws,
       workspaces: [wsA, wsB],
       store,
+      workspaceExists: () => true, // fake /repos/* paths — bypass the RC3 guard
       run: cwdRunner(sink),
     });
     await sup.dispatch("t-stick", "one", undefined, { workspaceId: "ws-a" });
@@ -587,6 +595,7 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       defaultWorkspace: ws,
       workspaces: [wsA, wsB],
       noWorktree: false, // global default: use worktrees
+      workspaceExists: () => true, // fake /repos/* paths — bypass the RC3 guard
       run: cwdRunner(last),
     });
     await sup.dispatch("tA", "x", undefined, { workspaceId: "ws-a" });
@@ -620,6 +629,7 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     const sup = new Supervisor({
       defaultWorkspace: ws,
       workspaces: [wsA, dupe], // later wins
+      workspaceExists: () => true, // fake /repos/* paths — bypass the RC3 guard
       run: cwdRunner(sink),
     });
     // The override's rootPath wins — asserted via the actual run cwd (listWorkspaces
@@ -634,6 +644,7 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       defaultWorkspace: ws,
       workspaces: [wsA],
       store,
+      workspaceExists: () => true, // fake /repos/alpha — bypass the RC3 guard
       run: fakeRunner("x"),
     });
     await sup.dispatch("twl", "go", undefined, { workspaceId: "ws-a" });
@@ -685,7 +696,12 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       phase: "idle",
       createdAt: new Date().toISOString(), // no agentSessionId → never ran
     });
-    const sup = new Supervisor({ defaultWorkspace: ws, store, run: cwdRunner(sink) });
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      store,
+      workspaceExists: () => true, // fake /repos/y — bypass the RC3 guard (tests fallback, not fs)
+      run: cwdRunner(sink),
+    });
     await sup.dispatch("ty", "first");
     expect(sink.cwd).toBe("/repos/y");
   });
@@ -708,7 +724,11 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
 
   test("registerWorkspace adds a workspace at runtime (no restart) — bindable + listed (BRO-1629)", async () => {
     const sink: { cwd?: string } = {};
-    const sup = new Supervisor({ defaultWorkspace: ws, run: cwdRunner(sink) });
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaceExists: () => true, // fake /repos/live — bypass the RC3 guard
+      run: cwdRunner(sink),
+    });
     expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1"]); // just the default
     await sup.registerWorkspace({ id: "ws-live", name: "live", rootPath: "/repos/live" });
     expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-live"]);
@@ -800,5 +820,79 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
       sup.registerWorkspace({ id: "ws-q", name: "q", rootPath: "/q" }),
     ]);
     expect((await sup.listWorkspaces()).map((w) => w.id).sort()).toEqual(["ws-1", "ws-p", "ws-q"]);
+  });
+});
+
+describe("supervisor — workspace availability guard (BRO-1629 slice 4 / BRO-1630 RC3)", () => {
+  const gone = { id: "ws-gone", name: "ghost", rootPath: `/tmp/genesis-vanished-${process.pid}` };
+
+  test("dispatch into a vanished rootPath throws a clear error and NEVER spawns", async () => {
+    let ran = false;
+    const sup = new Supervisor({
+      defaultWorkspace: gone, // real existsSync → the dir does not exist → guarded
+      run: async () => {
+        ran = true;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "x", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await expect(sup.dispatch("t-vanished", "hi")).rejects.toThrow(/unavailable|no longer exists/i);
+    expect(ran).toBe(false); // guarded BEFORE the runner was invoked (no phantom-cwd spawn)
+  });
+
+  test("the guard is skipped for NON-local hosts (repo lives inside the VM)", async () => {
+    let ran = false;
+    const microHost = {
+      kind: "microvm" as const,
+      exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+      spawnStream: () => {
+        throw new Error("unused");
+      },
+    };
+    const sup = new Supervisor({
+      defaultWorkspace: gone, // vanished LOCAL path, but the host is a microVM
+      host: microHost as unknown as import("@genesis/host").ExecutionHost,
+      run: async () => {
+        ran = true;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    const r = await sup.dispatch("t-micro", "hi");
+    expect(ran).toBe(true); // no local existsSync check for a microVM host
+    expect(r.phase).toBe("done");
+  });
+
+  test("listWorkspaces annotates availability (present → true, vanished → false)", async () => {
+    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [gone], run: fakeRunner("x") });
+    const list = await sup.listWorkspaces();
+    expect(list.find((w) => w.id === ws.id)?.available).toBe(true); // beforeAll mkdir'd
+    expect(list.find((w) => w.id === gone.id)?.available).toBe(false);
+    // Still a public DTO — availability never leaks the rootPath.
+    for (const w of list) expect("rootPath" in w).toBe(false);
+  });
+
+  test("an injected workspaceExists bypasses the guard (fake-path unit tests)", async () => {
+    let ran = false;
+    const sup = new Supervisor({
+      defaultWorkspace: gone,
+      workspaceExists: () => true, // pretend it exists
+      run: async () => {
+        ran = true;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("t-inject", "hi");
+    expect(ran).toBe(true);
   });
 });

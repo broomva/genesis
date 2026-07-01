@@ -8,6 +8,7 @@
 // The store is async (Phase 2) so a durable Drizzle/Postgres backend can be
 // swapped in behind the same Supervisor — sessions survive a restart.
 
+import { existsSync } from "node:fs";
 import {
   type ExecutionHost,
   type HostProvider,
@@ -111,6 +112,10 @@ export interface SupervisorConfig {
    *  checks out only the outer repo's tracked files, missing the nested ones).
    *  Continuity then relies on the persistent live session, not the worktree. */
   noWorktree?: boolean;
+  /** Does a workspace rootPath exist on disk? (BRO-1629 slice 4 / BRO-1630 RC3.)
+   *  Default: `existsSync`. Injected in tests so fake rootPaths don't trip the
+   *  vanished-workspace guard (which is enforced only for LOCAL hosts). */
+  workspaceExists?: (rootPath: string) => boolean;
 }
 
 export interface DispatchResult {
@@ -185,6 +190,9 @@ export class Supervisor {
   private readonly chains = new Map<string, Promise<unknown>>();
   /** Memoized one-shot persistence of the workspace registry (async ctor work). */
   private workspaceEnsured?: Promise<void>;
+  /** rootPath-existence probe (BRO-1629 slice 4 / BRO-1630 RC3); `existsSync` in
+   *  production, overridable in tests. */
+  private readonly workspaceExists: (rootPath: string) => boolean;
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
@@ -205,6 +213,7 @@ export class Supervisor {
     this.extraArgs = cfg.extraArgs;
     this.remoteCwd = cfg.remoteCwd;
     this.noWorktree = cfg.noWorktree ?? false;
+    this.workspaceExists = cfg.workspaceExists ?? existsSync;
     this.defaultWorkspace = cfg.defaultWorkspace;
     // Build the env-derived SEED (BRO-1627 order preserved): default first, then the
     // boot-discovered workspaces (a later extra with the same id wins). The default
@@ -267,6 +276,18 @@ export class Supervisor {
       [this.defaultWorkspace.id, this.defaultWorkspace],
       ...nonDefault.map((w) => [w.id, w] as [string, Workspace]),
     ]);
+    // Reconciliation observability (BRO-1629 slice 4 / BRO-1630 RC3): warn LOUDLY
+    // for any registered workspace whose rootPath has vanished from disk — the
+    // dispatch-time guard blocks binding it, but a boot-time signal lets the
+    // operator recreate the dir (or re-point GENESIS_WORKSPACE) before a user hits
+    // it. Especially important for the DEFAULT workspace, which cannot be removed.
+    for (const w of this.workspaceRegistry.values()) {
+      if (!this.workspaceExists(w.rootPath)) {
+        console.warn(
+          `[genesis] workspace "${w.id}" rootPath is missing on disk${w.id === this.defaultWorkspace.id ? " (this is the DEFAULT workspace — new threads will fail until it exists)" : ""}. Threads bound to it will be refused at dispatch until the directory is restored.`,
+        );
+      }
+    }
     // Mirror the CORRECTED set into the Store (idempotent) so a thread bound to a
     // since-removed workspace keeps its last-known rootPath for the never-ran
     // fallback (S1) — and the mirrored default row is the genuine one, not a shadow.
@@ -435,6 +456,20 @@ export class Supervisor {
       this.runners[this.defaultEngine] ??
       runAgent;
     try {
+      // Workspace-availability guard (BRO-1629 slice 4 / BRO-1630 RC3): refuse to
+      // run into a rootPath that has vanished from disk (deleted out-of-band, an
+      // unmounted volume). Without this, a LOCAL spawn falls back to the process
+      // cwd (e.g. /home/agent) and the agent silently runs in the WRONG place —
+      // the "working directory isn't a git repo" symptom. LOCAL hosts only: a
+      // microVM/remote host runs the repo INSIDE the VM, so a local existsSync of
+      // rootPath is meaningless (and would false-positive). The error names the
+      // workspace, never its rootPath (that path must not leak past the engine).
+      if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
+        throw new Error(
+          `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. ` +
+            "Recreate it, or start a new thread in another workspace.",
+        );
+      }
       const result = await run({
         prompt: text,
         cwd: workspace.rootPath,
@@ -579,13 +614,24 @@ export class Supervisor {
    *  `noWorktree`): the client picker needs only id + name, and a rootPath must
    *  not leak past the engine even to an authenticated client (P20/CodeRabbit,
    *  defense-in-depth). Internal cwd resolution reads the registry directly, never
-   *  this. Registry-backed (no Store round-trip — the live set is in memory). */
-  async listWorkspaces(): Promise<Array<Pick<Workspace, "id" | "name" | "isGitRepo">>> {
+   *  this. Registry-backed (no Store round-trip — the live set is in memory).
+   *
+   *  `available` (BRO-1629 slice 4 / BRO-1630 RC3): does the workspace's rootPath
+   *  still exist on disk? A vanished directory (deleted out-of-band, an unmounted
+   *  volume) is a live property of the filesystem, so it is COMPUTED here rather
+   *  than persisted (a transient unmount self-heals when it returns — no stale
+   *  flag). The client can render an unavailable workspace distinctly instead of
+   *  letting a thread bind one that will error at cwd time. rootPath still never
+   *  leaves the server — only the boolean. */
+  async listWorkspaces(): Promise<
+    Array<Pick<Workspace, "id" | "name" | "isGitRepo"> & { available: boolean }>
+  > {
     await this.ensureWorkspace();
     return [...this.workspaceRegistry.values()].map((w) => ({
       id: w.id,
       name: w.name,
       isGitRepo: w.isGitRepo,
+      available: this.workspaceExists(w.rootPath),
     }));
   }
 
