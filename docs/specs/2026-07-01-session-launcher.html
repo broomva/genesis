@@ -1,0 +1,179 @@
+<!doctype html>
+<!--
+meta:
+  slug: session-launcher
+  ticket: (epic TBD) · relates BRO-1629, BRO-1620, BRO-1622, BRO-1623, BRO-1573, BRO-1512, BRO-1567, BRO-1627
+  status: design
+  date: 2026-07-01
+  decisions:
+    - session-init model = HYBRID (chat-first quick-start retained + optional pre-session configurator card)
+    - first build = BRO-1629 slice 5 (New Workspace by git URL)
+    - host picker = DEFERRED (single host today)
+  inspiration: Omnara (YC S25) New Session configurator + sidebar grouping — research/entities/tool/omnara.md
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Genesis — Session Launcher (design)</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#182031; --line:#243043; --line2:#2f3d55;
+    --ink:#e6edf7; --muted:#93a1b8; --dim:#6b7a93;
+    --blue:#4c8dff; --green:#31c48d; --amber:#f6b73c; --violet:#a78bfa; --red:#f2705a;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0a0d13,#0b0e14 40%);color:var(--ink);
+    font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    -webkit-font-smoothing:antialiased;padding:0 0 96px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+  header{padding:56px 0 24px;border-bottom:1px solid var(--line)}
+  .kick{color:var(--blue);font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  h1{font-size:34px;line-height:1.12;margin:14px 0 8px;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:16px;max-width:74ch}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .pill{font:600 11px/1 var(--mono);color:var(--muted);background:var(--panel2);
+    border:1px solid var(--line2);border-radius:999px;padding:6px 11px}
+  .pill b{color:var(--ink);font-weight:700}
+  h2{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);
+    margin:52px 0 4px;font-family:var(--mono)}
+  h2 + .lead{color:var(--muted);margin:0 0 20px;font-size:15px}
+  h3{font-size:19px;margin:26px 0 8px;letter-spacing:-.01em}
+  p{color:#cdd7e6}
+  code{font:600 13px/1 var(--mono);background:#0f1420;border:1px solid var(--line);
+    border-radius:6px;padding:2px 6px;color:#cfe0ff}
+  .grid{display:grid;gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font:600 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}
+  td b{color:var(--ink)}
+  .tag{font:600 10px/1 var(--mono);border-radius:5px;padding:3px 7px;white-space:nowrap;display:inline-block}
+  .t-have{color:#0a2018;background:#173d2d;border:1px solid #245a41}
+  .t-move{color:#1c1602;background:#3d3113;border:1px solid #5a4a1f}
+  .t-new{color:#1a0f2e;background:#2c2148;border:1px solid #453473;color:#d8c9ff}
+  .t-defer{color:#22262e;background:#232a36;border:1px solid #33404f;color:#93a1b8}
+  .phase{display:flex;gap:14px;align-items:flex-start;padding:14px 0;border-bottom:1px solid var(--line)}
+  .phase:last-child{border-bottom:0}
+  .pnum{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    font:700 14px/1 var(--mono);background:var(--panel2);border:1px solid var(--line2)}
+  .p-a .pnum{color:var(--green);border-color:#245a41}
+  .p-b .pnum{color:var(--blue);border-color:#2b4a80}
+  .p-c .pnum{color:var(--violet);border-color:#453473}
+  .p-d .pnum{color:var(--dim)}
+  .phase h4{margin:1px 0 3px;font-size:15px}
+  .phase p{margin:0;color:var(--muted);font-size:14px}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0;color:#cdd7e6}
+  .note{border-left:3px solid var(--blue);background:#0f1728;padding:12px 16px;border-radius:0 10px 10px 0;color:#c3d2e8;font-size:14px;margin:14px 0}
+  .note.warn{border-color:var(--amber);background:#1c1708}
+  .mock{background:#0d1119;border:1px solid var(--line2);border-radius:16px;padding:6px}
+  svg{display:block;width:100%;height:auto}
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  a{color:var(--blue);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="kick">Genesis · Design Spec</div>
+  <h1>Session Launcher</h1>
+  <p class="sub">An Omnara-inspired new-session experience: surface the <em>sticky</em> session bindings — workspace, engine, model, effort, and repo-root-vs-worktree — up front where they actually take effect, add a first-class <b>New Workspace</b> action (incl. clone-by-URL), and let the session list group by workspace / worktree / session. Hybrid: the chat-first quick-start stays; the configurator is the enriched landing.</p>
+  <div class="meta">
+    <span class="pill">status <b>design</b></span>
+    <span class="pill">model <b>hybrid</b></span>
+    <span class="pill">first build <b>slice 5 (git-URL)</b></span>
+    <span class="pill">host picker <b>deferred</b></span>
+    <span class="pill">inspiration <b>Omnara YC-S25</b></span>
+  </div>
+</header>
+
+<h2>Why</h2>
+<p class="lead">The problem this closes, and the insight from Omnara.</p>
+<div class="card">
+<p>Genesis is <b>chat-first</b>: you start typing and the <em>first turn</em> binds workspace + engine + model, then those selectors <b>lock</b> (<code>workspaceLocked = messages.length&gt;0</code>; interactive model spawn-pinned after the first assistant turn). The controls live in the <em>composer</em> — the one place they can't be freely changed once the session is real.</p>
+<p>Omnara inverts this: a <b>New Session configurator</b> presents every binding <em>before</em> the session exists — <code>Using&nbsp;host · start&nbsp;engine · model · effort · in&nbsp;workspace · on&nbsp;root|worktree</code> → <b>Start Session</b> — plus <b>New Workspace</b> and a sidebar that groups by <b>Workspaces / Worktrees / Sessions</b>. The realization: <b>Genesis already has almost all of these primitives</b> — they're just scattered in the composer and exposed <em>after</em> they've locked. The launcher <em>relocates</em> them to create-time (when they bind) and adds the two genuinely-new bits: a per-session root/worktree toggle and session grouping.</p>
+</div>
+
+<h2>Mapping</h2>
+<p class="lead">Every Omnara launcher row against what Genesis ships today.</p>
+<div class="card" style="padding:6px 10px">
+<table>
+<thead><tr><th>Omnara row</th><th>Genesis today</th><th>Work</th></tr></thead>
+<tbody>
+<tr><td><b>Using</b> host</td><td>HostProvider seam (local / vps / microvm); no UI, single host deployed</td><td><span class="tag t-defer">DEFER</span> picker until multi-host</td></tr>
+<tr><td><b>start</b> engine</td><td>Registry print / interactive / codex + composer selector (BRO-1620); capability-gating BRO-1622 open</td><td><span class="tag t-move">RELOCATE</span> + finish BRO-1622</td></tr>
+<tr><td><b>model</b></td><td>Composer model selector (BRO-1623); spawn-pinned for interactive</td><td><span class="tag t-move">RELOCATE</span> to pre-lock</td></tr>
+<tr><td><b>effort</b></td><td>Composer effort selector (BRO-1573); interactive ignores</td><td><span class="tag t-move">RELOCATE</span></td></tr>
+<tr><td><b>in</b> workspace</td><td>Per-thread workspace picker (BRO-1627); sticky at create</td><td><span class="tag t-move">RELOCATE</span> — its natural home</td></tr>
+<tr><td><b>New Workspace</b></td><td>slice 3 discover→pick (add-project UI); <b>slice 5 add-by-URL open</b></td><td><span class="tag t-new">BUILD</span> slice 5 + entry point</td></tr>
+<tr><td><b>on</b> root / worktree</td><td>Per-<em>workspace</em> <code>noWorktree</code> (BRO-1512), config-only</td><td><span class="tag t-new">NEW</span> per-<em>session</em> toggle</td></tr>
+<tr><td><b>Start Session →</b></td><td>Implicit (first message auto-binds)</td><td><span class="tag t-new">NEW</span> explicit configure-then-start</td></tr>
+<tr><td>Sidebar <b>Workspaces / Worktrees / Sessions</b> + Recent</td><td>Flat thread list, newest-first (BRO-1567)</td><td><span class="tag t-new">NEW</span> grouping + filter</td></tr>
+</tbody>
+</table>
+</div>
+<div class="note">Net: <b>5 of 8 rows already exist</b> as working primitives (engine, model, effort, workspace, worktree-posture). The launcher is mostly <em>consolidation + relocation</em>; only the root/worktree toggle, explicit Start, session grouping, and slice-5 clone are new build.</div>
+
+<h2>The launcher (hybrid)</h2>
+<p class="lead">Quick-start stays for speed; the configurator is the enriched New Session landing, collapsible via <em>show more / less</em>.</p>
+<div class="mock" role="img" aria-label="Session Launcher configurator card mock">
+<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Inter,sans-serif">
+  <rect x="0" y="0" width="900" height="430" rx="14" fill="#0d1119"/>
+  <!-- card -->
+  <rect x="150" y="26" width="600" height="330" rx="16" fill="#121722" stroke="#243043"/>
+  <text x="184" y="72" fill="#93a1b8" font-size="19">Using</text>
+  <g><rect x="270" y="52" width="220" height="30" rx="8" fill="#182031" stroke="#2f3d55"/><text x="286" y="72" fill="#e6edf7" font-size="15">🖥  Carlos-MacBook ▾</text></g>
+  <text x="184" y="118" fill="#93a1b8" font-size="19">start</text>
+  <g><rect x="270" y="98" width="220" height="30" rx="8" fill="#182031" stroke="#2f3d55"/><text x="286" y="118" fill="#e6edf7" font-size="15">✳ Claude Code ▾</text></g>
+  <g><rect x="300" y="136" width="200" height="26" rx="7" fill="#0f1420" stroke="#243043"/><text x="314" y="154" fill="#cfe0ff" font-size="13" font-family="monospace">model  Opus 4.8 (1M) ▾</text></g>
+  <g><rect x="300" y="168" width="200" height="26" rx="7" fill="#0f1420" stroke="#243043"/><text x="314" y="186" fill="#cfe0ff" font-size="13" font-family="monospace">effort  Extra High ▾</text></g>
+  <text x="184" y="230" fill="#93a1b8" font-size="19">in</text>
+  <g><rect x="270" y="210" width="220" height="30" rx="8" fill="#182031" stroke="#2f3d55"/><text x="286" y="230" fill="#e6edf7" font-size="15">&lt;/&gt; broomva ▾</text></g>
+  <g><rect x="500" y="210" width="120" height="30" rx="8" fill="#141b12" stroke="#245a41"/><text x="516" y="230" fill="#31c48d" font-size="13">+ New Workspace</text></g>
+  <text x="184" y="276" fill="#93a1b8" font-size="19">on</text>
+  <g><rect x="270" y="256" width="150" height="30" rx="8" fill="#182031" stroke="#2f3d55"/><text x="286" y="276" fill="#e6edf7" font-size="15">⑂ repo root ▾</text></g>
+  <text x="428" y="276" fill="#6b7a93" font-size="12">↳ root · new worktree</text>
+  <text x="716" y="316" fill="#4c8dff" font-size="13" text-anchor="end" text-decoration="underline">show less</text>
+  <!-- start button -->
+  <rect x="184" y="376" width="532" height="42" rx="11" fill="#0f1728" stroke="#2b4a80"/>
+  <text x="450" y="403" fill="#e6edf7" font-size="16" text-anchor="middle" font-weight="600">Start Session →</text>
+</svg>
+</div>
+<ul>
+  <li><b>Rows are the sticky bindings.</b> Each maps to an existing server contract: engine → <code>engine</code>, model → <code>model</code>, effort → <code>effort</code>, workspace → <code>workspaceId</code> (all already parsed by <code>parseChatRequest</code> in <code>chat-sdk.ts</code>). The launcher writes them into the <em>first</em> <code>/api/chat</code> call — no new binding mechanics, just an earlier surface.</li>
+  <li><b>Quick-start unchanged:</b> typing in an empty composer still works with defaults (last-used workspace/engine/model), so speed isn't taxed. The card is the <em>option</em>, not a gate.</li>
+  <li><b>Root vs worktree</b> becomes a per-session choice that sets the run cwd (<code>workspace.rootPath</code> vs a cut worktree) — plumbs a new <code>noWorktree</code>-equivalent per turn-1, on top of BRO-1512's per-workspace default.</li>
+</ul>
+
+<h2>Sidebar grouping</h2>
+<p class="lead">The 2nd screenshot: a <code>Workspaces / Worktrees / Sessions</code> switch + Recent sort over the (86+) thread list.</p>
+<div class="card">
+<p>Today the drawer is a flat newest-first list (BRO-1567). Add a grouping selector: <b>Sessions</b> (today's flat list), <b>Workspaces</b> (threads grouped under their bound workspace — the DTO already carries <code>workspaceId</code>/<code>workspaceName</code> via <code>listThreads</code>), <b>Worktrees</b> (grouped by the per-session worktree branch when not root-mode). Pure client-side projection over data the thread summary already returns — no engine change for Sessions/Workspaces; Worktrees needs the worktree label surfaced in the summary.</p>
+</div>
+
+<h2>Phasing</h2>
+<p class="lead">Build order (decided): slice 5 → launcher card → grouping → host picker.</p>
+<div class="card" style="padding:8px 22px">
+  <div class="phase p-a"><div class="pnum">A</div><div><h4>New Workspace by git URL — BRO-1629 slice 5 <span class="tag t-new">first</span></h4><p><code>POST /workspaces {gitUrl}</code> → validate URL (block <code>file://</code>, credentialed ssh, SSRF hosts) → clone into the <code>GENESIS_PROJECTS_ROOT</code> allow-root → register via <code>FsWorkspaceRepository</code> + idempotent <code>registerWorkspace</code>. PWA "New Workspace" affordance gains a URL field beside discover→pick. Security spine intact: client names a URL, never a path. Standalone; ships value immediately.</p></div></div>
+  <div class="phase p-b"><div class="pnum">B</div><div><h4>Launcher configurator card + root/worktree toggle</h4><p>Relocate engine/model/effort/workspace selectors into a pre-session card (reusing the existing <code>PromptInput*</code> selects + body params); add the explicit <b>Start Session</b> and the per-session root/worktree toggle. Finish BRO-1622 engine capability-gating here. Keep quick-start.</p></div></div>
+  <div class="phase p-c"><div class="pnum">C</div><div><h4>Sidebar grouping / filter</h4><p>Workspaces / Worktrees / Sessions switch + Recent sort. Mostly client-side over <code>listThreads</code>; surface the worktree label in the thread summary for the Worktrees mode.</p></div></div>
+  <div class="phase p-d"><div class="pnum">D</div><div><h4>Host picker <span class="tag t-defer">deferred</span></h4><p>Only when multi-host is real. The <code>HostProvider</code> seam already exists; a picker would select the lease target. No work until a 2nd host is deployed.</p></div></div>
+</div>
+
+<h2>Decisions &amp; open questions</h2>
+<div class="grid" style="grid-template-columns:1fr 1fr">
+  <div class="card"><h3 style="margin-top:0">Decided</h3>
+    <ul><li><b>Hybrid</b> session-init — quick-start retained, configurator is the enriched landing.</li><li><b>Slice 5</b> (git-URL clone) builds first.</li><li><b>Host picker deferred</b> — single host today.</li></ul></div>
+  <div class="card"><h3 style="margin-top:0">Open</h3>
+    <ul><li>Does <b>Start Session</b> create an empty thread eagerly, or defer thread creation to the first message (keeps ghost-thread count down)?</li><li>Worktree mode: expose <b>branch name</b> at create, or auto-name <code>genesis/session-&lt;id&gt;</code>?</li><li>Grouping: server-side worktree label on the summary, or derive client-side from the session's branch?</li></ul></div>
+</div>
+
+<div class="note warn"><b>Testability:</b> BRO-1634 (composer not headlessly drivable) applies doubly to the launcher — build it with stable <code>data-testid</code>s so the New-Session flow is E2E-checkable from day one.</div>
+
+<div class="foot">
+Genesis · Session Launcher design · 2026-07-01 · relates BRO-1629 (substrate), BRO-1620/1622 (engine), BRO-1623/1573 (model/effort), BRO-1512 (worktree), BRO-1567/1627 (threads/workspace). Inspiration: <a href="#">research/entities/tool/omnara.md</a>.
+</div>
+</div>
+</body>
+</html>
