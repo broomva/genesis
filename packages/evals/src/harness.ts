@@ -114,6 +114,11 @@ export async function runEvalCase(
         ? { ...WORKSPACE, rootPath: opts.workspaceRoot as string }
         : WORKSPACE,
       run,
+      // Scripted evals use a FAKE workspace (WORKSPACE) whose rootPath doesn't
+      // exist and a runner that spawns nothing → bypass the BRO-1630 RC3 vanished-
+      // cwd guard. Live evals run the real agent against opts.workspaceRoot, which
+      // the harness validated exists above, so they keep the real (default) guard.
+      workspaceExists: opts.live ? undefined : () => true,
       // Live keeps worktree isolation ON (noWorktree:false) so an eval can't
       // mutate the target checkout's main tree. Scripted never touches the FS
       // (the fake runner spawns nothing), so the flag is irrelevant there.
