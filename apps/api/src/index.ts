@@ -18,6 +18,7 @@ import {
   runCodex,
 } from "@genesis/runner";
 import { build } from "./server";
+import { FsWorkspaceRepository } from "./workspace-repository-fs";
 import { discoverWorkspaces } from "./workspaces";
 
 const defaultDataDir = () =>
@@ -128,6 +129,15 @@ const port = Number(process.env.PORT ?? 8787);
 // GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES. The edge logic lives in ./workspaces
 // so it's unit-testable without booting this server module.
 const workspaces = discoverWorkspaces(process.env);
+
+// Durable, runtime-mutable registry (BRO-1629, Phase 2.5) — a directory of JSON
+// manifests, git-logged if it's a repo. OPT-IN via GENESIS_WORKSPACES_DIR: env
+// discovery SEEDS it on first empty boot, then it's the source (survives restart,
+// editable at runtime). Unset → in-memory, re-read from env each boot (the
+// BRO-1627 behaviour) — so existing deploys are unchanged until they opt in.
+const workspaceRepository = process.env.GENESIS_WORKSPACES_DIR
+  ? new FsWorkspaceRepository(process.env.GENESIS_WORKSPACES_DIR)
+  : undefined;
 
 // NOTE (Phase 2 Slice A): dispatch is serialized per-thread IN-PROCESS only.
 // Run a SINGLE instance until Slice B adds Upstash slot-locks — two replicas on
@@ -286,7 +296,11 @@ const { app, websocket } = build({
   workspaceRoot,
   // Selectable workspaces beyond the default (BRO-1627) — empty unless an operator
   // sets GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES (then the picker self-shows).
+  // These SEED the repository below when it's empty (BRO-1629).
   workspaces,
+  // Durable, runtime-mutable registry source (BRO-1629) — FS manifests when
+  // GENESIS_WORKSPACES_DIR is set, else undefined → in-memory (env each boot).
+  workspaceRepository,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
   store,
