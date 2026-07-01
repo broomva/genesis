@@ -1,10 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  type ChatStatus,
-  deriveRunMode,
-  fetchThreadStatus,
-  isTerminalPhase,
-} from "./thread-status";
+import { type ChatStatus, deriveRunMode, fetchThreadStatus, isRunningPhase } from "./thread-status";
 import type { ThreadPhase } from "./threads";
 
 const origFetch = global.fetch;
@@ -12,15 +7,17 @@ afterEach(() => {
   global.fetch = origFetch;
 });
 
-describe("isTerminalPhase (BRO-1640)", () => {
-  test("done / blocked / idle / null are terminal", () => {
-    for (const p of ["done", "blocked", "idle", null, undefined] as const) {
-      expect(isTerminalPhase(p)).toBe(true);
-    }
+describe("isRunningPhase (BRO-1640)", () => {
+  test("running / awaiting are in-flight", () => {
+    expect(isRunningPhase("running")).toBe(true);
+    expect(isRunningPhase("awaiting")).toBe(true);
   });
-  test("running / awaiting are NOT terminal (keep polling)", () => {
-    expect(isTerminalPhase("running")).toBe(false);
-    expect(isTerminalPhase("awaiting")).toBe(false);
+  test("done / blocked / idle are NOT running", () => {
+    for (const p of ["done", "blocked", "idle"] as const) expect(isRunningPhase(p)).toBe(false);
+  });
+  test("null / undefined (unknown) are NOT running — but callers must not treat them as SETTLED (CodeRabbit)", () => {
+    expect(isRunningPhase(null)).toBe(false);
+    expect(isRunningPhase(undefined)).toBe(false);
   });
 });
 

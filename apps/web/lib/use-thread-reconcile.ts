@@ -16,7 +16,7 @@ import {
   type RunMode,
   deriveRunMode,
   fetchThreadStatus,
-  isTerminalPhase,
+  isRunningPhase,
 } from "./thread-status";
 import { type ThreadPhase, fetchThreadMessages } from "./threads";
 
@@ -55,8 +55,8 @@ export function useThreadReconcile(opts: {
   // Latest live state, read by the foreground handler to decide whether a reconcile
   // is even warranted (skip it for a settled idle thread — no need to refetch +
   // replace messages on every tab focus).
-  const stateRef = useRef({ liveStatus, serverPhase });
-  stateRef.current = { liveStatus, serverPhase };
+  const stateRef = useRef({ liveStatus, serverPhase, unresolved });
+  stateRef.current = { liveStatus, serverPhase, unresolved };
   // Guard async setState after unmount (thread switch remounts ChatView) — P20 HIGH-3b.
   const mounted = useRef(true);
   useEffect(() => {
@@ -105,8 +105,11 @@ export function useThreadReconcile(opts: {
   useEffect(() => {
     const onForeground = () => {
       if (document.visibilityState === "hidden") return;
-      const { liveStatus: ls, serverPhase: sp } = stateRef.current;
-      if (ls === "error" || !isTerminalPhase(sp)) void reconcile();
+      const { liveStatus: ls, serverPhase: sp, unresolved: unr } = stateRef.current;
+      // Reconcile only when there's something to catch up on: the stream errored, a
+      // turn is (last-known) running, or a prior error is still unresolved. A null
+      // phase alone (unknown, but no error/run) is NOT a reason to refetch.
+      if (ls === "error" || isRunningPhase(sp) || unr) void reconcile();
     };
     document.addEventListener("visibilitychange", onForeground);
     window.addEventListener("pageshow", onForeground);
@@ -122,17 +125,30 @@ export function useThreadReconcile(opts: {
     };
   }, [reconcile]);
 
-  // (3) While the server turn is running but no live stream is delivering it (dropped
-  // or opened a running thread), poll until it settles so the result lands with no
-  // user action. Pauses while the tab is hidden.
+  // (3) Poll until the turn settles when no live stream is delivering it: either the
+  // server turn is running (dropped stream / opened a running thread), or a prior
+  // error is unresolved (engine was unreachable — keep retrying until it answers).
+  // A null/settled phase with no unresolved error does NOT poll. Pauses while hidden.
   useEffect(() => {
-    if (isTerminalPhase(serverPhase)) return; // nothing running
+    if (!isRunningPhase(serverPhase) && !unresolved) return; // nothing to poll for
     if (liveStatus === "submitted" || liveStatus === "streaming") return; // stream is live
     const id = setInterval(() => {
       if (document.visibilityState !== "hidden") void reconcile();
     }, POLL_MS);
     return () => clearInterval(id);
-  }, [serverPhase, liveStatus, reconcile]);
+  }, [serverPhase, unresolved, liveStatus, reconcile]);
+
+  // Adopt a running phase the PARENT observed (CodeRabbit): ChatView is keyed by
+  // threadId, so it does NOT remount when only the phase changes — the initial
+  // useState seed goes stale if the parent learns the thread is running AFTER mount
+  // (its list loaded late, or the turn started while the tab was hidden). Sync a
+  // parent-observed running/awaiting phase in, but ONLY when the local phase is still
+  // unknown (null) so a stale parent phase never downgrades a fresher local one.
+  useEffect(() => {
+    if (initialPhase === "running" || initialPhase === "awaiting") {
+      setServerPhase((prev) => prev ?? initialPhase);
+    }
+  }, [initialPhase]);
 
   // Track the server phase off the live-stream lifecycle: a fresh stream means the
   // turn is running; a CLEAN completion (streaming → ready) means it settled (the

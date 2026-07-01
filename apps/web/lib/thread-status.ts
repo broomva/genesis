@@ -7,11 +7,14 @@
 
 import type { ThreadPhase } from "./threads";
 
-/** A turn is settled (nothing more will stream) at these phases. `idle` = never ran;
- *  `done`/`blocked` = finished. `running`/`awaiting` mean a turn is still in flight
- *  server-side, so the client should keep the "working" indicator + keep polling. */
-export function isTerminalPhase(p: ThreadPhase | null | undefined): boolean {
-  return p == null || p === "done" || p === "blocked" || p === "idle";
+/** A turn is IN FLIGHT server-side at these phases — the client keeps the "working"
+ *  indicator + keeps polling. Deliberately NOT the inverse of a "terminal" set:
+ *  `null` (a failed/unreachable status fetch) is NOT running, but it must not be
+ *  treated as SETTLED either (that would stop polling a turn that may still be live,
+ *  CodeRabbit). Callers gate polling on `isRunningPhase(p) || unresolved`, so an
+ *  unknown phase keeps retrying via the unresolved path rather than false-settling. */
+export function isRunningPhase(p: ThreadPhase | null | undefined): boolean {
+  return p === "running" || p === "awaiting";
 }
 
 /** useChat's status enum (mirrors @ai-sdk/react). */
