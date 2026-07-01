@@ -405,6 +405,17 @@
   box-shadow: inset 0 1px 0 var(--glass-light-line), var(--bv-shadow-composer), 0 0 0 3px
     var(--bv-frost-12);
 }
+/* A single LOCKED control inside the composer — the interactive model-at-spawn, or
+   the workspace picker after its thread has run (BRO-1627) — must NOT dim the whole
+   capsule. The vendored InputGroup carries `has-disabled:opacity-50` +
+   `has-disabled:bg-input/50` (meant for a fully-disabled field); our composer holds
+   many controls, so one locked child would translucent-out the textarea + typed
+   text (BRO-1628). Pin opacity + the glass bg so only the locked control reads
+   disabled, not the composer. */
+.bv-composer [data-slot="input-group"]:has(:disabled) {
+  opacity: 1;
+  background: var(--glass-surface-heavy);
+}
 
 /* ── Composer Undertow aura (BRO-1590) ──────────────────────
    While a turn is in flight, the Undertow weather breathes behind the glass

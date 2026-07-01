@@ -681,16 +681,24 @@ export function ChatView({
             </MessageScrollerViewport>
             <MessageScrollerButton
               direction="end"
-              style={{ bottom: "calc(var(--composer-h, 4.5rem) + 0.5rem)" }}
-              // (fallback agrees with the content's pb-[var(--composer-h,4.5rem)])
+              // Sit just above the composer when it's shown; drop to the bottom
+              // when it auto-hides (BRO-1628) — otherwise the button stays lifted by
+              // the (now-hidden) composer's height and floats mid-screen. The shown
+              // fallback agrees with the content's pb-[var(--composer-h,4.5rem)].
+              style={{
+                bottom: composerHidden
+                  ? "calc(0.75rem + env(safe-area-inset-bottom))"
+                  : "calc(var(--composer-h, 4.5rem) + 0.5rem)",
+              }}
             />
           </MessageScroller>
         </MessageScrollerProvider>
 
-        {/* The composer is a bottom OVERLAY over the scroller (BRO-1626): messages
-            scroll UNDER its frosted glass — the depth cue the design always intended
-            — and on mobile it slides toward older messages (freeing reading space),
-            returning toward the newest. translateY past the edge (not overflow-clip)
+        {/* The composer is a bottom OVERLAY over the scroller (BRO-1626): an OPAQUE
+            bar (bg-background) so messages never bleed through the input (BRO-1628);
+            the scroller reserves matching bottom clearance so no message hides behind
+            it. On mobile it slides toward older messages (freeing reading space) and
+            returns toward the newest — translateY past the edge (not overflow-clip)
             keeps the running halo intact. */}
         <footer
           ref={composerRef}
@@ -703,7 +711,9 @@ export function ChatView({
           onFocusCapture={() => setComposerFocused(true)}
           onBlurCapture={(e) => setComposerFocused(e.currentTarget.contains(e.relatedTarget))}
           className={cn(
-            "absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
+            "bg-background absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
+            // A soft top edge so messages fade INTO the bar instead of a hard cut.
+            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-5 before:h-5 before:bg-gradient-to-t before:from-background before:to-transparent",
             "transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform motion-reduce:transition-none",
             composerHidden
               ? "pointer-events-none translate-y-[110%] opacity-0"
