@@ -1,0 +1,274 @@
+<!doctype html>
+<!--
+meta:
+  id: BRO-1629
+  title: "Genesis Phase 2.5 — FS-native workspace substrate"
+  epic: BRO-1356 / BRO-1357 (greenfield)
+  date: 2026-07-01
+  status: draft · awaiting greenlight of Phase 2.5a
+  relates: BRO-1627 (env registry), BRO-1512 (noWorktree)
+  audience: human (design review) — Category-C generatively-authored HTML (P18)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Genesis Phase 2.5 — FS-native workspace substrate</title>
+<style>
+  :root {
+    --ink: #16181d; --ink-soft: #4a4f5a; --ink-faint: #7a808c;
+    --canvas: #fbfbfd; --card: #ffffff; --line: #e7e8ee; --line-soft: #f0f1f5;
+    --blue: #3b5bdb; --blue-soft: #eef2ff; --blue-ink: #2f45a8;
+    --green: #2b8a5a; --green-soft: #e9f7ef; --amber: #a9761a; --amber-soft: #fdf5e6;
+    --red: #c23c3c; --red-soft: #fdeeee; --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e8eaf0; --ink-soft: #b0b5c0; --ink-faint: #838a97;
+      --canvas: #0e0f13; --card: #16181d; --line: #262932; --line-soft: #1c1f27;
+      --blue: #8aa0ff; --blue-soft: #1a1f3a; --blue-ink: #aab8ff;
+      --green: #6ee2a4; --green-soft: #12241a; --amber: #e2b866; --amber-soft: #2a2113;
+      --red: #f28b8b; --red-soft: #2a1414;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--canvas); color: var(--ink);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    letter-spacing: -0.006em;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  header.doc { margin-bottom: 2.5rem; }
+  .eyebrow { font: 600 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--blue); }
+  h1 { font-size: clamp(1.9rem, 4.5vw, 2.7rem); line-height: 1.08; margin: 0.6rem 0 0.4rem; letter-spacing: -0.02em; }
+  .sub { color: var(--ink-soft); font-size: 1.12rem; max-width: 62ch; }
+  .tags { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 1.1rem; }
+  .tag { font: 600 11.5px/1 var(--mono); padding: 0.42em 0.7em; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-soft); background: var(--card); }
+  .tag.blue { color: var(--blue-ink); background: var(--blue-soft); border-color: transparent; }
+  .tag.green { color: var(--green); background: var(--green-soft); border-color: transparent; }
+  h2 { font-size: 1.5rem; margin: 3.2rem 0 0.4rem; letter-spacing: -0.015em; display: flex; align-items: baseline; gap: 0.6rem; }
+  h2 .n { font: 700 0.9rem var(--mono); color: var(--blue); }
+  h3 { font-size: 1.12rem; margin: 1.8rem 0 0.3rem; }
+  p { margin: 0.7rem 0; color: var(--ink); }
+  .lead { color: var(--ink-soft); }
+  a { color: var(--blue); text-decoration: none; border-bottom: 1px solid color-mix(in oklab, var(--blue), transparent 65%); }
+  code { font: 0.86em var(--mono); background: var(--line-soft); padding: 0.12em 0.42em; border-radius: 6px; color: var(--ink); }
+  strong { font-weight: 650; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.1rem 1.3rem; margin: 1rem 0; }
+  .callout { border-left: 3px solid var(--blue); background: var(--blue-soft); border-radius: 0 var(--radius) var(--radius) 0; padding: 0.9rem 1.2rem; margin: 1.2rem 0; }
+  .callout.warn { border-color: var(--red); background: var(--red-soft); }
+  .callout.win { border-color: var(--green); background: var(--green-soft); }
+  .callout .k { font: 700 12px/1 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; display: block; margin-bottom: 0.35rem; }
+  .callout.warn .k { color: var(--red); } .callout.win .k { color: var(--green); } .callout .k { color: var(--blue-ink); }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem 1.2rem; overflow-x: auto; font: 13px/1.6 var(--mono); color: var(--ink); margin: 1rem 0; }
+  pre .c { color: var(--ink-faint); } pre .kw { color: var(--blue); } pre .s { color: var(--green); }
+  table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.94rem; }
+  th, td { text-align: left; padding: 0.62rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-faint); font-weight: 650; }
+  td code { font-size: 0.82em; }
+  .grid { display: grid; gap: 0.8rem; grid-template-columns: 1fr 1fr; margin: 1.1rem 0; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } .wrap { padding: 2.5rem 1.1rem 4rem; } }
+  .layer { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 0.95rem 1.1rem; }
+  .layer .lh { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.3rem; }
+  .layer .ln { font: 700 12px var(--mono); color: #fff; background: var(--blue); width: 1.55em; height: 1.55em; display: grid; place-items: center; border-radius: 6px; flex: none; }
+  .layer h4 { margin: 0; font-size: 1rem; }
+  .layer .pat { font: 600 11px var(--mono); color: var(--amber); background: var(--amber-soft); padding: 0.2em 0.5em; border-radius: 5px; margin-left: auto; }
+  .layer p { margin: 0.2rem 0 0; font-size: 0.9rem; color: var(--ink-soft); }
+  figure { margin: 1.6rem 0; }
+  figcaption { font-size: 0.82rem; color: var(--ink-faint); text-align: center; margin-top: 0.5rem; }
+  .rec { border: 1.5px solid var(--green); background: var(--green-soft); border-radius: var(--radius); padding: 1.2rem 1.4rem; margin: 1.4rem 0; }
+  .rec h3 { margin-top: 0; color: var(--green); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 3rem 0; }
+  .foot { color: var(--ink-faint); font-size: 0.85rem; margin-top: 3rem; }
+  ul { margin: 0.6rem 0; padding-left: 1.3rem; } li { margin: 0.35rem 0; }
+  .pill { font: 600 11px var(--mono); padding: 0.15em 0.5em; border-radius: 5px; }
+  .pill.now { color: var(--green); background: var(--green-soft); }
+  .pill.next { color: var(--amber); background: var(--amber-soft); }
+  .pill.later { color: var(--ink-faint); background: var(--line-soft); }
+  svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  svg text { font-family: -apple-system, system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <span class="eyebrow">Genesis · Phase 2.5 · Design Spec</span>
+  <h1>The workspace registry should be a place, not a row</h1>
+  <p class="sub">Killing the env-var / restart hatch by modelling a workspace as an FS-native, git-backed substrate — reached through a repository port, indexed by a disposable projection, reconciled by a controller. The same architecture Genesis already reaches for, turned on the registry itself.</p>
+  <div class="tags">
+    <span class="tag blue">BRO-1629</span>
+    <span class="tag">epic BRO-1356 / BRO-1357</span>
+    <span class="tag">follows BRO-1627</span>
+    <span class="tag">2026-07-01</span>
+    <span class="tag green">draft · awaiting greenlight</span>
+  </div>
+</header>
+
+<p class="lead">Two complaints motivate this: the current workspace registry is <strong>admin-only</strong> (you edit an env var), <strong>restart-required</strong> (a boot snapshot), and <strong>can't be driven from the PWA</strong> (no write verb). This is a structural gap, not a config nit — and the fix reuses ~80% of the plumbing BRO-1627 already shipped.</p>
+
+<h2><span class="n">01</span> Why the env approach is structurally stuck</h2>
+<p>Three facts from the code, and together they mean there is <strong>no runtime write path</strong>:</p>
+<table>
+  <thead><tr><th>Fact</th><th>Where</th><th>Consequence</th></tr></thead>
+  <tbody>
+    <tr><td><strong>The registry is a boot snapshot.</strong> <code>workspaceRegistry</code> is <code>private&nbsp;readonly</code>, populated once in the constructor from env-derived config.</td><td><code>supervisor.ts:171, 200–214</code></td><td>Nothing mutates it after boot.</td></tr>
+    <tr><td><strong>Persistence is one-directional.</strong> <code>ensureWorkspace()</code> only pushes the in-memory registry → DB.</td><td><code>supervisor.ts:217–232</code></td><td>The <code>workspaces</code> table is effectively write-only; a restart rebuilds purely from env, and a row added any other way is invisible.</td></tr>
+    <tr><td><strong>The HTTP surface is read-only.</strong> <code>GET /workspaces</code>, no <code>POST</code>/<code>DELETE</code>.</td><td><code>server.ts:176</code></td><td>The PWA has no verb to call.</td></tr>
+  </tbody>
+</table>
+<div class="callout win"><span class="k">The good news</span>The <code>workspaces</code> table (<code>db/schema.ts:13</code>), <code>store.upsertWorkspace</code> (<code>store.ts:87</code>), the <code>ws-default</code> id reservation, the sticky binding + the <em>"workspace was deconfigured since the thread bound it"</em> handling (which already anticipates workspaces coming and going), <code>scanGitRepos</code> (<code>apps/api/src/workspaces.ts</code>), and the picker UI all exist. What's missing is a <strong>mutable, DB-backed registry</strong> and <strong>two endpoints</strong>.</div>
+
+<h2><span class="n">02</span> Thesis — a workspace is a place; the source of truth is versioned files</h2>
+<p>Genesis already defines its runtime with one load-bearing line from the greenfield spec:</p>
+<div class="callout"><span class="k">Host-invariance insight (BRO-1356)</span><strong>Runtime = { filesystem + bash + egress }.</strong> Local, VPS, and microVM are interchangeable behind <code>ExecutionHost</code>.</div>
+<p>So the filesystem isn't an implementation detail you build a workspace <em>table</em> on top of — it <strong>is</strong> the substrate the agent natively acts in. The AI-native move: model the registry, the metadata, the session state, and the control plane itself as <strong>files the agent reads and writes with its own tools</strong>. Git is a content-addressed database the agent can natively <code>read</code>, <code>write</code>, <code>diff</code>, and <code>sync</code> — which dissolves the DB-vs-FS tension: you get durable, stable identity <em>and</em> an FS the agent operates on directly. <strong>Manifest-in-git is a database</strong> (content-addressed, durable, stable-identity, syncable) that also happens to be the agent's native medium. You don't give up the DB properties — you pick a DB the agent can <code>git log</code>.</p>
+
+<h2><span class="n">03</span> The layers (and the pattern each one is)</h2>
+<div class="grid">
+  <div class="layer"><div class="lh"><span class="ln">1</span><h4>Substrate</h4><span class="pat">file-based routing</span></div><p>A well-known root; a project is a directory. Discovery is <code>readdir</code>, not a query. The layout <em>is</em> the API (Next.js/Rails routing applied to workspaces).</p></div>
+  <div class="layer"><div class="lh"><span class="ln">2</span><h4>Manifest</h4><span class="pat">declarative desired-state</span></div><p>The metadata the FS can't hold lives in a sidecar the agent reads natively (<code>.genesis/workspace.toml</code>). The <strong>stable id lives in the file</strong>, so renaming/moving the dir never breaks a session's sticky binding (Kubernetes/IaC pattern).</p></div>
+  <div class="layer"><div class="lh"><span class="ln">3</span><h4>Git as the transaction log</h4><span class="pat">event sourcing</span></div><p>Every mutation (add/remove/rename/archive) is a commit → durability, history, audit, rollback, multi-machine sync for free; portable across ephemeral hosts (a microVM <em>materializes</em> a workspace by cloning the manifest's <code>gitUrl</code>).</p></div>
+  <div class="layer"><div class="lh"><span class="ln">4</span><h4>Repository port</h4><span class="pat">hexagonal</span></div><p>The domain talks to a <code>WorkspaceRepository</code> interface; the FS-adapter is one impl. Same seam instinct as <code>ExecutionHost</code> + <code>Store</code> already in the codebase — leaves the door open for a SQLite <em>index</em> later, never as truth.</p></div>
+  <div class="layer"><div class="lh"><span class="ln">5</span><h4>Projection index</h4><span class="pat">materialized view</span></div><p>A fast <code>id→path</code> / owner / phase lookup, built by scanning manifests + folding session NDJSON. Disposable: <code>genesis reconcile</code> rebuilds it. This is <em>literally Genesis's own projection-reducer pattern</em> (NDJSON → phase machine) applied to the registry.</p></div>
+  <div class="layer"><div class="lh"><span class="ln">6</span><h4>Reconciliation controller</h4><span class="pat">desired vs observed</span></div><p>A watch loop (inotify, or lazy-on-read) that materializes git-origin workspaces not yet checked out, marks vanished paths <code>unavailable</code> instead of dangling, and GCs stale worktrees (K8s-controller shape; slots into the Phase-5 observe→decide→act loop).</p></div>
+</div>
+
+<figure>
+<svg viewBox="0 0 860 340" role="img" aria-label="Desired state (git remote) reconciled into observed state (local FS), projected to an index, served through the repository port.">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#7a808c"/></marker>
+    <style>.b{fill:var(--card);stroke:var(--line);stroke-width:1.5;rx:10} .t{fill:var(--ink);font-size:13px;font-weight:600} .s{fill:var(--ink-faint);font-size:11px} .lbl{fill:var(--ink-faint);font-size:10.5px;font-family:var(--mono)} .fl{stroke:#7a808c;stroke-width:1.5;fill:none}</style>
+  </defs>
+  <!-- desired -->
+  <rect class="b" x="16" y="40" width="200" height="90" rx="10"/>
+  <text class="t" x="34" y="68">Desired state</text>
+  <text class="s" x="34" y="88">git remote — manifests</text>
+  <text class="s" x="34" y="106">shared · authoritative</text>
+  <text class="lbl" x="34" y="122">workspace.toml @ HEAD</text>
+  <!-- reconcile -->
+  <rect class="b" x="300" y="30" width="150" height="60" rx="10"/>
+  <text class="t" x="318" y="56">Reconciler</text>
+  <text class="s" x="318" y="74">clone · GC · mark</text>
+  <!-- observed -->
+  <rect class="b" x="300" y="130" width="150" height="80" rx="10"/>
+  <text class="t" x="318" y="158">Observed state</text>
+  <text class="s" x="318" y="176">local checkout</text>
+  <text class="s" x="318" y="192">per-host</text>
+  <!-- index -->
+  <rect class="b" x="536" y="130" width="150" height="80" rx="10"/>
+  <text class="t" x="554" y="158">Projection</text>
+  <text class="s" x="554" y="176">id→path index</text>
+  <text class="s" x="554" y="192">disposable</text>
+  <!-- port -->
+  <rect class="b" x="536" y="30" width="150" height="60" rx="10" style="stroke:var(--blue)"/>
+  <text class="t" x="554" y="56" style="fill:var(--blue)">Repository port</text>
+  <text class="s" x="554" y="74">domain seam</text>
+  <!-- consumers -->
+  <rect class="b" x="736" y="60" width="108" height="200" rx="10"/>
+  <text class="t" x="754" y="90">Supervisor</text>
+  <text class="s" x="754" y="108">resolve()</text>
+  <text class="t" x="754" y="150">HTTP</text>
+  <text class="s" x="754" y="168">/workspaces</text>
+  <text class="t" x="754" y="210">Agent</text>
+  <text class="s" x="754" y="228">git + fs verbs</text>
+  <!-- flows -->
+  <path class="fl" d="M216,80 L300,62" marker-end="url(#ar)"/>
+  <path class="fl" d="M375,90 L375,130" marker-end="url(#ar)"/>
+  <path class="fl" d="M450,170 L536,170" marker-end="url(#ar)"/>
+  <path class="fl" d="M611,130 L611,90" marker-end="url(#ar)"/>
+  <path class="fl" d="M686,60 L736,90" marker-end="url(#ar)"/>
+  <path class="fl" d="M686,180 L736,180" marker-end="url(#ar)"/>
+  <text class="lbl" x="228" y="66">materialize</text>
+  <text class="lbl" x="462" y="162">fold / scan</text>
+</svg>
+<figcaption>Desired state (git remote, shared) is reconciled into observed state (local FS, per-host), folded into a disposable projection, and served through one repository port — the seam every consumer talks to.</figcaption>
+</figure>
+
+<h2><span class="n">04</span> Layout &amp; manifest schema</h2>
+<pre><span class="c"># $GENESIS_ROOT/ — a git repo (the registry's write-ahead log)</span>
+$GENESIS_ROOT/
+  genesis.toml                      <span class="c"># allow-roots, defaults, engine map</span>
+  workspaces/
+    acme-api/
+      .genesis/
+        workspace.toml              <span class="c"># the manifest (desired state)</span>
+        AGENTS.md                   <span class="c"># agent-authored operating notes</span>
+        sessions/2K9….ndjson        <span class="c"># append-only event log per session</span>
+        journal/                    <span class="c"># immutable, content-addressed (Phase 6)</span>
+      …the actual repo (submodule / worktree / clone)…
+  .index/                           <span class="c"># DERIVED cache — gitignored, rebuildable</span></pre>
+<pre><span class="c"># .genesis/workspace.toml — declarative desired-state</span>
+id         = <span class="s">"ws_2K9Qf…"</span>     <span class="c"># stable ULID — NOT the path</span>
+name       = <span class="s">"acme-api"</span>
+origin     = <span class="s">"git"</span>            <span class="c"># git | local</span>
+gitUrl     = <span class="s">"github.com/acme/api"</span>
+noWorktree = <span class="kw">false</span>
+owner      = <span class="s">"carlos"</span></pre>
+<p>The stable id lives <em>in the file</em>, so renaming or moving the directory never breaks a session's sticky binding — that was the strongest DB argument, and a manifest field answers it without a database.</p>
+
+<h2><span class="n">05</span> The repository port</h2>
+<p>The domain depends on an interface, not the filesystem — the same seam instinct as <code>ExecutionHost</code> and <code>Store</code> already in the codebase. The FS-adapter is one implementation; a SQLite index can be added later as a <em>cache</em>, never as truth.</p>
+<pre><span class="kw">interface</span> WorkspaceRepository {
+  list(owner?: <span class="kw">string</span>): <span class="kw">Promise</span>&lt;WorkspaceView[]&gt;;   <span class="c">// projection read (DTO: id,name,phase — no rootPath)</span>
+  resolve(id: <span class="kw">string</span>): <span class="kw">Promise</span>&lt;Workspace | <span class="kw">undefined</span>&gt;; <span class="c">// full record incl. rootPath (server-only)</span>
+  register(spec: RegisterSpec): <span class="kw">Promise</span>&lt;WorkspaceView&gt;; <span class="c">// discover→pick OR git-URL; server derives rootPath</span>
+  remove(id: <span class="kw">string</span>): <span class="kw">Promise</span>&lt;<span class="kw">void</span>&gt;;
+  available(): <span class="kw">Promise</span>&lt;ScannedRepo[]&gt;;              <span class="c">// unregistered git repos under the allow-root</span>
+}</pre>
+<p><code>Supervisor.resolve()</code> and <code>listWorkspaces()</code> route through this instead of the private <code>Map</code>. The current in-memory registry becomes the <em>projection cache</em> behind the FS-adapter — read-through-DB, not a per-process boot snapshot.</p>
+
+<h2><span class="n">06</span> The security crux — the client must never name a path</h2>
+<div class="callout warn"><span class="k">Non-negotiable</span><code>rootPath</code> is an absolute server path. A <code>POST /workspaces {rootPath}</code> from the PWA is <strong>arbitrary-location code execution + <code>../</code> traversal</strong>. That is <em>exactly why</em> <code>/workspaces</code> and <code>/health</code> already strip <code>rootPath</code> (BRO-1627 P20). Filesystem authority never leaves the server.</div>
+<div class="grid">
+  <div class="card"><h3 style="margin-top:0">A · Discover → pick <span class="pill now">2.5a</span></h3><p style="font-size:0.92rem;color:var(--ink-soft)">Admin sets an allow-root (<code>GENESIS_PROJECTS_ROOT</code>). <code>GET /workspaces/available</code> scans it for unregistered git repos (scan logic already exists). The PWA lists them; <code>POST /workspaces</code> registers by <em>selecting</em> one — the server derives <code>rootPath</code> and validates the resolved path stays inside the allow-root.</p></div>
+  <div class="card"><h3 style="margin-top:0">B · Add-by-git-URL <span class="pill next">2.5b</span></h3><p style="font-size:0.92rem;color:var(--ink-soft)">The real self-serve path. <code>POST /workspaces {gitUrl}</code> → server clones into the managed root, then registers. Users add any repo by URL, never touching a path. Lines up with the existing microVM <code>GENESIS_GIT_URL</code> model.</p></div>
+</div>
+<p>The security boundary is a <strong>mount, not a <code>WHERE</code> clause</strong>: the agent's authority is precisely which directories it can see — allow-root, worktree isolation, microVM bind-mounts. Least privilege is filesystem scoping, which is what <em>"Runtime = filesystem + bash + egress"</em> already implies.</p>
+
+<h2><span class="n">07</span> HTTP surface</h2>
+<table>
+  <thead><tr><th>Verb</th><th>Route</th><th>Gate</th><th>Body / returns</th></tr></thead>
+  <tbody>
+    <tr><td>GET</td><td><code>/workspaces</code></td><td>bearer/owner</td><td>DTO list <code>{id,name,isGitRepo,phase}</code> — <em>never</em> <code>rootPath</code> <span class="pill now">exists</span></td></tr>
+    <tr><td>GET</td><td><code>/workspaces/available</code></td><td>bearer/owner</td><td>unregistered git repos under the allow-root <span class="pill now">2.5a</span></td></tr>
+    <tr><td>POST</td><td><code>/workspaces</code></td><td>bearer/owner</td><td><code>{pick: dirName}</code> or <code>{gitUrl}</code> → server derives + validates path <span class="pill now">2.5a/b</span></td></tr>
+    <tr><td>DELETE</td><td><code>/workspaces/:id</code></td><td>bearer/owner</td><td>de-register (never <code>rm -rf</code> the repo) <span class="pill now">2.5a</span></td></tr>
+  </tbody>
+</table>
+
+<h2><span class="n">08</span> Phased migration</h2>
+<table>
+  <thead><tr><th>Phase</th><th>Delivers</th><th>Reuses</th></tr></thead>
+  <tbody>
+    <tr><td><strong>2.5a</strong> <span class="pill now">ships both complaints · ~1 day</span></td><td>DB-backed <strong>mutable</strong> registry: load <code>workspaces</code> rows at boot <strong>∪</strong> env discovery (env → seed, not truth); <code>Supervisor.registerWorkspace()/removeWorkspace()</code> write DB + update the live map; add <code>Store.listWorkspaces()</code> (<em>the missing seam</em>); <code>POST</code>/<code>DELETE /workspaces</code> (discover→pick); PWA "Add project" affordance by the picker.</td><td><code>scanGitRepos</code>, <code>upsertWorkspace</code>, <code>ws-default</code> reservation, deconfigured-workspace handling — verbatim.</td></tr>
+    <tr><td><strong>2.5b</strong> <span class="pill next">self-serve</span></td><td>Add-by-git-URL: <code>POST {gitUrl}</code> → clone into managed root → register.</td><td>microVM <code>GENESIS_GIT_URL</code> clone model.</td></tr>
+    <tr><td><strong>2.5c</strong> <span class="pill later">FS-native</span></td><td>Manifest-in-git as source of truth; the DB registry demotes to the projection index; reconciliation controller (materialize / mark-unavailable / GC).</td><td>projection-reducer pattern (NDJSON→phase).</td></tr>
+    <tr><td><strong>2.5d</strong> <span class="pill later">multi-user</span></td><td><code>ownerId</code> on <code>workspaces</code>; <code>listWorkspaces</code> filters by the authed user (better-auth already present) — else it's a shared filesystem browser.</td><td>better-auth session on genesis-web.</td></tr>
+  </tbody>
+</table>
+
+<h2><span class="n">09</span> The honest costs (not free)</h2>
+<ul>
+  <li><strong>Concurrent writes.</strong> Two agents mutating the registry → git gives you merge, but conflicts need a resolver or single-writer discipline (a lock file, or route registry mutations through one supervisor). Design it in, don't discover it.</li>
+  <li><strong>Queries beyond <code>readdir</code>.</strong> "All of Carlos's archived workspaces idle &gt;7d" is a manifest table-scan — this is why the projection index (layer 5) earns its keep. Be honest that you still built an index; you just made it disposable.</li>
+  <li><strong>Scan latency at scale</strong> → watch-driven projection, not scan-per-request.</li>
+  <li><strong>Secrets never touch the manifest.</strong> The repo already learned this (<code>secrets.env</code>, 0600, never in git). Manifests hold <em>references</em> to credentials, not credentials.</li>
+  <li><strong>Shared truth vs local materialization.</strong> The git remote is the sync point (desired, shared); the checked-out FS is per-host (observed). Keep that split explicit or you'll expect a microVM to see a checkout that only exists on your laptop.</li>
+  <li><strong>Multi-instance consistency.</strong> <code>resolve()</code> checks the in-memory <code>Map</code>; across multiple API instances a workspace added on one wouldn't be seen by another → the registry wants read-through-DB (or cache-invalidation), not a per-process snapshot. 2.5a's DB-backed registry already moves toward this.</li>
+</ul>
+
+<div class="rec">
+  <h3>Recommendation</h3>
+  <p style="margin-bottom:0.5rem">Ship <strong>Phase 2.5a</strong> first — it removes <em>both</em> of your complaints (restart + can't-drive-from-PWA) in ~a day, reuses <code>scanGitRepos</code> / <code>upsertWorkspace</code> / the id-reservation verbatim, and lays the <code>WorkspaceRepository</code> seam so 2.5b–d are additive, not rewrites. The FS-native git-manifest substrate (2.5c) is the north star; 2.5a is a stepping stone toward it, not a detour — the DB registry it introduces demotes cleanly to the projection index later.</p>
+  <p style="margin-bottom:0"><strong>The one fork to decide for 2.5a's PWA affordance:</strong> discover→pick only, add-by-git-URL only, or both. Discover→pick is safest + smallest and needs zero new infra; git-URL is the true self-serve path but adds a clone/managed-root surface. My default: <strong>discover→pick in 2.5a, git-URL fast-follow in 2.5b.</strong></p>
+</div>
+
+<hr />
+<p class="foot">Genesis Phase 2.5 · BRO-1629 · drafted 2026-07-01 · grounded in the shipped BRO-1627 registry (<code>supervisor.ts</code>, <code>apps/api/src/workspaces.ts</code>, <code>db/schema.ts</code>) and the greenfield host-invariance thesis (BRO-1356 / <code>docs/specs/2026-06-04-genesis-greenfield-architecture.html</code>). Category-C generatively-authored HTML per P18. Implementation gated on greenlight of the 2.5a scope.</p>
+
+</div>
+</body>
+</html>
