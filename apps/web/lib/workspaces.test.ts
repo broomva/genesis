@@ -58,6 +58,7 @@ describe("fetchAvailableWorkspaces (BRO-1629 slice 3)", () => {
       available: [
         { id: "ws-a", name: "alpha" },
         { id: "", name: "empty-id" }, // dropped — Radix/empty-id hazard
+        { id: "ws-blank", name: "" }, // dropped — blank name → blank Add btn + POST {pick:""} (N2)
         { name: "no-id" }, // dropped
         "junk", // dropped
       ],

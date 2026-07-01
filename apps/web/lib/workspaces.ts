@@ -65,7 +65,10 @@ export async function fetchAvailableWorkspaces(signal?: AbortSignal): Promise<Av
     return Array.isArray(data.available)
       ? data.available.filter(
           (r): r is AvailableRepo =>
-            typeof r?.id === "string" && r.id.length > 0 && typeof r?.name === "string",
+            typeof r?.id === "string" &&
+            r.id.length > 0 &&
+            typeof r?.name === "string" &&
+            r.name.length > 0, // a blank name → blank "Add" button + POST {pick:""} (P20 Forge N2)
         )
       : [];
   } catch {

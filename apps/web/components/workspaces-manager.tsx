@@ -1,7 +1,7 @@
 "use client";
 
 import { FolderGit2, Plus, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,13 +38,22 @@ export function WorkspacesManager({
 }) {
   const [available, setAvailable] = useState<AvailableRepo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [addingName, setAddingName] = useState<string | null>(null);
+  // Track in-flight mutations PER id/name (P20 Forge N1): a single-slot busy
+  // marker would re-enable an already-clicked row the moment a second row's
+  // action starts, opening a double-submit window. Sets keep each row's spinner
+  // + disabled state independent.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [addingNames, setAddingNames] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  // Monotonic fetch generation (P20 Forge S2): mount-fetch and the post-mutation
+  // refetch both write `available` with no ordering guarantee — a slow first GET
+  // could clobber a fresh post-remove result. Only the latest-issued fetch wins.
+  const seqRef = useRef(0);
 
   const refetch = useCallback(async (signal?: AbortSignal) => {
+    const seq = ++seqRef.current;
     const repos = await fetchAvailableWorkspaces(signal);
-    if (!signal?.aborted) setAvailable(repos);
+    if (!signal?.aborted && seq === seqRef.current) setAvailable(repos);
   }, []);
 
   // Fetch the pickable repos when the sheet opens (this component only mounts
@@ -61,9 +70,13 @@ export function WorkspacesManager({
   const doAdd = useCallback(
     async (pick: string) => {
       setError(null);
-      setAddingName(pick);
+      setAddingNames((prev) => new Set(prev).add(pick));
       const res = await onAdd(pick);
-      setAddingName(null);
+      setAddingNames((prev) => {
+        const next = new Set(prev);
+        next.delete(pick);
+        return next;
+      });
       if (!res.ok) {
         setError(res.error);
         return;
@@ -76,9 +89,13 @@ export function WorkspacesManager({
   const doRemove = useCallback(
     async (id: string) => {
       setError(null);
-      setBusyId(id);
+      setBusyIds((prev) => new Set(prev).add(id));
       const ok = await onRemove(id);
-      setBusyId(null);
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       if (!ok) {
         setError("Could not remove this project. It may be in use.");
         return;
@@ -88,9 +105,13 @@ export function WorkspacesManager({
     [onRemove, refetch],
   );
 
+  // Suppress the render entirely while the first fetch is still in flight in the
+  // single-workspace case (P20 Forge S1): otherwise the section paints (default
+  // row) then vanishes when `available` resolves to [] — a flash on every open.
+  // Multi-workspace deploys render immediately (nothing to flash — they stay).
+  if (loading && workspaces.length <= 1) return null;
   // Nothing to manage AND nothing to add → stay invisible (single-workspace
-  // deploys are unchanged). Once loaded, if only the default exists and no repo
-  // is discoverable, render nothing.
+  // deploys are unchanged, matching the composer picker's rule).
   if (!loading && workspaces.length <= 1 && available.length === 0) return null;
 
   return (
@@ -103,7 +124,7 @@ export function WorkspacesManager({
       <div className="space-y-1.5">
         {workspaces.map((w) => {
           const isDefault = w.id === defaultWorkspaceId;
-          const removing = busyId === w.id;
+          const removing = busyIds.has(w.id);
           return (
             <div
               key={w.id}
@@ -138,7 +159,7 @@ export function WorkspacesManager({
         <div className="space-y-1.5 pt-1">
           <p className="text-muted-foreground text-xs">Add a project</p>
           {available.map((r) => {
-            const adding = addingName === r.name;
+            const adding = addingNames.has(r.name);
             return (
               <button
                 key={r.id}
