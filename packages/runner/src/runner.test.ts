@@ -20,12 +20,14 @@ class FakeMicroVMHost implements ExecutionHost {
   readonly credentialTier = "keyed" as const;
   execCalls: string[][] = [];
   spawnCwd?: string;
+  spawnCmd?: string[];
   async exec(cmd: string[]): Promise<ExecResult> {
     this.execCalls.push(cmd);
     return { code: 0, stdout: "", stderr: "" };
   }
-  spawnStream(_cmd: string[], opts?: ExecOpts): SpawnHandle {
+  spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
     this.spawnCwd = opts?.cwd;
+    this.spawnCmd = cmd;
     return streamOf(NDJSON);
   }
   async readFile() {
@@ -73,6 +75,15 @@ describe("runAgent — microVM host", () => {
     const host = new FakeMicroVMHost();
     await runAgent({ prompt: "go", cwd: "/irrelevant", host, remoteCwd: "/vercel/sandbox/app" });
     expect(host.spawnCwd).toBe("/vercel/sandbox/app");
+  });
+
+  test("does NOT resolve a host-LOCAL pinned path on a non-local host (BRO-1642 CodeRabbit)", async () => {
+    const host = new FakeMicroVMHost();
+    // A pin would resolve to ~/.local/share/claude/versions/<pin> on THIS box — that
+    // absolute path doesn't exist in the sandbox. The runner must pass a plain name.
+    await runAgent({ prompt: "go", cwd: "/irrelevant", host, pin: "2.1.999" });
+    expect(host.spawnCmd?.[0]).toBe("claude"); // not an absolute versions/ path
+    expect(host.spawnCmd?.[0]).not.toContain("/versions/");
   });
 });
 

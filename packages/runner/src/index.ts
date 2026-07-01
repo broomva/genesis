@@ -260,7 +260,15 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // Resolve the CLI binary once (BRO-1642): explicit agentBin > pinned version
   // (opts.pin or GENESIS_CLAUDE_PIN, matching the interactive engine) > PATH claude.
   // A stale PATH claude rejects --include-partial-messages and would kill the turn.
-  const bin = resolveClaudeBinary(opts.pin ?? process.env.GENESIS_CLAUDE_PIN, opts.agentBin);
+  // HOST-AWARE (CodeRabbit): resolveClaudeBinary checks THIS machine's filesystem,
+  // so a pinned absolute path is only valid when the agent runs on THIS machine
+  // (LocalHost). On VpsHost / microVM the binary lives on the remote/sandbox box —
+  // pass the plain name (explicit agentBin still honored) and let the remote PATH
+  // resolve it, never a local absolute path that doesn't exist there.
+  const bin =
+    host.kind === "local"
+      ? resolveClaudeBinary(opts.pin ?? process.env.GENESIS_CLAUDE_PIN, opts.agentBin)
+      : (opts.agentBin ?? "claude");
   const handle = host.spawnStream(agentArgs(opts, bin), {
     cwd: runCwd,
     env: scrubAgentEnv(),

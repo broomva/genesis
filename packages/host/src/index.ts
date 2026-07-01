@@ -105,8 +105,17 @@ export class LocalHost implements ExecutionHost {
     });
     if (opts?.input !== undefined && proc.stdin) {
       // Write the whole payload then close stdin so the child sees EOF and starts.
-      proc.stdin.write(opts.input);
-      void proc.stdin.end();
+      // Swallow pipe errors (EPIPE if the child exits before reading stdin) so they
+      // don't become an unhandled rejection — the turn still resolves via exitCode
+      // (CodeRabbit).
+      try {
+        proc.stdin.write(opts.input);
+        // end() returns number | Promise<number> — normalize so a rejected flush
+        // (broken pipe) is caught rather than becoming an unhandled rejection.
+        void Promise.resolve(proc.stdin.end()).catch(() => {});
+      } catch {
+        // child closed stdin before we finished writing — proceed; exitCode reports it.
+      }
     }
     return { stdout: toLines(proc.stdout), exitCode: proc.exited, kill: () => proc.kill() };
   }
