@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { availableWorkspaces, resolvePick } from "./workspace-provision";
@@ -64,5 +64,17 @@ describe("resolvePick (BRO-1629 — server derives + validates the path)", () =>
     expect(ws.id).toMatch(/^ws-my-repo-[0-9a-f]{6}$/);
     expect(ws.name).toBe("My Repo");
     expect(ws.rootPath).toBe(join(dir, "My Repo"));
+  });
+
+  test("rejects a symlink inside the root pointing OUTSIDE it — hard boundary (P20 Forge SF1)", () => {
+    const outside = root([]);
+    mkdirSync(join(outside, "external", ".git"), { recursive: true }); // a real git repo, out of root
+    const dir = root([]);
+    symlinkSync(join(outside, "external"), join(dir, "linked"), "dir");
+    // "linked" is LEXICALLY inside `dir` but its realpath is under `outside` → the
+    // realpath re-check must reject it (the .git check follows the symlink + passes).
+    expect(() => resolvePick(dir, "linked", new Set())).toThrow(
+      /outside the projects root|symlink/,
+    );
   });
 });

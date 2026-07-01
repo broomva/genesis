@@ -1,7 +1,12 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { Workspace } from "@genesis/core";
 import { scanGitRepos, slugifyWorkspace } from "./workspaces";
+
+/** A rejected client PICK (bad name / traversal / non-git / escape). Its message is
+ *  SAFE to echo to the client (400); any OTHER error from registration is internal
+ *  (FS EACCES/ENOSPC with an absolute path) and must NOT be echoed (P20 Forge SF2). */
+export class WorkspaceValidationError extends Error {}
 
 // Discover→pick provisioning (BRO-1629, Phase 2.5 · slice 2). The security spine:
 // the CLIENT NEVER NAMES A FILESYSTEM PATH. It picks a directory NAME surfaced by
@@ -44,7 +49,7 @@ export function resolvePick(
   pick: unknown,
   takenIds: ReadonlySet<string>,
 ): Workspace {
-  if (!allowRoot) throw new Error("no projects root configured (GENESIS_PROJECTS_ROOT)");
+  if (!allowRoot) throw new WorkspaceValidationError("no projects root configured");
   if (
     typeof pick !== "string" ||
     pick.length === 0 ||
@@ -53,15 +58,29 @@ export function resolvePick(
     pick.includes("..") ||
     pick.startsWith(".")
   ) {
-    throw new Error("invalid pick (must be a plain directory name under the projects root)");
+    throw new WorkspaceValidationError(
+      "invalid pick (must be a plain directory name under the projects root)",
+    );
   }
   const base = resolve(allowRoot);
   const rootPath = resolve(allowRoot, pick);
   if (rootPath !== base && !rootPath.startsWith(base + sep)) {
-    throw new Error("pick escapes the projects root");
+    throw new WorkspaceValidationError("pick escapes the projects root");
   }
-  if (!existsSync(rootPath)) throw new Error(`pick "${pick}" not found under the projects root`);
-  if (!existsSync(resolve(rootPath, ".git"))) throw new Error(`"${pick}" is not a git repository`);
+  if (!existsSync(rootPath))
+    throw new WorkspaceValidationError(`pick "${pick}" not found under the projects root`);
+  if (!existsSync(resolve(rootPath, ".git")))
+    throw new WorkspaceValidationError(`"${pick}" is not a git repository`);
+  // HARD boundary (P20 Forge SF1): the lexical startsWith is symlink-blind, and the
+  // scan deliberately follows symlink-to-dir — so a symlink inside the allow-root
+  // pointing OUTSIDE would store a path lexically-inside but real-outside, letting
+  // the agent cwd off-boundary. Re-check the REAL paths so the allow-root is a hard
+  // sandbox, not a lexical one.
+  const realRoot = realpathSync(base);
+  const realPath = realpathSync(rootPath);
+  if (realPath !== realRoot && !realPath.startsWith(realRoot + sep)) {
+    throw new WorkspaceValidationError("pick resolves outside the projects root (symlink)");
+  }
   let id = `ws-${slugifyWorkspace(pick)}`;
   if (takenIds.has(id)) id = `${id}-${shortHash(rootPath)}`;
   return { id, name: pick, rootPath, isGitRepo: true };

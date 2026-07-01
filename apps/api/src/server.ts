@@ -15,7 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
-import { availableWorkspaces, resolvePick } from "./workspace-provision";
+import { WorkspaceValidationError, availableWorkspaces, resolvePick } from "./workspace-provision";
 
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
@@ -107,6 +107,17 @@ export function build(opts: BuildOpts) {
     console.warn(
       "[genesis] WARNING: agent runs with --dangerously-skip-permissions and /message is unauthenticated. " +
         "Bind to localhost only, or set GENESIS_TOKEN. (Phase 2 wires Better Auth.)",
+    );
+  }
+  // Self-serve workspace mutation (BRO-1629) with no token → POST/DELETE /workspaces
+  // are OPEN. Behind the web BFF (better-auth) that's fine, but a direct :8787 hit
+  // could register/deregister agent working dirs under the allow-root. Warn loudly
+  // (P20 Forge SF3) — set GENESIS_TOKEN, or bind :8787 to localhost/tailnet only.
+  if (opts.projectsRoot && !opts.token) {
+    console.warn(
+      "[genesis] WARNING: GENESIS_PROJECTS_ROOT is set but GENESIS_TOKEN is not — " +
+        "POST/DELETE /workspaces are unauthenticated on a direct connection. Set " +
+        "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
     );
   }
 
@@ -216,16 +227,26 @@ export function build(opts: BuildOpts) {
       );
       return c.json({ id: saved.id, name: saved.name, isGitRepo: saved.isGitRepo }, 201);
     } catch (e) {
-      return c.json({ error: e instanceof Error ? e.message : "bad request" }, 400);
+      // A validation error (bad pick) is safe to echo → 400. Anything else is
+      // internal (FS EACCES/ENOSPC with an absolute path) → log server-side +
+      // return a GENERIC message, never leaking the filesystem layout (P20 SF2).
+      if (e instanceof WorkspaceValidationError) return c.json({ error: e.message }, 400);
+      console.error(`[genesis] register workspace failed: ${e instanceof Error ? e.stack : e}`);
+      return c.json({ error: "could not register workspace" }, 500);
     }
   });
 
   // De-register a workspace (BRO-1629). Never deletes the underlying repo — just
-  // drops the manifest. The default is protected (removeWorkspace → false → 400).
+  // drops the manifest. The default is protected (removeWorkspace → false → 400);
+  // a malformed id is rejected downstream (fileFor) → 400, not a 500 (P20 N1).
   app.delete("/workspaces/:id", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const ok = await supervisor.removeWorkspace(c.req.param("id"));
-    return ok ? c.json({ ok }) : c.json({ error: "cannot remove the default workspace" }, 400);
+    try {
+      const ok = await supervisor.removeWorkspace(c.req.param("id"));
+      return ok ? c.json({ ok }) : c.json({ error: "cannot remove the default workspace" }, 400);
+    } catch {
+      return c.json({ error: "invalid workspace id" }, 400);
+    }
   });
 
   app.get("/threads/:id", async (c) => {
