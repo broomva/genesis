@@ -411,7 +411,10 @@
    `has-disabled:bg-input/50` (meant for a fully-disabled field); our composer holds
    many controls, so one locked child would translucent-out the textarea + typed
    text (BRO-1628). Pin opacity + the glass bg so only the locked control reads
-   disabled, not the composer. */
+   disabled, not the composer. NOTE: this un-dims for ANY disabled descendant —
+   correct today (only the pickers ever disable; the textarea/send never do). A
+   future FULL composer lockout would need its own dimming mechanism, not the
+   InputGroup default this deliberately suppresses. */
 .bv-composer [data-slot="input-group"]:has(:disabled) {
   opacity: 1;
   background: var(--glass-surface-heavy);

@@ -689,6 +689,11 @@ export function ChatView({
                 bottom: composerHidden
                   ? "calc(0.75rem + env(safe-area-inset-bottom))"
                   : "calc(var(--composer-h, 4.5rem) + 0.5rem)",
+                // Ease `bottom` too (BRO-1628 P20) so it rides the composer's slide
+                // instead of snapping ~4rem when it hides — additive to the
+                // primitive's translate/scale/opacity transition (duration/easing
+                // still come from the primitive's classes).
+                transitionProperty: "translate, scale, opacity, bottom",
               }}
             />
           </MessageScroller>
@@ -713,7 +718,9 @@ export function ChatView({
           className={cn(
             "bg-background absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
             // A soft top edge so messages fade INTO the bar instead of a hard cut.
-            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-5 before:h-5 before:bg-gradient-to-t before:from-background before:to-transparent",
+            // Fade to a zero-alpha SAME-HUE background (not `transparent` = black-0)
+            // so the 20px strip doesn't pick up a gray fringe (BRO-1628 P20).
+            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-5 before:h-5 before:bg-gradient-to-t before:from-background before:to-[color-mix(in_oklab,var(--background),transparent)]",
             "transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform motion-reduce:transition-none",
             composerHidden
               ? "pointer-events-none translate-y-[110%] opacity-0"
