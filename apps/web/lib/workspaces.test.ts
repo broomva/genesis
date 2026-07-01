@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   type Workspace,
   addWorkspace,
+  addWorkspaceByUrl,
   fetchAvailableWorkspaces,
   fetchWorkspaces,
   removeWorkspace,
@@ -142,6 +143,41 @@ describe("addWorkspace (BRO-1629 slice 3)", () => {
     stubFetch(true, {}, { throws: true });
     const res = await addWorkspace("x");
     expect(res.ok).toBe(false);
+  });
+});
+
+describe("addWorkspaceByUrl (BRO-1629 slice 5)", () => {
+  /** Capture the outgoing request body so we can assert the {gitUrl} shape. */
+  function captureFetch(ok: boolean, body: unknown): { sent: () => unknown } {
+    let sent: unknown;
+    global.fetch = (async (_url: string, init?: RequestInit) => {
+      sent = init?.body ? JSON.parse(init.body as string) : undefined;
+      return { ok, json: async () => body } as unknown as Response;
+    }) as unknown as typeof fetch;
+    return { sent: () => sent };
+  }
+
+  test("posts { gitUrl } (not { pick }) and returns the cloned workspace", async () => {
+    const cap = captureFetch(true, { id: "ws-genesis", name: "genesis", isGitRepo: true });
+    const res = await addWorkspaceByUrl("https://github.com/broomva/genesis.git");
+    expect(res).toEqual({
+      ok: true,
+      workspace: { id: "ws-genesis", name: "genesis", isGitRepo: true },
+    });
+    expect(cap.sent()).toEqual({ gitUrl: "https://github.com/broomva/genesis.git" });
+  });
+
+  test("400 → the engine's safe validation message is surfaced verbatim", async () => {
+    stubFetch(false, { error: 'git host "localhost" is not allowed' });
+    expect(await addWorkspaceByUrl("https://localhost/x/y.git")).toEqual({
+      ok: false,
+      error: 'git host "localhost" is not allowed',
+    });
+  });
+
+  test("thrown fetch → a network-error result", async () => {
+    stubFetch(true, {}, { throws: true });
+    expect((await addWorkspaceByUrl("https://github.com/x/y.git")).ok).toBe(false);
   });
 });
 

@@ -96,20 +96,20 @@ export async function fetchAvailableWorkspaces(signal?: AbortSignal): Promise<Av
  *  400 message on a rejected pick (bad name / traversal / not-a-repo). */
 export type AddWorkspaceResult = { ok: true; workspace: Workspace } | { ok: false; error: string };
 
-/** Register a picked directory as a workspace (POST /workspaces). The client
- *  sends only the directory NAME; the engine derives + validates the path. */
-export async function addWorkspace(pick: string): Promise<AddWorkspaceResult> {
+/** POST a workspace-add body to the BFF and normalize the outcome. Shared by the
+ *  two add shapes (BRO-1629): `{pick}` (discover→pick, slice 3) and `{gitUrl}`
+ *  (add-by-git-URL, slice 5). The engine owns all validation and returns a safe 400
+ *  message on rejection, which the BFF relays verbatim. Upholds the non-empty
+ *  id+name invariant the rest of this file enforces (an empty id would later render
+ *  <SelectItem value=""> and Radix throws synchronously, white-screening). */
+async function postWorkspace(body: Record<string, string>): Promise<AddWorkspaceResult> {
   try {
     const res = await fetch("/api/workspaces", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pick }),
+      body: JSON.stringify(body),
     });
     const data = (await res.json().catch(() => ({}))) as Partial<Workspace> & { error?: unknown };
-    // Uphold the same non-empty id+name invariant fetchWorkspaces /
-    // fetchAvailableWorkspaces enforce (CodeRabbit): an empty-string id in an
-    // otherwise-ok body would make AddWorkspaceResult.workspace carry the value
-    // the rest of the file guards against (Radix <SelectItem value=""> hazard).
     if (
       !res.ok ||
       typeof data.id !== "string" ||
@@ -132,6 +132,20 @@ export async function addWorkspace(pick: string): Promise<AddWorkspaceResult> {
   } catch {
     return { ok: false, error: "network error — could not add this project" };
   }
+}
+
+/** Register a picked directory as a workspace (POST /workspaces {pick}). The client
+ *  sends only the directory NAME; the engine derives + validates the path. */
+export function addWorkspace(pick: string): Promise<AddWorkspaceResult> {
+  return postWorkspace({ pick });
+}
+
+/** Register a workspace by cloning a public git URL (POST /workspaces {gitUrl},
+ *  BRO-1629 slice 5). The client sends only the URL; the engine validates it
+ *  (https-only + host allowlist + no credentials — SSRF-safe), clones it into the
+ *  allow-root, and registers it. A rejected URL comes back as the engine's safe 400. */
+export function addWorkspaceByUrl(gitUrl: string): Promise<AddWorkspaceResult> {
+  return postWorkspace({ gitUrl });
 }
 
 /** De-register a workspace (DELETE /workspaces/:id). The repo directory is left

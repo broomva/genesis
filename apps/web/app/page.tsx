@@ -18,6 +18,7 @@ import { usePreferences } from "@/lib/use-preferences";
 import {
   type Workspace,
   addWorkspace,
+  addWorkspaceByUrl,
   fetchWorkspaces,
   removeWorkspace,
   resolveWorkspace,
@@ -122,6 +123,17 @@ export default function ChatPage() {
   const onAddWorkspace = useCallback(
     async (pick: string) => {
       const res = await addWorkspace(pick);
+      if (res.ok) await refreshWorkspaces();
+      return res;
+    },
+    [refreshWorkspaces],
+  );
+
+  // Clone + register a public git URL (BRO-1629 slice 5), then re-pull the live
+  // list so the newly cloned repo appears everywhere (same refresh as pick-add).
+  const onAddWorkspaceByUrl = useCallback(
+    async (gitUrl: string) => {
+      const res = await addWorkspaceByUrl(gitUrl);
       if (res.ok) await refreshWorkspaces();
       return res;
     },
@@ -307,6 +319,7 @@ export default function ChatPage() {
         workspaces={workspaces}
         defaultWorkspaceId={defaultWorkspaceId}
         onAddWorkspace={onAddWorkspace}
+        onAddWorkspaceByUrl={onAddWorkspaceByUrl}
         onRemoveWorkspace={onRemoveWorkspace}
       />
     </div>
