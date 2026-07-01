@@ -64,8 +64,11 @@ import {
 import { recallDirection, recallStep } from "@/lib/input-history";
 import type { ThemeChoice } from "@/lib/preferences";
 import { parseSlash, slashHelpText } from "@/lib/slash";
+import type { RunMode } from "@/lib/thread-status";
+import type { ThreadPhase } from "@/lib/threads";
 import { type MessageMetadata, resetThread } from "@/lib/threads";
 import { useComposerAutoHide } from "@/lib/use-composer-autohide";
+import { useThreadReconcile } from "@/lib/use-thread-reconcile";
 import { cn } from "@/lib/utils";
 import type { Workspace } from "@/lib/workspaces";
 
@@ -262,28 +265,61 @@ function AssistantBody({
 }
 
 // The running signal — the DS tidepool dot + a quiet, shimmering label. Idle is
-// silent (calm is load-bearing — motion encodes presence, not urgency). Errors
-// read in the danger hue, no dot.
-function RunningStatus({ status }: { status: ReturnType<typeof useChat>["status"] }) {
-  if (status === "error") {
+// silent (calm is load-bearing — motion encodes presence, not urgency). Driven by
+// the reconciled run MODE (BRO-1640) so a dropped stream reads as a recoverable
+// "Working / Reconnecting", not a dead-end error:
+//   streaming    → live SSE (Thinking / Responding)
+//   working      → turn still running server-side, no live stream (backgrounded +
+//                  returned, or opened a running thread) — same calm live signal
+//   reconnecting → briefly re-syncing the durable result (calm, not danger)
+//   error        → a genuinely blocked turn — danger hue + a Retry affordance
+//   idle         → silent
+function RunSignal({
+  mode,
+  liveStatus,
+  onRetry,
+}: {
+  mode: RunMode;
+  liveStatus: ReturnType<typeof useChat>["status"];
+  onRetry: () => void;
+}) {
+  if (mode === "error") {
     return (
-      <span role="alert" className="text-[var(--bv-danger)] text-xs">
-        Something went wrong
+      <span role="alert" className="flex items-center gap-1.5 text-xs">
+        <span className="text-[var(--bv-danger)]">Something went wrong</span>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="text-[var(--bv-blue-text)] underline underline-offset-2 hover:opacity-80"
+        >
+          Retry
+        </button>
       </span>
     );
   }
-  const busy = status === "submitted" || status === "streaming";
-  if (!busy) return null;
-  return (
-    <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
-      <span className="bv-dot-live" aria-hidden />
-      <span className="shimmer text-[var(--bv-blue-text)]">
-        {status === "streaming" ? "Responding" : "Thinking"}
+  if (mode === "reconnecting") {
+    return (
+      <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+        <span className="bv-dot-live" aria-hidden />
+        <span className="shimmer">Reconnecting…</span>
       </span>
-      {/* Live run-time (BRO-1610) — ticks from the moment the turn is in flight. */}
-      <RunTimer active={busy} />
-    </span>
-  );
+    );
+  }
+  if (mode === "streaming" || mode === "working") {
+    // "working" = the turn is running server-side but the live token stream is gone;
+    // show the same calm presence signal + timer (the result lands when it settles).
+    const label =
+      mode === "working" ? "Working" : liveStatus === "streaming" ? "Responding" : "Thinking";
+    return (
+      <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+        <span className="bv-dot-live" aria-hidden />
+        <span className="shimmer text-[var(--bv-blue-text)]">{label}</span>
+        {/* Live run-time (BRO-1610) — ticks while the turn is in flight (live or reconciled). */}
+        <RunTimer active />
+      </span>
+    );
+  }
+  return null;
 }
 
 // Terminal-style input-history recall (BRO-1598). ArrowUp at caret-start recalls
@@ -382,6 +418,7 @@ export function ChatView({
   workspace,
   workspaces,
   onWorkspaceChange,
+  serverPhase,
 }: {
   threadId: string;
   initialMessages: UIMessage[];
@@ -411,13 +448,31 @@ export function ChatView({
   /** The selectable workspaces; the picker self-hides when there's ≤1. */
   workspaces: Workspace[];
   onWorkspaceChange: (value: string) => void;
+  /** The active thread's last-known SERVER phase (BRO-1640), from the parent's
+   *  thread-list poll. Seeds the reconcile mode so opening an already-running thread
+   *  (or returning to one after a dropped stream) shows "Working" without waiting for
+   *  the first status fetch. Absent on a never-run thread. */
+  serverPhase?: ThreadPhase;
 }) {
   const transport = useMemo(() => new DefaultChatTransport({ api: "/api/chat" }), []);
-  const { messages, sendMessage, status, error, stop, regenerate } = useChat({
-    id: threadId,
-    messages: initialMessages,
-    transport,
-    onFinish: onActivity,
+  const { messages, sendMessage, status, error, stop, regenerate, setMessages, clearError } =
+    useChat({
+      id: threadId,
+      messages: initialMessages,
+      transport,
+      onFinish: onActivity,
+    });
+  // Stream reconciliation (BRO-1640): a dropped SSE (iOS backgrounding → "Load
+  // failed") is recoverable, not a crash. On error / foreground-return this clears
+  // the sticky error (un-wedging the composer), reads the server phase, and polls the
+  // durable transcript until the turn settles. `mode` drives the run signal.
+  const { mode: runMode, reconnect } = useThreadReconcile({
+    threadId,
+    liveStatus: status,
+    error,
+    initialPhase: serverPhase ?? null,
+    setMessages,
+    clearError,
   });
   // Ephemeral composer feedback (slash-command result / errors), shown above the input.
   const [notice, setNotice] = useState<string | null>(null);
@@ -602,7 +657,7 @@ export function ChatView({
         <span className="text-foreground text-[0.95rem] font-medium tracking-tight">Genesis</span>
         <span className="text-muted-foreground hidden text-sm sm:inline">Agent chat</span>
         <div className="ml-auto flex items-center gap-2">
-          <RunningStatus status={status} />
+          <RunSignal mode={runMode} liveStatus={status} onRetry={reconnect} />
           <ThemeToggle theme={theme} onChange={onThemeChange} />
         </div>
       </header>
@@ -672,9 +727,22 @@ export function ChatView({
                     );
                   })
                 )}
-                {error ? (
-                  <div role="alert" className="text-[var(--bv-danger)] text-sm">
-                    {error.message}
+                {/* Only a GENUINELY blocked turn surfaces an inline error (BRO-1640):
+                    a transient stream drop (background) reconciles silently to
+                    Working/Reconnecting instead of dumping "Load failed" here. */}
+                {runMode === "error" ? (
+                  <div
+                    role="alert"
+                    className="text-[var(--bv-danger)] flex items-center gap-2 text-sm"
+                  >
+                    <span>The agent run was interrupted.</span>
+                    <button
+                      type="button"
+                      onClick={reconnect}
+                      className="text-[var(--bv-blue-text)] underline underline-offset-2 hover:opacity-80"
+                    >
+                      Retry
+                    </button>
                   </div>
                 ) : null}
               </MessageScrollerContent>

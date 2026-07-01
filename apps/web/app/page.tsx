@@ -240,6 +240,27 @@ export default function ChatPage() {
     return () => clearInterval(id);
   }, [hasLiveThread, refreshThreads]);
 
+  // Immediate reconcile on foreground return (BRO-1640): the 4s poll pauses while the
+  // tab is hidden and only ticks when a thread is already known-live, so on returning
+  // from the background the drawer phases (and the active thread's serverPhase, which
+  // gates the composer's Working/Reconnecting signal) could be up to 4s stale — or
+  // never refresh if the thread started while hidden. Refresh the list at once so the
+  // active ChatView sees the true phase and reconciles. (ChatView re-fetches its own
+  // transcript; this only refreshes the list.)
+  useEffect(() => {
+    const onForeground = () => {
+      if (document.visibilityState !== "hidden") void refreshThreads();
+    };
+    document.addEventListener("visibilitychange", onForeground);
+    window.addEventListener("pageshow", onForeground);
+    window.addEventListener("online", onForeground);
+    return () => {
+      document.removeEventListener("visibilitychange", onForeground);
+      window.removeEventListener("pageshow", onForeground);
+      window.removeEventListener("online", onForeground);
+    };
+  }, [refreshThreads]);
+
   // `fixed inset-0` (below) pins the app to the viewport (ICB) directly — the
   // bulletproof full-screen technique for iOS standalone PWAs, where `100dvh`
   // under-resolves (reports shorter than the real screen → a dark band below the
@@ -303,6 +324,7 @@ export default function ChatPage() {
             workspace={activeWorkspace}
             workspaces={workspaces}
             onWorkspaceChange={(value) => update({ workspace: value })}
+            serverPhase={activeThread?.phase}
           />
         ) : (
           <div className="text-muted-foreground flex flex-1 items-center justify-center text-sm">
