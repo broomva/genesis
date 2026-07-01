@@ -1,16 +1,19 @@
-import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
 import { Supervisor, deriveTitle } from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
 
-const ws = { id: "ws-1", name: "test", rootPath: "/tmp/genesis-test" };
-
-// The default test workspace's rootPath must EXIST so the BRO-1630 RC3 vanished-
-// workspace guard (enforced on local hosts) lets dispatch through. Tests that use
-// OTHER fake rootPaths inject `workspaceExists: () => true` to bypass the guard.
+// A pid-unique real dir (not a fixed /tmp path) so the BRO-1630 RC3 vanished-
+// workspace guard (enforced on local hosts) lets dispatch through, without
+// aliasing a pre-existing dir or leaking state across runs (P20 #5). Tests that
+// use OTHER fake rootPaths inject `workspaceExists: () => true` to bypass the guard.
+const ws = { id: "ws-1", name: "test", rootPath: join(tmpdir(), `genesis-test-${process.pid}`) };
 beforeAll(() => mkdirSync(ws.rootPath, { recursive: true }));
+afterAll(() => rmSync(ws.rootPath, { recursive: true, force: true }));
 
 function fakeRunner(
   reply: string,
@@ -826,10 +829,12 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
 describe("supervisor — workspace availability guard (BRO-1629 slice 4 / BRO-1630 RC3)", () => {
   const gone = { id: "ws-gone", name: "ghost", rootPath: `/tmp/genesis-vanished-${process.pid}` };
 
-  test("dispatch into a vanished rootPath throws a clear error and NEVER spawns", async () => {
+  test("dispatch into a vanished rootPath throws a clear error, NEVER spawns, and leaves the session BLOCKED (not phantom-running, P20 #1)", async () => {
     let ran = false;
+    const store = new InMemoryStore();
     const sup = new Supervisor({
       defaultWorkspace: gone, // real existsSync → the dir does not exist → guarded
+      store,
       run: async () => {
         ran = true;
         return {
@@ -841,6 +846,9 @@ describe("supervisor — workspace availability guard (BRO-1629 slice 4 / BRO-16
     });
     await expect(sup.dispatch("t-vanished", "hi")).rejects.toThrow(/unavailable|no longer exists/i);
     expect(ran).toBe(false); // guarded BEFORE the runner was invoked (no phantom-cwd spawn)
+    // The throw must NOT leave the session persisted "running" (a forever-spinner
+    // in the UI) — the catch resets it to blocked.
+    expect((await store.findSessionByThread("t-vanished"))?.phase).toBe("blocked");
   });
 
   test("the guard is skipped for NON-local hosts (repo lives inside the VM)", async () => {

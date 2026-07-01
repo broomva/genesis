@@ -790,8 +790,18 @@ export function ChatView({
                             </PromptInputSelectTrigger>
                             <PromptInputSelectContent>
                               {workspaces.map((w) => (
-                                <PromptInputSelectItem key={w.id} value={w.id}>
+                                // A vanished workspace (BRO-1630 RC3) can't be bound —
+                                // the server dispatch guard rejects it — so disable it
+                                // here rather than let the user pick a dead-on-arrival
+                                // thread. `available === false` only; undefined (older
+                                // engine) stays selectable.
+                                <PromptInputSelectItem
+                                  key={w.id}
+                                  value={w.id}
+                                  disabled={w.available === false}
+                                >
                                   {w.name}
+                                  {w.available === false ? " (unavailable)" : ""}
                                 </PromptInputSelectItem>
                               ))}
                             </PromptInputSelectContent>

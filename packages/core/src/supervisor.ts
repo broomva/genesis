@@ -193,6 +193,9 @@ export class Supervisor {
   /** rootPath-existence probe (BRO-1629 slice 4 / BRO-1630 RC3); `existsSync` in
    *  production, overridable in tests. */
   private readonly workspaceExists: (rootPath: string) => boolean;
+  /** Workspace ids already warned about as missing-on-disk — dedupes the
+   *  reconciliation warning across registry reloads (BRO-1630 P20 #4). */
+  private readonly warnedMissingWorkspaces = new Set<string>();
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
@@ -278,14 +281,21 @@ export class Supervisor {
     ]);
     // Reconciliation observability (BRO-1629 slice 4 / BRO-1630 RC3): warn LOUDLY
     // for any registered workspace whose rootPath has vanished from disk — the
-    // dispatch-time guard blocks binding it, but a boot-time signal lets the
-    // operator recreate the dir (or re-point GENESIS_WORKSPACE) before a user hits
-    // it. Especially important for the DEFAULT workspace, which cannot be removed.
+    // dispatch-time guard blocks binding it, but this signal lets the operator
+    // recreate the dir (or re-point GENESIS_WORKSPACE) before a user hits it.
+    // Especially important for the DEFAULT workspace, which cannot be removed.
+    // loadRegistry re-runs on EVERY runtime mutation (refreshRegistry), so dedupe
+    // per id (P20 #4): warn once while missing, re-arm when the dir reappears.
     for (const w of this.workspaceRegistry.values()) {
       if (!this.workspaceExists(w.rootPath)) {
-        console.warn(
-          `[genesis] workspace "${w.id}" rootPath is missing on disk${w.id === this.defaultWorkspace.id ? " (this is the DEFAULT workspace — new threads will fail until it exists)" : ""}. Threads bound to it will be refused at dispatch until the directory is restored.`,
-        );
+        if (!this.warnedMissingWorkspaces.has(w.id)) {
+          this.warnedMissingWorkspaces.add(w.id);
+          console.warn(
+            `[genesis] workspace "${w.id}" rootPath is missing on disk${w.id === this.defaultWorkspace.id ? " (this is the DEFAULT workspace — new threads will fail until it exists)" : ""}. Threads bound to it will be refused at dispatch until the directory is restored.`,
+          );
+        }
+      } else {
+        this.warnedMissingWorkspaces.delete(w.id); // reappeared → allow a future re-warn
       }
     }
     // Mirror the CORRECTED set into the Store (idempotent) so a thread bound to a
@@ -460,10 +470,16 @@ export class Supervisor {
       // run into a rootPath that has vanished from disk (deleted out-of-band, an
       // unmounted volume). Without this, a LOCAL spawn falls back to the process
       // cwd (e.g. /home/agent) and the agent silently runs in the WRONG place —
-      // the "working directory isn't a git repo" symptom. LOCAL hosts only: a
-      // microVM/remote host runs the repo INSIDE the VM, so a local existsSync of
-      // rootPath is meaningless (and would false-positive). The error names the
+      // the "working directory isn't a git repo" symptom. The error names the
       // workspace, never its rootPath (that path must not leak past the engine).
+      //
+      // Scope — LOCAL hosts only (a `microvm` host runs the repo INSIDE the VM, so
+      // a local existsSync of rootPath is meaningless and would false-positive).
+      // KNOWN GAP (P20 #2): a `vps` host runs over ssh with rootPath as a REMOTE
+      // path — a vanished remote dir reproduces this exact bug, but a local
+      // existsSync can't see it; it needs a remote `test -d` via host.exec. VpsHost
+      // is not yet wired into the api (only LocalHost + microVM ship today), so
+      // this is latent — tracked for when vps is instantiated (BRO-1631).
       if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
         throw new Error(
           `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
@@ -547,6 +563,17 @@ export class Supervisor {
       );
       return { session, reply, phase: result.state.phase, usage, costUsd, durationMs };
     } catch (e) {
+      // A THROWN dispatch error (the availability guard, a host-lease failure, a
+      // runner that throws) bypasses the runner's own F20 reconcile, which would
+      // otherwise leave the session persisted as `phase: "running"` — a PHANTOM
+      // spinner in the UI that never resolves (BRO-1630 P20 #1). The in-process
+      // catch runs (unlike a process crash, which boot reconcile handles), so
+      // reset the truth to `blocked` here. Best-effort: a failing upsert must not
+      // mask the original error.
+      if (session.phase === "running") {
+        session.phase = "blocked";
+        await this.store.upsertSession(session).catch(() => {});
+      }
       // Full server-side detail (BRO-1519) — previously the error was swallowed
       // and only a generic "Something went wrong" reached the user.
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);

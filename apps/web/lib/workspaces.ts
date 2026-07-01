@@ -13,8 +13,10 @@ export interface Workspace {
   isGitRepo?: boolean;
   /** Does the workspace's directory still exist on the server? (BRO-1629 slice 4 /
    *  BRO-1630 RC3.) Computed server-side; absent on older engines → treat as
-   *  available. `false` → the repo dir vanished; binding a new thread to it will
-   *  error at run time, so the UI marks it and blocks selection. */
+   *  available. `false` → the repo dir vanished; binding a new thread to it errors
+   *  at run time. The ACTUAL enforcement is the server dispatch guard; the UI
+   *  surfaces `false` (the workspace manager badges it "unavailable"; the composer
+   *  picker disables it) so the user isn't surprised by the server rejection. */
   available?: boolean;
 }
 
