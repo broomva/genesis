@@ -26,7 +26,20 @@ describe("LocalHost.spawnStream — stdin input (BRO-1642)", () => {
     expect(out.length).toBe(big.length);
   });
 
-  test("no `input` → stdin is not piped (child still runs)", async () => {
+  test("a 512 KiB payload is delivered WITHOUT truncation (refutes the fire-and-forget write concern, P20)", async () => {
+    const host = new LocalHost();
+    // `wc -c` counts stdin bytes — a truncated write would report fewer than sent.
+    // 512 KiB is well past the kernel pipe buffer (~64 KiB), so it exercises the
+    // FileSink's own buffering across many pipe-drain cycles.
+    const n = 512 * 1024;
+    const handle = host.spawnStream(["wc", "-c"], { input: "y".repeat(n) });
+    let out = "";
+    for await (const l of handle.stdout) out += l;
+    expect(await handle.exitCode).toBe(0);
+    expect(Number.parseInt(out.trim(), 10)).toBe(n); // every byte arrived
+  });
+
+  test("no `input` → stdin is ignored, not inherited (headless; child still runs)", async () => {
     const host = new LocalHost();
     const handle = host.spawnStream(["printf", "hi\\n"]);
     const lines: string[] = [];

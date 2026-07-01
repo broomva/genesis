@@ -146,9 +146,27 @@ describe("VercelSandboxHost", () => {
     for await (const _l of handle.stdout) {
       /* drain */
     }
-    // The prompt still reaches claude as a positional arg (preserves pre-BRO-1642
-    // behavior on the microVM, where stdin can't be piped through runCommand).
-    expect(sb.runCalls[0]?.args).toEqual(["-p", "--output-format", "stream-json", "the prompt"]);
+    // The prompt reaches claude as a positional arg AFTER a `--` end-of-options
+    // guard (preserves pre-BRO-1642 behavior on the microVM + protects a
+    // dash-prefixed prompt from being parsed as a flag).
+    expect(sb.runCalls[0]?.args).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--",
+      "the prompt",
+    ]);
+  });
+
+  test("a dash-prefixed prompt is guarded by `--`, not parsed as a flag (BRO-1642 P20)", async () => {
+    const sb = new FakeSandbox(() => ({ logs: [{ stream: "stdout", data: "ok\n" }], exit: 0 }));
+    const host = new VercelSandboxHost(sb);
+    const handle = host.spawnStream(["claude", "-p"], { input: "--help" });
+    for await (const _l of handle.stdout) {
+      /* drain */
+    }
+    // `--` sits before the prompt so `--help` is the literal prompt, never the flag.
+    expect(sb.runCalls[0]?.args).toEqual(["-p", "--", "--help"]);
   });
 
   test("readFile returns content and throws when the file is absent", async () => {

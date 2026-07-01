@@ -92,11 +92,14 @@ export class LocalHost implements ExecutionHost {
     // stderr is "ignore" (not "pipe"): an undrained pipe would deadlock the
     // child once its stderr buffer fills, stalling stdout/the reducer (F15).
     // stdin is piped only when `input` is supplied (the large-prompt path,
-    // BRO-1642) — otherwise inherit, so interactive/child git prompts behave.
+    // BRO-1642); otherwise "ignore" (child gets /dev/null → immediate EOF). NOT
+    // "inherit": a headless server must never hand its own stdin to a child (a
+    // non-input caller like the codex runner would otherwise read the server's
+    // stdin and could hang on a TTY/pipe). "ignore" matches Bun's headless default.
     const proc = Bun.spawn(cmd, {
       cwd: opts?.cwd,
       env: opts?.replaceEnv ? (opts.env ?? {}) : { ...process.env, ...opts?.env },
-      stdin: opts?.input !== undefined ? "pipe" : "inherit",
+      stdin: opts?.input !== undefined ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "ignore",
     });
