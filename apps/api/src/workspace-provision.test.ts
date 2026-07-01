@@ -7,6 +7,7 @@ import {
   availableWorkspaces,
   defaultGitUrlPolicy,
   provisionFromGitUrl,
+  purgeCloneTmp,
   resolveGitUrl,
   resolvePick,
 } from "./workspace-provision";
@@ -155,6 +156,29 @@ describe("resolveGitUrl — SSRF / scheme / credential rejection matrix", () => 
     );
   });
 
+  test("rejects a query string or fragment (blocks ?token= credential smuggling)", () => {
+    const dir = root([]);
+    for (const bad of [
+      "https://github.com/x/y.git?token=secret",
+      "https://github.com/x/y.git?access_token=abc",
+      "https://github.com/x/y.git#frag",
+    ]) {
+      expect(() => resolveGitUrl(dir, bad, new Set(), POLICY)).toThrow(/query string or fragment/);
+    }
+  });
+
+  test("accepts a trailing FQDN dot on the host (normalized to the allowlist form)", () => {
+    const dir = root([]);
+    // `github.com.` is a valid absolute-DNS spelling git resolves fine — it must match
+    // the `github.com` allowlist entry, not be wrongly rejected (P20 CRIT-1 / MED-1).
+    const ws = resolveGitUrl(dir, "https://github.com./broomva/genesis.git", new Set(), POLICY);
+    expect(ws.name).toBe("genesis");
+    // A trailing dot on a NON-allowlisted host is still rejected (no widening).
+    expect(() =>
+      resolveGitUrl(dir, "https://evil.example.com./x/y.git", new Set(), POLICY),
+    ).toThrow(/not allowed/);
+  });
+
   test("rejects a malformed / empty / oversized / non-string URL", () => {
     const dir = root([]);
     for (const bad of [
@@ -204,6 +228,11 @@ describe("defaultGitUrlPolicy", () => {
     expect(p.allowedHosts.has("codeberg.org")).toBe(true); // lower-cased + trimmed
   });
 
+  test("normalizes a trailing FQDN dot on an allowlist entry (no foot-gun)", () => {
+    const p = defaultGitUrlPolicy({ GENESIS_GIT_URL_HOSTS: "git.acme.internal." });
+    expect(p.allowedHosts.has("git.acme.internal")).toBe(true); // dot stripped, not "…internal."
+  });
+
   test("defaults the clone timeout when env is missing/invalid", () => {
     expect(defaultGitUrlPolicy({}).cloneTimeoutMs).toBe(120_000);
     expect(defaultGitUrlPolicy({ GENESIS_GIT_CLONE_TIMEOUT_MS: "abc" }).cloneTimeoutMs).toBe(
@@ -211,6 +240,12 @@ describe("defaultGitUrlPolicy", () => {
     );
     expect(defaultGitUrlPolicy({ GENESIS_GIT_CLONE_TIMEOUT_MS: "5000" }).cloneTimeoutMs).toBe(
       5_000,
+    );
+  });
+
+  test("clamps an absurd timeout to the 10-minute ceiling", () => {
+    expect(defaultGitUrlPolicy({ GENESIS_GIT_CLONE_TIMEOUT_MS: "999999999" }).cloneTimeoutMs).toBe(
+      600_000,
     );
   });
 });
@@ -285,5 +320,21 @@ describe("provisionFromGitUrl — clone then register (clone mocked)", () => {
       }),
     ).rejects.toThrow(/not produce a git repository/);
     expect(existsSync(join(dir, "empty"))).toBe(false);
+  });
+});
+
+describe("purgeCloneTmp (P20 HIGH-2 — boot-sweep orphaned partial clones)", () => {
+  test("removes an orphaned quarantine dir, leaves real workspaces untouched", () => {
+    const dir = root([]);
+    mkdirSync(join(dir, ".genesis-clone-tmp", "12345.deadbeef", ".git"), { recursive: true });
+    mkdirSync(join(dir, "real-repo", ".git"), { recursive: true }); // a registered workspace
+    purgeCloneTmp(dir);
+    expect(existsSync(join(dir, ".genesis-clone-tmp"))).toBe(false); // orphan swept
+    expect(existsSync(join(dir, "real-repo", ".git"))).toBe(true); // untouched
+  });
+
+  test("no-op when the allow-root is undefined or the quarantine is absent", () => {
+    expect(() => purgeCloneTmp(undefined)).not.toThrow();
+    expect(() => purgeCloneTmp(root([]))).not.toThrow(); // no .genesis-clone-tmp present
   });
 });

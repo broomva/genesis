@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { devNull } from "node:os";
 import { resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Workspace } from "@genesis/core";
@@ -121,18 +122,31 @@ export interface GitUrlPolicy {
   cloneTimeoutMs: number;
 }
 
+/** Hard ceiling on the configurable clone timeout (10 min) — a huge
+ *  GENESIS_GIT_CLONE_TIMEOUT_MS would silently re-enable a slow-clone DoS window
+ *  (P20 MED-2), so an absurd value is clamped rather than trusted. */
+const MAX_CLONE_TIMEOUT_MS = 600_000;
+
+/** Normalize a hostname for the allowlist: lower-cased + a single trailing FQDN dot
+ *  stripped, so `github.com.` (a valid absolute-DNS spelling git resolves fine) is
+ *  treated as `github.com` on BOTH the URL side and the allowlist side (P20 CRIT-1 /
+ *  MED-1). This never widens the allowlist — an internal host with a trailing dot
+ *  still isn't listed; it only stops a legit FQDN from being wrongly rejected + a
+ *  `github.com.` allowlist entry from being a foot-gun. */
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.$/, "");
+}
+
 /** Build the clone policy from env (defaults + GENESIS_GIT_URL_HOSTS union). */
 export function defaultGitUrlPolicy(
   env: Record<string, string | undefined> = process.env,
 ): GitUrlPolicy {
-  const extra = (env.GENESIS_GIT_URL_HOSTS ?? "")
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean);
+  const extra = (env.GENESIS_GIT_URL_HOSTS ?? "").split(",").map(normalizeHost).filter(Boolean);
   const timeout = Number(env.GENESIS_GIT_CLONE_TIMEOUT_MS);
   return {
     allowedHosts: new Set<string>([...DEFAULT_GIT_HOSTS, ...extra]),
-    cloneTimeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : 120_000,
+    cloneTimeoutMs:
+      Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, MAX_CLONE_TIMEOUT_MS) : 120_000,
   };
 }
 
@@ -184,9 +198,17 @@ export function resolveGitUrl(
   if (parsed.port && parsed.port !== "443") {
     throw new WorkspaceValidationError("git URL must use the default https port");
   }
+  // No query string / fragment. A clone URL carries neither; rejecting them blocks
+  // credentials smuggled as `?token=…`/`?access_token=…` (P20 CRIT-3) and any query-
+  // based redirect/smuggle trick — the URL that reaches `git clone` is exactly the
+  // scheme://host/path we validated, nothing appended.
+  if (parsed.search || parsed.hash) {
+    throw new WorkspaceValidationError("git URL must not contain a query string or fragment");
+  }
   // The SSRF firewall: host must be allowlisted. This one check subsumes the whole
-  // metadata-IP / localhost / RFC-1918 / link-local denylist — none are listed.
-  const host = parsed.hostname.toLowerCase();
+  // metadata-IP / localhost / RFC-1918 / link-local denylist — none are listed. The
+  // host is normalized (trailing FQDN dot stripped) to match the allowlist form.
+  const host = normalizeHost(parsed.hostname);
   if (!policy.allowedHosts.has(host)) {
     const allowed = [...policy.allowedHosts].sort().join(", ");
     throw new WorkspaceValidationError(`git host "${host}" is not allowed (allowed: ${allowed})`);
@@ -223,28 +245,28 @@ function rmSafe(path: string): void {
   }
 }
 
-/** The real clone: non-interactive, credential-less, shallow, single-branch, bounded.
- *  GIT_TERMINAL_PROMPT=0 + an empty credential.helper guarantee it can never block
- *  waiting for auth (a private/typo'd URL fails fast instead of hanging the request).
- *  Async (execFile, not execFileSync) so a slow clone never pins the event loop. */
+/** The real clone: non-interactive, credential-less, shallow, single-branch, bounded,
+ *  and HERMETIC. GIT_TERMINAL_PROMPT=0 + an empty credential.helper guarantee it can
+ *  never block waiting for auth (a private/typo'd URL fails fast). GIT_CONFIG_GLOBAL /
+ *  _SYSTEM → /dev/null neutralize any ambient `url.<x>.insteadOf` rewrite (an SSRF
+ *  vector — a poisoned gitconfig could redirect the validated URL to an internal host)
+ *  and any ambient credential helper (P20 LOW-1). Async (execFile, not execFileSync)
+ *  so a slow clone never pins the event loop; SIGKILL on timeout so a git that ignores
+ *  SIGTERM is still reaped (P20 CRIT-2). `--` fixes the url/target as operands. */
 async function gitClone(url: string, target: string, timeoutMs: number): Promise<void> {
   await execFileAsync(
     "git",
-    [
-      "-c",
-      "credential.helper=", // ignore any ambient stored credentials
-      "clone",
-      "--depth",
-      "1",
-      "--single-branch",
-      "--no-tags",
-      "--",
-      url,
-      target,
-    ],
+    ["clone", "--depth", "1", "--single-branch", "--no-tags", "--", url, target],
     {
       timeout: timeoutMs,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" },
+      killSignal: "SIGKILL",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: devNull,
+        GIT_CONFIG_SYSTEM: devNull,
+      },
     },
   );
 }
@@ -311,4 +333,15 @@ export async function provisionFromGitUrl(
     );
   }
   return { id, name, rootPath: targetPath, isGitRepo: true };
+}
+
+/** Sweep the clone quarantine dir (P20 HIGH-2). A soft failure always rmSafe's its
+ *  own temp, but a HARD kill (SIGKILL/OOM/deploy) mid-clone leaves a partial checkout
+ *  under `.genesis-clone-tmp` forever → slow disk leak. Called ONCE at boot, when the
+ *  process is fresh and there are provably no in-flight clones, so removing the whole
+ *  quarantine dir is safe (single-instance-per-allow-root is already a documented
+ *  invariant). Best-effort + no-op when the allow-root / dir is absent. */
+export function purgeCloneTmp(allowRoot: string | undefined): void {
+  if (!allowRoot) return;
+  rmSafe(resolve(allowRoot, CLONE_TMP_DIR));
 }
