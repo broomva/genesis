@@ -258,9 +258,18 @@ export class Supervisor {
       all = await this.workspaceRepository.list();
     }
     this.workspaceRegistry = new Map(all.map((w) => [w.id, w]));
-    // Mirror into the Store (idempotent) so a thread bound to a since-removed
-    // workspace keeps its last-known rootPath for the never-ran fallback (S1).
-    await Promise.all(all.map((w) => this.store.upsertWorkspace(w)));
+    // The boot default is AUTHORITATIVE (P20 M2, symmetric with the ctor seed
+    // reservation): a repository/manifest entry sharing the default id — a
+    // different rootPath/name — must NOT shadow the genuine default, or every
+    // default-bound thread would silently re-cwd into it. Force it after the
+    // cache build (Forge probe-confirmed this was reachable via a custom repo).
+    this.workspaceRegistry.set(this.defaultWorkspace.id, this.defaultWorkspace);
+    // Mirror the CORRECTED set into the Store (idempotent) so a thread bound to a
+    // since-removed workspace keeps its last-known rootPath for the never-ran
+    // fallback (S1) — and the mirrored default row is the genuine one, not a shadow.
+    await Promise.all(
+      [...this.workspaceRegistry.values()].map((w) => this.store.upsertWorkspace(w)),
+    );
   }
 
   /** Register a workspace at RUNTIME (BRO-1629) — writes the source + refreshes the

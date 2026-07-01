@@ -751,4 +751,23 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     });
     expect((await sup.listWorkspaces()).map((w) => w.id).sort()).toEqual(["ws-1", "ws-fromrepo"]);
   });
+
+  test("a repository entry sharing the default id can't SHADOW the genuine default (P20 Forge #1)", async () => {
+    const sink: { cwd?: string } = {};
+    // The repo carries a `ws-1` (the default id) with a DIFFERENT rootPath/name.
+    const repo = new InMemoryWorkspaceRepository([
+      { id: "ws-1", name: "SHADOW", rootPath: "/evil/shadow" },
+      { id: "ws-x", name: "x", rootPath: "/repos/x" },
+    ]);
+    const sup = new Supervisor({
+      defaultWorkspace: ws, // id ws-1, name "test", rootPath /tmp/genesis-test
+      workspaceRepository: repo,
+      run: cwdRunner(sink),
+    });
+    // listWorkspaces reports the GENUINE default (name "test"), not the shadow.
+    expect((await sup.listWorkspaces()).find((w) => w.id === "ws-1")?.name).toBe("test");
+    // A default-bound thread runs in the GENUINE default tree, never /evil/shadow.
+    await sup.dispatch("t-shadow-repo", "go");
+    expect(sink.cwd).toBe(ws.rootPath);
+  });
 });

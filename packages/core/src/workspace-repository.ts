@@ -14,9 +14,14 @@ import type { Workspace } from "./types";
 export interface WorkspaceRepository {
   /** Every registered workspace (the full record, incl. rootPath — server-only). */
   list(): Promise<Workspace[]>;
-  /** One workspace by id, or undefined. */
+  /** One workspace by id, or undefined. (Consumed by the CRUD endpoints + the FS
+   *  adapter; the Supervisor hot path uses the hydrated cache.) */
   get(id: string): Promise<Workspace | undefined>;
-  /** Register (create-or-update) a workspace. Returns the stored record. */
+  /** Register a workspace. CONTRACT: this MUST be idempotent create-or-UPDATE
+   *  (upsert by id), never append — the Supervisor may re-seed / re-register the
+   *  same workspace across concurrent hydrations (P20 Forge #2), and correctness
+   *  relies on a second register of the same id being a no-op-or-overwrite, not a
+   *  duplicate. Returns the stored record. */
   register(ws: Workspace): Promise<Workspace>;
   /** De-register a workspace (idempotent; a missing id is a no-op). */
   remove(id: string): Promise<void>;
