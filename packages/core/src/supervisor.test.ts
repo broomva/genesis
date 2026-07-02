@@ -302,6 +302,88 @@ describe("supervisor", () => {
     expect(seenWorktree).toBeUndefined();
   });
 
+  // ── Per-session worktree binding (BRO-1656) ──
+  /** A runner that records the `worktree` RunOption for every turn + returns a
+   *  sessionId so a second dispatch is NOT treated as turn 1 (sticky check). */
+  function worktreeSpy(seen: (boolean | undefined)[]) {
+    return async (o: any): Promise<RunResult> => {
+      seen.push(o.worktree);
+      return {
+        state: { phase: "done", sessionId: "s", lastText: "ok", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+  }
+
+  test("per-session worktree:false → runner runs at ROOT (BRO-1656)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const sup = new Supervisor({ defaultWorkspace: ws, run: worktreeSpy(seen) });
+    await sup.dispatch("tw3", "hi", undefined, { worktree: false });
+    expect(seen).toEqual([false]); // noWorktree true → worktree:false
+  });
+
+  test("per-session worktree:true → runner CUTS a worktree (BRO-1656)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const sup = new Supervisor({ defaultWorkspace: ws, run: worktreeSpy(seen) });
+    await sup.dispatch("tw4", "hi", undefined, { worktree: true });
+    expect(seen).toEqual([undefined]); // noWorktree false → worktree left unset (cut one)
+  });
+
+  test("worktree choice is STICKY — a later turn ignores a changed request (BRO-1656)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const sup = new Supervisor({ defaultWorkspace: ws, run: worktreeSpy(seen) });
+    await sup.dispatch("tw5", "one", undefined, { worktree: false }); // bind root
+    await sup.dispatch("tw5", "two", undefined, { worktree: true }); // ignored (sticky)
+    expect(seen).toEqual([false, false]); // both root
+  });
+
+  test("safety: worktree:true is IGNORED when the deploy default forces root (BRO-1656/BRO-1512)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      noWorktree: true, // deploy-global root (e.g. a nested-repo default workspace)
+      run: worktreeSpy(seen),
+    });
+    await sup.dispatch("tw6", "hi", undefined, { worktree: true }); // asks for a worktree
+    expect(seen).toEqual([false]); // still root — never cut a worktree onto a nested repo
+  });
+
+  test("a fallback (non-registered) workspace forces ROOT — unverifiable posture (BRO-1656 P20 F5)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const store = new InMemoryStore();
+    // A workspace known to the STORE (DB row: id/name/rootPath) but NOT the registry,
+    // so its registry-only `noWorktree` is lost. A never-run session bound to it.
+    await store.upsertWorkspace({ id: "ws-ghost", name: "ghost", rootPath: ws.rootPath });
+    await store.upsertSession({
+      id: "sg",
+      workspaceId: "ws-ghost",
+      threadId: "tg",
+      phase: "idle",
+      createdAt: new Date().toISOString(),
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: worktreeSpy(seen) });
+    await sup.dispatch("tg", "hi", undefined, { worktree: true }); // asks for a worktree
+    expect(seen).toEqual([false]); // forced root — can't verify the workspace isn't nested
+  });
+
+  test("an inheriting thread FREEZES its posture on turn 1 — no cwd bounce on a later default flip (BRO-1656 CodeRabbit)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const store = new InMemoryStore();
+    // No explicit choice + deploy-global root → the thread INHERITS root, and that
+    // posture is persisted so a later workspace-default flip can't bounce its cwd
+    // (which would break claude --resume continuity).
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      store,
+      noWorktree: true,
+      run: worktreeSpy(seen),
+    });
+    await sup.dispatch("tf", "one"); // inherit → root
+    expect(seen).toEqual([false]);
+    expect((await store.findSessionByThread("tf"))?.noWorktree).toBe(true); // FROZEN, not undefined
+  });
+
   test("blocked phase propagates to the dispatch result", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("boom", "s", "blocked") });
     const r = await sup.dispatch("t3", "break it");

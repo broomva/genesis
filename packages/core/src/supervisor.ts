@@ -42,6 +42,12 @@ export interface TurnOptions {
    *  thread's first turn, when the session row is minted); ignored after.
    *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`. */
   workspaceId?: string;
+  /** Requested worktree posture (BRO-1656) — `true` = cut a per-session worktree,
+   *  `false` = run at the workspace root. Honored only on a thread's FIRST turn
+   *  (sticky), and only when the workspace ALLOWS a worktree (a nested-repo
+   *  workspace with `noWorktree` stays root-only — worktrees break there). Mirrors
+   *  `engine`/`workspaceId`. */
+  worktree?: boolean;
 }
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
@@ -427,9 +433,40 @@ export class Supervisor {
     }
     const workspace =
       registered ?? (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
-    // Per-workspace worktree posture wins over the supervisor global (BRO-1512):
-    // a nested-monorepo workspace runs direct; a single-repo one may worktree.
-    const noWorktree = workspace.noWorktree ?? this.noWorktree;
+    // Worktree posture (BRO-1656 layered on BRO-1512). The DEFAULT is the workspace's
+    // posture, else the deploy global — both mark "run at root" for a nested-repo
+    // context where worktrees break.
+    const defaultNoWorktree = workspace.noWorktree ?? this.noWorktree;
+    // FREEZE the effective posture on the first turn (mirrors the engine bind). A
+    // thread's cwd must not change across turns — `claude --resume` is cwd-scoped, so
+    // an inheriting thread bouncing root↔worktree when the workspace default later
+    // flips would break continuity (CodeRabbit). So the derived posture is persisted
+    // once and reused. Derivation, most-restrictive first:
+    //   - explicit ROOT (worktree:false) → root (always safe);
+    //   - explicit WORKTREE (worktree:true) → worktree ONLY where the REGISTRY vouches
+    //     the workspace allows it (registry carries the real `noWorktree`; a DB-row
+    //     fallback drops it, so an unverifiable workspace stays root — P20 F5);
+    //   - INHERIT (undefined) → the registered default, else root (unverifiable).
+    if (session.noWorktree === undefined && session.agentSessionId === undefined) {
+      const canWorktree = !!registered && !defaultNoWorktree;
+      session.noWorktree =
+        turnOpts?.worktree === false
+          ? true
+          : turnOpts?.worktree === true
+            ? !canWorktree
+            : registered
+              ? defaultNoWorktree
+              : true;
+    }
+    // The frozen choice wins, EXCEPT a stored "worktree" (false) is still downgraded to
+    // root if the default now FORBIDS one (the workspace became nested since the freeze)
+    // — safety beats resume continuity: a broken worktree checkout is worse than a
+    // broken resume. (`?? defaultNoWorktree` covers legacy pre-BRO-1656 ran rows that
+    // never froze a posture.)
+    const noWorktree =
+      session.noWorktree === false && defaultNoWorktree
+        ? true
+        : (session.noWorktree ?? defaultNoWorktree);
     await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
     // Derive a thread title from the first user turn (BRO-1592) — persisted with

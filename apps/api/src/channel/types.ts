@@ -33,6 +33,10 @@ export interface IncomingMessage {
    *  selectable set is server-dynamic, so there's no client-side enum to validate
    *  against (membership is checked downstream in Supervisor.resolve). */
   workspaceId?: string;
+  /** Requested worktree posture (BRO-1656) — `true` = per-session worktree, `false`
+   *  = run at the workspace root. Honored only on turn 1 (sticky), and only when the
+   *  workspace allows a worktree (a nested-repo workspace stays root-only). */
+  worktree?: boolean;
 }
 
 /** Agent engines a client may request (BRO-1620). Validated in parseChatRequest;

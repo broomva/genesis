@@ -27,6 +27,7 @@ interface SessionRow {
   archived?: boolean | null;
   title?: string | null;
   engine?: string | null;
+  noWorktree?: boolean | null;
 }
 
 interface TurnRow {
@@ -70,6 +71,7 @@ function toSession(r: SessionRow): Session {
     archived: r.archived ?? false,
     title: r.title ?? undefined,
     engine: r.engine ?? undefined,
+    noWorktree: r.noWorktree ?? undefined,
   };
 }
 
@@ -126,6 +128,7 @@ export class DrizzleStore implements Store {
       archived: s.archived ?? false,
       title: s.title ?? null,
       engine: s.engine ?? null,
+      noWorktree: s.noWorktree ?? null,
     };
     await this.db
       .insert(sessions)
@@ -142,6 +145,7 @@ export class DrizzleStore implements Store {
           archived: row.archived,
           title: row.title,
           engine: row.engine,
+          noWorktree: row.noWorktree,
         },
       });
     return s;
