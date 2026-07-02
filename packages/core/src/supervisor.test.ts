@@ -349,6 +349,24 @@ describe("supervisor", () => {
     expect(seen).toEqual([false]); // still root — never cut a worktree onto a nested repo
   });
 
+  test("a fallback (non-registered) workspace forces ROOT — unverifiable posture (BRO-1656 P20 F5)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const store = new InMemoryStore();
+    // A workspace known to the STORE (DB row: id/name/rootPath) but NOT the registry,
+    // so its registry-only `noWorktree` is lost. A never-run session bound to it.
+    await store.upsertWorkspace({ id: "ws-ghost", name: "ghost", rootPath: ws.rootPath });
+    await store.upsertSession({
+      id: "sg",
+      workspaceId: "ws-ghost",
+      threadId: "tg",
+      phase: "idle",
+      createdAt: new Date().toISOString(),
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: worktreeSpy(seen) });
+    await sup.dispatch("tg", "hi", undefined, { worktree: true }); // asks for a worktree
+    expect(seen).toEqual([false]); // forced root — can't verify the workspace isn't nested
+  });
+
   test("blocked phase propagates to the dispatch result", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("boom", "s", "blocked") });
     const r = await sup.dispatch("t3", "break it");

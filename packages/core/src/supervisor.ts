@@ -439,7 +439,10 @@ export class Supervisor {
     const defaultNoWorktree = workspace.noWorktree ?? this.noWorktree;
     // Bind the per-SESSION choice STICKY on the first turn (mirrors the engine bind
     // below). SAFELY: forcing ROOT is always allowed; a WORKTREE is bound only where
-    // the default already permits one — so a persisted choice is never itself unsafe.
+    // the default already permits one AND the workspace is authoritatively REGISTERED
+    // (P20 F5) — the registry carries the real `noWorktree`; a DB-row fallback drops it
+    // (it's registry-only), so a worktree choice there could unknowingly land on a
+    // deregistered nested-repo workspace. Stay conservative (root) unless we can verify.
     if (
       session.noWorktree === undefined &&
       turnOpts?.worktree !== undefined &&
@@ -447,13 +450,18 @@ export class Supervisor {
     ) {
       if (turnOpts.worktree === false)
         session.noWorktree = true; // → root (always safe)
-      else if (!defaultNoWorktree) session.noWorktree = false; // → worktree, only where allowed
+      else if (!defaultNoWorktree && registered) session.noWorktree = false; // → worktree, only where the registry vouches it's safe
     }
-    // Effective posture: the sticky choice wins, EXCEPT a stored "worktree" (false) is
-    // downgraded to root if the default now forbids it (the workspace/deploy changed
-    // since the choice was bound — never cut a worktree onto a now-nested-repo tree).
-    const noWorktree =
-      session.noWorktree === false && defaultNoWorktree
+    // Effective posture:
+    //  - A non-REGISTERED (fallback DB-row) workspace forces ROOT (P20 F5): its
+    //    registry-only `noWorktree` is lost, so we can't prove it isn't a nested repo
+    //    — never cut a worktree we can't verify is safe.
+    //  - Else the sticky choice wins, EXCEPT a stored "worktree" (false) is downgraded
+    //    to root if the default now forbids it (the workspace/deploy changed since the
+    //    choice was bound — never cut a worktree onto a now-nested-repo tree).
+    const noWorktree = !registered
+      ? true
+      : session.noWorktree === false && defaultNoWorktree
         ? true
         : (session.noWorktree ?? defaultNoWorktree);
     await this.store.addTurn({ sessionId: session.id, role: "user", text });
