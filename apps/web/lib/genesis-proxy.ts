@@ -86,6 +86,31 @@ export async function proxyGenesisDelete(path: string, req: Request): Promise<Re
   }
 }
 
+/** Fetch the engine's advertised capabilities (BRO-1622) from GET /health and return
+ *  ONLY `{ engines, defaultEngine }` — never the raw /health body, which also carries
+ *  `workspace` (an absolute path we don't leak to the browser). Any upstream failure
+ *  returns an empty set (the client then degrades OPEN). */
+export async function getGenesisEngines(req: Request): Promise<Response> {
+  try {
+    const upstream = await fetch(`${GENESIS_URL}/health`, {
+      headers: { ...(GENESIS_TOKEN ? { authorization: `Bearer ${GENESIS_TOKEN}` } : {}) },
+      signal: req.signal,
+    });
+    if (!upstream.ok) return Response.json({ engines: [], defaultEngine: "" });
+    const data = (await upstream.json().catch(() => ({}))) as {
+      engines?: unknown;
+      defaultEngine?: unknown;
+    };
+    const engines = Array.isArray(data.engines)
+      ? data.engines.filter((e): e is string => typeof e === "string" && e.length > 0)
+      : [];
+    const defaultEngine = typeof data.defaultEngine === "string" ? data.defaultEngine : "";
+    return Response.json({ engines, defaultEngine });
+  } catch (err) {
+    return upstreamError(err);
+  }
+}
+
 /** Shared error mapping: a client-disconnect AbortError → 499 (no alarm); any
  *  other failure logs the address server-side only and returns a generic 502. */
 function upstreamError(err: unknown): Response {

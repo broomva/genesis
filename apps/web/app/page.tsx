@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatView } from "@/components/chat-view";
 import { SettingsSheet } from "@/components/settings-sheet";
 import { ThreadDrawer } from "@/components/thread-drawer";
+import { fetchAvailableEngines } from "@/lib/engines";
 import {
   type ThreadSummary,
   archiveThread,
@@ -41,6 +42,10 @@ export default function ChatPage() {
   // fallback (what a thread binds when none is chosen).
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [defaultWorkspaceId, setDefaultWorkspaceId] = useState("");
+  // Backend-advertised runnable engines (BRO-1622) — null = unknown/not-yet-fetched
+  // → the picker degrades OPEN (shows all). Fetched once; the engine set is a
+  // deploy-time capability, not per-session state.
+  const [availableEngines, setAvailableEngines] = useState<string[] | null>(null);
   // The one source of truth for prefs (model, effort, theme, show-reasoning) —
   // localStorage fast-path + server sync (BRO-1618). The composer toolbar and the
   // settings sheet both bind here.
@@ -116,6 +121,19 @@ export default function ChatPage() {
     refreshWorkspaces(ctrl.signal).catch(() => {});
     return () => ctrl.abort();
   }, [refreshWorkspaces]);
+
+  // Fetch the backend-advertised engines once (BRO-1622) so the settings picker only
+  // offers engines the box can run. On failure `availableEngines` stays null → the
+  // picker degrades OPEN (all options), never hidden.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetchAvailableEngines(ctrl.signal)
+      .then((engines) => {
+        if (!ctrl.signal.aborted) setAvailableEngines(engines);
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, []);
 
   // Self-serve workspace add/remove (BRO-1629 slice 3) — register a discovered
   // repo or de-register one, then re-pull the live list so the composer picker,
@@ -340,6 +358,7 @@ export default function ChatPage() {
         onUpdate={update}
         workspaces={workspaces}
         defaultWorkspaceId={defaultWorkspaceId}
+        availableEngines={availableEngines}
         onAddWorkspace={onAddWorkspace}
         onAddWorkspaceByUrl={onAddWorkspaceByUrl}
         onRemoveWorkspace={onRemoveWorkspace}
