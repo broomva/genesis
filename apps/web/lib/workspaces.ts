@@ -18,6 +18,12 @@ export interface Workspace {
    *  surfaces `false` (the workspace manager badges it "unavailable"; the composer
    *  picker disables it) so the user isn't surprised by the server rejection. */
   available?: boolean;
+  /** Can a session on this workspace actually get a per-session worktree (BRO-1657)?
+   *  Computed server-side, folding the per-workspace `noWorktree` (BRO-1512) AND the
+   *  global default — so the launcher's root/worktree toggle offers "worktree" only
+   *  where it's real. Absent on an older engine → treat as capable (the server still
+   *  enforces the safety downgrade); `false` → the toggle is forced to Root. */
+  worktreeCapable?: boolean;
 }
 
 export interface WorkspaceList {
@@ -53,6 +59,11 @@ export async function fetchWorkspaces(signal?: AbortSignal): Promise<WorkspaceLi
               name: w.name,
               ...(typeof w.isGitRepo === "boolean" ? { isGitRepo: w.isGitRepo } : {}),
               ...(typeof w.available === "boolean" ? { available: w.available } : {}),
+              // Worktree capability (BRO-1657) — preserve when the engine reports it;
+              // an older engine omits it → undefined → the launcher treats as capable.
+              ...(typeof w.worktreeCapable === "boolean"
+                ? { worktreeCapable: w.worktreeCapable }
+                : {}),
             }))
         : [],
       defaultWorkspace: typeof data.defaultWorkspace === "string" ? data.defaultWorkspace : "",

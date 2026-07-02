@@ -19,8 +19,17 @@ describe("sanitizePreferences (BRO-1618)", () => {
       showReasoning: false,
       engine: "print",
       workspace: "ws-alpha",
+      worktree: "worktree",
     };
     expect(sanitizePreferences(p)).toEqual(p);
+  });
+
+  test("worktree: known posture kept, unknown/non-string → default 'auto' (BRO-1657)", () => {
+    expect(sanitizePreferences({ worktree: "root" }).worktree).toBe("root");
+    expect(sanitizePreferences({ worktree: "worktree" }).worktree).toBe("worktree");
+    expect(sanitizePreferences({ worktree: "branch" }).worktree).toBe(DEFAULT_PREFERENCES.worktree);
+    expect(sanitizePreferences({ worktree: 1 }).worktree).toBe(DEFAULT_PREFERENCES.worktree);
+    expect(sanitizePreferences({}).worktree).toBe("auto");
   });
 
   test("workspace passes any string through (server-dynamic set); non-string → '' (BRO-1627)", () => {

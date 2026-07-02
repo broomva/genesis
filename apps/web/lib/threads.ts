@@ -44,6 +44,10 @@ export interface ThreadSummary {
    *  absent if the workspace was deconfigured since binding. */
   workspaceId?: string;
   workspaceName?: string;
+  /** The thread's bound worktree posture (BRO-1656/1657) — `true` = runs at the
+   *  workspace root, `false` = in a per-session worktree. Absent on a never-run
+   *  thread (inherits the workspace/global default until its first turn binds it). */
+  noWorktree?: boolean;
 }
 
 /** Mirror of the engine's TurnPart (packages/projection) — the persisted ordered

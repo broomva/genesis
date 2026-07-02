@@ -20,6 +20,7 @@ const MODEL_KEY = "genesis:model";
 const EFFORT_KEY = "genesis:effort";
 const SHOW_REASONING_KEY = "genesis:show-reasoning";
 const ENGINE_KEY = "genesis:engine";
+const WORKTREE_KEY = "genesis:worktree";
 
 function writeLocal(p: Preferences): void {
   try {
@@ -28,6 +29,10 @@ function writeLocal(p: Preferences): void {
     localStorage.setItem(THEME_KEY, p.theme);
     localStorage.setItem(SHOW_REASONING_KEY, String(p.showReasoning));
     localStorage.setItem(ENGINE_KEY, p.engine);
+    // Worktree posture (BRO-1657) rides the fast-path alongside engine — both are
+    // new-thread sticky bindings with fixed enums, so a reload (even offline) keeps
+    // the launcher's choice without waiting on the server GET.
+    localStorage.setItem(WORKTREE_KEY, p.worktree);
   } catch {
     // private mode — state still drives this session.
   }
@@ -42,6 +47,7 @@ function readLocal(): Preferences {
       theme: localStorage.getItem(THEME_KEY),
       showReasoning: sr === null ? undefined : sr === "true",
       engine: localStorage.getItem(ENGINE_KEY),
+      worktree: localStorage.getItem(WORKTREE_KEY),
     });
   } catch {
     return DEFAULT_PREFERENCES;

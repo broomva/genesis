@@ -107,6 +107,22 @@ describe("fetchWorkspaces — availability passthrough (BRO-1630 RC3)", () => {
     const { workspaces } = await fetchWorkspaces();
     expect(workspaces).toEqual([{ id: "ws-ok", name: "ok", available: false }]);
   });
+
+  test("preserves `worktreeCapable` when the engine reports it; omits otherwise (BRO-1657)", async () => {
+    stubFetch(true, {
+      workspaces: [
+        { id: "ws-wt", name: "clean", worktreeCapable: true },
+        { id: "ws-root", name: "nested", worktreeCapable: false },
+        { id: "ws-old", name: "legacy" }, // older engine omits it → undefined
+      ],
+      defaultWorkspace: "ws-wt",
+    });
+    const { workspaces } = await fetchWorkspaces();
+    expect(workspaces.find((w) => w.id === "ws-wt")?.worktreeCapable).toBe(true);
+    expect(workspaces.find((w) => w.id === "ws-root")?.worktreeCapable).toBe(false);
+    // Undefined (older engine) → the launcher treats it as capable; server enforces.
+    expect(workspaces.find((w) => w.id === "ws-old")?.worktreeCapable).toBeUndefined();
+  });
 });
 
 describe("addWorkspace (BRO-1629 slice 3)", () => {

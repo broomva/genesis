@@ -223,3 +223,42 @@ export function workspaceToBody(workspace: string): string | undefined {
 export function workspaceShowsPicker(count: number): boolean {
   return count > 1;
 }
+
+// ── Worktree posture (BRO-1656/1657) ──
+// Per-session root-vs-worktree choice, bound sticky on the thread's first turn
+// (BRO-1656). The launcher surfaces it for a NEW thread; it rides the first
+// `/api/chat` body as `worktree: boolean`. `auto` omits the field → the server
+// uses the workspace/global default (BRO-1512), so a deploy that never touches
+// this control behaves exactly as before.
+
+export type WorktreePref = "auto" | "root" | "worktree";
+
+/** Root/worktree picker. `auto` = inherit the workspace default (omit the field);
+ *  `root` = run in the workspace root; `worktree` = cut a per-session worktree. */
+export const WORKTREE_OPTIONS: readonly SelectOption[] = [
+  { value: "auto", label: "Auto" },
+  { value: "root", label: "Root" },
+  { value: "worktree", label: "Worktree" },
+];
+export const DEFAULT_WORKTREE: WorktreePref = "auto";
+
+export function isKnownWorktree(value: string | null): value is WorktreePref {
+  return value === "auto" || value === "root" || value === "worktree";
+}
+
+/** Map the worktree selection to the wire value: `auto` → omit (inherit the
+ *  server default), `root` → false (run at root), `worktree` → true (cut one).
+ *  Note the runner flag is `worktree` = "cut a worktree", so root maps to false. */
+export function worktreeToBody(pref: string): boolean | undefined {
+  return pref === "root" ? false : pref === "worktree" ? true : undefined;
+}
+
+/** Clamp a worktree pref to what the workspace can actually honor. A workspace
+ *  that can't host a worktree (nested-repo per BRO-1512, or a global-noWorktree
+ *  box) forces `root` — so a stale `worktree` pref never shows a live-but-lying
+ *  control. `capable === false` only; undefined (older engine that doesn't report
+ *  the flag) stays as chosen — the server still enforces the safety downgrade. */
+export function sanitizeWorktreeFor(pref: string, capable: boolean | undefined): WorktreePref {
+  const p = isKnownWorktree(pref) ? pref : DEFAULT_WORKTREE;
+  return capable === false ? "root" : p;
+}

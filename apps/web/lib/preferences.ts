@@ -13,10 +13,12 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_ENGINE,
   DEFAULT_MODEL,
+  DEFAULT_WORKTREE,
   type SelectOption,
   isKnownEffort,
   isKnownEngine,
   isKnownModel,
+  isKnownWorktree,
 } from "@/lib/chat-options";
 
 /** Theme choice — light/dark are explicit; system follows the OS
@@ -59,6 +61,11 @@ export interface Preferences {
    *  clamps a stale/unknown id to the live list at render. Bound sticky on the
    *  thread's first turn, so changing it never reroutes an existing conversation. */
   workspace: string;
+  /** Default root/worktree posture for NEW threads (BRO-1656/1657) — "auto" (the
+   *  workspace default), "root", or "worktree". Bound sticky on the thread's first
+   *  turn; the launcher clamps it to the selected workspace's capability. "auto"
+   *  omits the wire field, so a deploy that never touches it is unchanged. */
+  worktree: string;
 }
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -69,6 +76,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   showReasoning: true,
   engine: DEFAULT_ENGINE,
   workspace: "",
+  worktree: DEFAULT_WORKTREE,
 };
 
 /** Coerce ANY untrusted shape (localStorage blob, server JSON, partial PUT body)
@@ -92,5 +100,8 @@ export function sanitizePreferences(raw: unknown): Preferences {
   // Workspace (BRO-1627): pass any string through (the valid set is server-dynamic
   // — the picker clamps an unknown/removed id to the live list at render).
   const workspace = typeof o.workspace === "string" ? o.workspace : "";
-  return { model, effort, codexEffort, theme, showReasoning, engine, workspace };
+  // Worktree posture (BRO-1657): a fixed enum → validate here (unlike workspace).
+  const worktree =
+    typeof o.worktree === "string" && isKnownWorktree(o.worktree) ? o.worktree : DEFAULT_WORKTREE;
+  return { model, effort, codexEffort, theme, showReasoning, engine, workspace, worktree };
 }
