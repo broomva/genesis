@@ -1,14 +1,25 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type GitUrlPolicy,
   availableWorkspaces,
   defaultGitUrlPolicy,
+  pathAddRoots,
   provisionFromGitUrl,
   purgeCloneTmp,
   resolveGitUrl,
+  resolvePathAdd,
   resolvePick,
 } from "./workspace-provision";
 
@@ -351,5 +362,127 @@ describe("purgeCloneTmp (P20 HIGH-2 — boot-sweep orphaned partial clones)", ()
   test("no-op when the allow-root is undefined or the quarantine is absent", () => {
     expect(() => purgeCloneTmp(undefined)).not.toThrow();
     expect(() => purgeCloneTmp(root([]))).not.toThrow(); // no .genesis-clone-tmp present
+  });
+});
+
+describe("pathAddRoots (BRO-1663)", () => {
+  test("defaults to $HOME when no override", () => {
+    expect(pathAddRoots({ HOME: "/home/agent" })).toEqual(["/home/agent"]);
+  });
+
+  test("GENESIS_WORKSPACE_PATH_ROOTS overrides, colon-separated", () => {
+    expect(pathAddRoots({ HOME: "/home/agent", GENESIS_WORKSPACE_PATH_ROOTS: "/a:/b/c" })).toEqual([
+      "/a",
+      "/b/c",
+    ]);
+  });
+
+  test("drops relative / blank roots (an empty base would make the boundary meaningless)", () => {
+    expect(pathAddRoots({ GENESIS_WORKSPACE_PATH_ROOTS: "/ok: :relative:/two" })).toEqual([
+      "/ok",
+      "/two",
+    ]);
+  });
+
+  test("empty when neither HOME nor an override is set → feature OFF", () => {
+    expect(pathAddRoots({})).toEqual([]);
+  });
+});
+
+describe("resolvePathAdd (BRO-1663 — owner-only, sandboxed to the add-roots)", () => {
+  // A tmp add-root with a nested target dir; returns [root, targetAbsPath].
+  function rootWithDir(name: string, opts: { git?: boolean } = {}): [string, string] {
+    const r = mkdtempSync(join(tmpdir(), "genesis-add-"));
+    dirs.push(r);
+    const target = join(r, name);
+    mkdirSync(opts.git ? join(target, ".git") : target, { recursive: true });
+    return [r, target];
+  }
+
+  test("resolves a valid folder under a root → Workspace (git detected)", () => {
+    const [r, target] = rootWithDir("broomva", { git: true });
+    // rootPath is the REALPATH (symlink-safe canonicalization) — on macOS the tmpdir
+    // /var/… resolves to /private/var/…, which is the correct stored path.
+    expect(resolvePathAdd(target, [r], new Set())).toEqual({
+      id: "ws-broomva",
+      name: "broomva",
+      rootPath: realpathSync(target),
+      isGitRepo: true,
+    });
+  });
+
+  test("a non-git folder is still a valid root-only workspace (isGitRepo false)", () => {
+    const [r, target] = rootWithDir("notes");
+    expect(resolvePathAdd(target, [r], new Set())).toMatchObject({
+      id: "ws-notes",
+      isGitRepo: false,
+    });
+  });
+
+  test("rejects when no roots are configured (feature off)", () => {
+    const [, target] = rootWithDir("x");
+    expect(() => resolvePathAdd(target, [], new Set())).toThrow(/not enabled/);
+  });
+
+  test("rejects a non-absolute / empty / non-string / null-byte path", () => {
+    const [r] = rootWithDir("x");
+    for (const bad of ["relative/path", "", "..", 42, null, undefined, "/a\0b"]) {
+      expect(() => resolvePathAdd(bad, [r], new Set())).toThrow();
+    }
+  });
+
+  test("rejects a path OUTSIDE every root", () => {
+    const [r] = rootWithDir("inside");
+    const [, outside] = rootWithDir("elsewhere"); // a different tmp root
+    expect(() => resolvePathAdd(outside, [r], new Set())).toThrow(/outside the allowed roots/);
+  });
+
+  test("rejects a non-existent path", () => {
+    const [r] = rootWithDir("x");
+    expect(() => resolvePathAdd(join(r, "does-not-exist"), [r], new Set())).toThrow(/not found/);
+  });
+
+  test("rejects a file (not a directory)", () => {
+    const [r] = rootWithDir("x");
+    const file = join(r, "a-file.txt");
+    writeFileSync(file, "hi");
+    expect(() => resolvePathAdd(file, [r], new Set())).toThrow(/not a directory/);
+  });
+
+  test("HARD sandbox: a symlink INSIDE a root pointing OUTSIDE is rejected (symlink-escape)", () => {
+    const [r] = rootWithDir("real");
+    const outside = mkdtempSync(join(tmpdir(), "genesis-escape-"));
+    dirs.push(outside);
+    const link = join(r, "escape");
+    symlinkSync(outside, link); // lexically under r, but realpath is outside
+    expect(() => resolvePathAdd(link, [r], new Set())).toThrow(/outside the allowed roots/);
+  });
+
+  test("a symlinked ROOT still bounds correctly (realRoot uses realpath)", () => {
+    const [real, target] = rootWithDir("proj", { git: true });
+    const linkedRoot = mkdtempSync(join(tmpdir(), "genesis-linkroot-")); // will be replaced by a symlink
+    rmSync(linkedRoot, { recursive: true, force: true });
+    symlinkSync(real, linkedRoot);
+    dirs.push(linkedRoot);
+    // The root is a symlink to `real`; a target under `real` must still resolve as under it.
+    expect(resolvePathAdd(target, [linkedRoot], new Set())).toMatchObject({ id: "ws-proj" });
+  });
+
+  test("normalizes .. before the boundary check (can't climb out with ../)", () => {
+    const [r, target] = rootWithDir("proj");
+    // target/../proj → target (still under r) → OK, not an escape.
+    expect(resolvePathAdd(join(target, "..", "proj"), [r], new Set())).toMatchObject({
+      id: "ws-proj",
+    });
+    // target/../.. → the tmp parent of r → OUTSIDE r → rejected.
+    expect(() => resolvePathAdd(join(target, "..", ".."), [r], new Set())).toThrow(
+      /outside the allowed roots/,
+    );
+  });
+
+  test("disambiguates an id collision by path hash (never overwrites a different path)", () => {
+    const [r, target] = rootWithDir("dup", { git: true });
+    const ws = resolvePathAdd(target, [r], new Set(["ws-dup"]));
+    expect(ws.id).toMatch(/^ws-dup-[0-9a-f]{6}$/);
   });
 });

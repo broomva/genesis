@@ -120,6 +120,7 @@ export function SettingsSheet({
   availableEngines,
   onAddWorkspace,
   onAddWorkspaceByUrl,
+  onAddWorkspaceByPath,
   onRemoveWorkspace,
 }: {
   open: boolean;
@@ -138,6 +139,9 @@ export function SettingsSheet({
   onAddWorkspace: (pick: string) => Promise<AddWorkspaceResult>;
   /** Clone + register a public git URL (BRO-1629 slice 5); parent refreshes the list. */
   onAddWorkspaceByUrl: (gitUrl: string) => Promise<AddWorkspaceResult>;
+  /** Register an existing folder by absolute path (BRO-1663, owner-only); parent
+   *  refreshes the list. */
+  onAddWorkspaceByPath: (path: string) => Promise<AddWorkspaceResult>;
   /** De-register a workspace; parent refreshes the list. */
   onRemoveWorkspace: (id: string) => Promise<boolean>;
 }) {
@@ -304,6 +308,7 @@ export function SettingsSheet({
               defaultWorkspaceId={defaultWorkspaceId}
               onAdd={onAddWorkspace}
               onAddByUrl={onAddWorkspaceByUrl}
+              onAddByPath={onAddWorkspaceByPath}
               onRemove={onRemoveWorkspace}
             />
 

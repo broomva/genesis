@@ -19,6 +19,7 @@ import { usePreferences } from "@/lib/use-preferences";
 import {
   type Workspace,
   addWorkspace,
+  addWorkspaceByPath,
   addWorkspaceByUrl,
   fetchWorkspaces,
   removeWorkspace,
@@ -152,6 +153,17 @@ export default function ChatPage() {
   const onAddWorkspaceByUrl = useCallback(
     async (gitUrl: string) => {
       const res = await addWorkspaceByUrl(gitUrl);
+      if (res.ok) await refreshWorkspaces();
+      return res;
+    },
+    [refreshWorkspaces],
+  );
+
+  // Register an existing folder by absolute path (BRO-1663, owner-only), then re-pull
+  // the live list so the new workspace appears everywhere (same refresh as the others).
+  const onAddWorkspaceByPath = useCallback(
+    async (path: string) => {
+      const res = await addWorkspaceByPath(path);
       if (res.ok) await refreshWorkspaces();
       return res;
     },
@@ -368,6 +380,7 @@ export default function ChatPage() {
         availableEngines={availableEngines}
         onAddWorkspace={onAddWorkspace}
         onAddWorkspaceByUrl={onAddWorkspaceByUrl}
+        onAddWorkspaceByPath={onAddWorkspaceByPath}
         onRemoveWorkspace={onRemoveWorkspace}
       />
     </div>
