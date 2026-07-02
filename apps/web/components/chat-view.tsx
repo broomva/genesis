@@ -426,6 +426,7 @@ export function ChatView({
   worktree,
   onWorktreeChange,
   title,
+  boundWorkspaceName,
   boundNoWorktree,
   serverPhase,
 }: {
@@ -470,6 +471,11 @@ export function ChatView({
   /** The thread's title (BRO-1662) — shown as the header session name; absent on a
    *  never-run thread (→ "New session" until the first turn auto-derives one). */
   title?: string;
+  /** The thread's BOUND workspace display name (BRO-1662, ThreadSummary.workspaceName)
+   *  — authoritative for the header subtitle once the thread has run (stable across a
+   *  workspace-list reload or a rename). Absent on a never-run thread → the header
+   *  falls back to the pending selection's name from the live list. */
+  boundWorkspaceName?: string;
   /** The thread's BOUND worktree posture (BRO-1662) — true = root, false = worktree.
    *  Drives the header subtitle once the thread has run; absent → the header shows the
    *  pending launcher choice instead. */
@@ -573,7 +579,11 @@ export function ChatView({
   // composer toolbar (which they crowded) INTO the header subtitle. Workspace binds
   // at session create; pre-session selection lives in the launcher card, so the
   // composer no longer carries the picker at all.
-  const workspaceName = workspaces.find((w) => w.id === workspace)?.name;
+  // Prefer the thread's BOUND workspace name (ThreadSummary.workspaceName) — it's
+  // authoritative + stable even while the live workspace list is still loading or if
+  // the workspace was renamed/removed since binding (CodeRabbit, BRO-1662). Fall back
+  // to the live list only for a NEW thread (not yet bound → the pending selection).
+  const workspaceName = boundWorkspaceName ?? workspaces.find((w) => w.id === workspace)?.name;
   // Run posture for the subtitle: the thread's BOUND value once it has run, else the
   // pending launcher choice (auto → the workspace default the server would pick).
   const runLabel =
