@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<!--
+  meta:
+    title: "PR #84 — Session Launcher card + root/worktree toggle (BRO-1657)"
+    audience: human
+    category: C
+    pr: 84
+    tickets: [BRO-1657, BRO-1656, BRO-1636]
+    created: 2026-07-02
+    generated_by: /autonomous P18 reflex
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PR #84 — Session Launcher card + root/worktree toggle</title>
+<style>
+  :root {
+    --ink: #16181d; --muted: #5b6472; --line: #e4e7ec; --bg: #fbfcfd;
+    --soft: #f4f6f9; --blue: #2f6fed; --blue-soft: #eaf1fe; --green: #1b874b;
+    --green-soft: #e7f6ee; --amber: #9a6b00; --amber-soft: #fdf4e0; --code: #f2f4f7;
+    --root: #7a5cff; --wt: #1b874b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 36px; }
+  .eyebrow { color: var(--blue); font-weight: 600; font-size: 12.5px; letter-spacing: .08em; text-transform: uppercase; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 8px 0 12px; letter-spacing: -0.02em; }
+  h2 { font-size: 20px; margin: 44px 0 14px; letter-spacing: -0.01em; }
+  h3 { font-size: 15.5px; margin: 24px 0 8px; }
+  p { margin: 10px 0; }
+  .lede { font-size: 17px; color: #333a45; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .pill { font-size: 12.5px; padding: 4px 11px; border-radius: 999px; background: var(--soft); border: 1px solid var(--line); color: var(--muted); }
+  .pill.ok { background: var(--green-soft); border-color: #b8e6cb; color: var(--green); font-weight: 600; }
+  .pill.blue { background: var(--blue-soft); border-color: #c5daff; color: var(--blue); }
+  code { background: var(--code); border-radius: 5px; padding: 1.5px 5px; font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; margin: 18px 0; }
+  .grid { display: grid; gap: 14px; }
+  @media (min-width: 620px) { .grid.cols-3 { grid-template-columns: repeat(3, 1fr); } }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td code { font-size: 12.5px; }
+  .note { border-left: 3px solid var(--blue); background: var(--blue-soft); border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 16px 0; font-size: 14px; }
+  .note.amber { border-color: var(--amber); background: var(--amber-soft); }
+  .note.green { border-color: var(--green); background: var(--green-soft); }
+  .mono-small { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); }
+  .slice { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+  .slice:last-child { border-bottom: 0; }
+  .slice .tag { flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #fff; }
+  .slice .b1 { background: #8b93a1; } .slice .b2 { background: var(--blue); } .slice .b3 { background: var(--green); }
+  figure { margin: 20px 0; }
+  figcaption { color: var(--muted); font-size: 12.5px; margin-top: 8px; text-align: center; }
+  .legend { display: flex; gap: 18px; justify-content: center; font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  a { color: var(--blue); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">Genesis · Session Launcher · Phase B</div>
+  <h1>The pre-session configurator card &amp; the root/worktree toggle</h1>
+  <p class="lede">PR&nbsp;#84 (<code>88de134</code>) closes BRO-1657 — the Omnara-style card that surfaces every sticky binding a Genesis thread commits on its first turn, and the new control that lets a session run <em>at the workspace root</em> or <em>in an isolated git worktree</em>.</p>
+  <div class="pills">
+    <span class="pill ok">578 tests · +11</span>
+    <span class="pill ok">biome + typecheck clean</span>
+    <span class="pill ok">P20 cross-review 9/10</span>
+    <span class="pill ok">CodeRabbit pass</span>
+    <span class="pill blue">deployed · srv1692698</span>
+    <span class="pill">+600 / −16 · 13 files</span>
+  </div>
+</header>
+
+<h2>What a user sees</h2>
+<p>A brand-new thread's empty state is now a <strong>configurator card</strong> instead of a bare "Start a conversation" prompt. It reads like a sentence — <em>in&nbsp;workspace · start&nbsp;engine · model · effort · run&nbsp;in&nbsp;root|worktree</em> — with a <strong>Start&nbsp;session</strong> button and the familiar starter chips. The bottom composer stays the single input surface, so the chat-first quick-start is preserved: the card is the richer pre-session view that vanishes the moment the thread has a message.</p>
+
+<div class="note green"><strong>Lazy by design.</strong> "Start session" only <em>focuses the composer</em> — no thread or server session is created until the first message actually sends. A configured-but-abandoned launcher leaves <strong>no ghost thread</strong> in the drawer.</div>
+
+<h2>The one genuinely new capability: root vs worktree</h2>
+<p>Every other control (workspace, engine, model, effort) already existed in the composer toolbar or the settings sheet. The <strong>root/worktree toggle</strong> is new — it consumes the server binding shipped in BRO-1656 (PR&nbsp;#83) and rides the first <code>/api/chat</code> body as <code>worktree: boolean</code>. But it is only offered where it is <em>real</em>: the toggle is gated on a per-workspace capability flag the server computes.</p>
+
+<h3>The capability fold — one honest boolean</h3>
+<p>The server's <code>listWorkspaces</code> now returns <code>worktreeCapable</code> per workspace. It folds the same two inputs the run-time decision uses into a single client-facing answer:</p>
+
+<figure>
+<svg viewBox="0 0 840 300" width="100%" role="img" aria-label="Worktree capability decision fold">
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#8b93a1"/>
+    </marker>
+  </defs>
+  <!-- inputs -->
+  <rect x="20" y="30" width="220" height="60" rx="10" fill="#fff" stroke="#e4e7ec"/>
+  <text x="130" y="55" text-anchor="middle" font-size="13" font-weight="600" fill="#16181d">workspace.noWorktree</text>
+  <text x="130" y="74" text-anchor="middle" font-size="11.5" fill="#5b6472">per-workspace (BRO-1512)</text>
+
+  <rect x="20" y="120" width="220" height="60" rx="10" fill="#fff" stroke="#e4e7ec"/>
+  <text x="130" y="145" text-anchor="middle" font-size="13" font-weight="600" fill="#16181d">supervisor.noWorktree</text>
+  <text x="130" y="164" text-anchor="middle" font-size="11.5" fill="#5b6472">deploy global (GENESIS_NO_WORKTREE)</text>
+
+  <!-- fold -->
+  <rect x="320" y="72" width="200" height="66" rx="12" fill="#eaf1fe" stroke="#c5daff"/>
+  <text x="420" y="98" text-anchor="middle" font-size="12.5" font-weight="700" fill="#2f6fed">worktreeCapable =</text>
+  <text x="420" y="118" text-anchor="middle" font-family="ui-monospace, Menlo, monospace" font-size="11.5" fill="#2f6fed">!(ws ?? global)</text>
+
+  <!-- outputs -->
+  <rect x="610" y="30" width="210" height="60" rx="10" fill="#e7f6ee" stroke="#b8e6cb"/>
+  <text x="715" y="55" text-anchor="middle" font-size="13" font-weight="700" fill="#1b874b">true → offer Worktree</text>
+  <text x="715" y="74" text-anchor="middle" font-size="11.5" fill="#1b874b">Auto · Root · Worktree</text>
+
+  <rect x="610" y="120" width="210" height="60" rx="10" fill="#f4f6f9" stroke="#e4e7ec"/>
+  <text x="715" y="145" text-anchor="middle" font-size="13" font-weight="700" fill="#7a5cff">false → forced Root</text>
+  <text x="715" y="164" text-anchor="middle" font-size="11.5" fill="#5b6472">toggle disabled + note</text>
+
+  <!-- arrows -->
+  <line x1="240" y1="60" x2="318" y2="95" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="240" y1="150" x2="318" y2="115" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="520" y1="98" x2="608" y2="62" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="520" y1="112" x2="608" y2="148" stroke="#8b93a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- footnote -->
+  <text x="420" y="230" text-anchor="middle" font-size="12.5" fill="#5b6472">Matches the run-time decision <tspan font-family="ui-monospace, Menlo, monospace" fill="#16181d">canWorktree = !!registered &amp;&amp; !defaultNoWorktree</tspan></text>
+  <text x="420" y="252" text-anchor="middle" font-size="12" fill="#5b6472">The <tspan font-family="ui-monospace, Menlo, monospace">!!registered</tspan> term is moot — listWorkspaces only iterates the registry.</text>
+  <text x="420" y="278" text-anchor="middle" font-size="12" fill="#9a6b00">A capability flag, not a path — the DTO still never leaks rootPath / raw noWorktree.</text>
+</svg>
+<figcaption>On a global-<code>noWorktree</code> box (like the VPS), every workspace reports <code>false</code> → the toggle is forced-root everywhere. Honest by construction.</figcaption>
+</figure>
+
+<div class="note amber"><strong>Auto ≠ Root.</strong> On a capable workspace the wire values differ: <code>auto</code> omits the field → the session inherits the workspace default (a worktree), while <code>root</code> sends <code>worktree:false</code> → freezes root. The runner flag means "cut a worktree", so <em>root maps to false, not to omit</em>.</div>
+
+<h2>Three slices, one phase</h2>
+<div class="card">
+  <div class="slice"><span class="tag b1">B1</span><div><strong>BRO-1622 — engine capability gating.</strong> <code>/health</code> advertises the runnable engines; the picker shows unavailable ones disabled, never silently sticky-binds the fallback. Reused here to gate the card's engine control.</div></div>
+  <div class="slice"><span class="tag b2">B2</span><div><strong>BRO-1656 — the server binding (PR&nbsp;#83).</strong> <code>worktree</code> flows client → <code>parseChatRequest</code> → sticky <code>session.noWorktree</code> → <code>runAgent.worktree</code>, persisted &amp; frozen on turn 1 so a resumed thread keeps its cwd posture (protects <code>claude --resume</code>).</div></div>
+  <div class="slice"><span class="tag b3">B3</span><div><strong>BRO-1657 — this PR.</strong> The card + toggle (UI) consuming B2, plus slice 3.1: <code>ThreadSummary.noWorktree</code> read-back + <code>worktreeCapable</code> on the workspace DTO.</div></div>
+</div>
+
+<h2>Where the change lives</h2>
+<table>
+  <tr><th>Layer</th><th>File</th><th>Change</th></tr>
+  <tr><td>core</td><td><code>supervisor.ts</code></td><td><code>ThreadSummary.noWorktree</code>; <code>listWorkspaces</code> gains <code>worktreeCapable</code></td></tr>
+  <tr><td>web · lib</td><td><code>chat-options.ts</code></td><td><code>WORKTREE_OPTIONS</code>, <code>worktreeToBody</code>, <code>sanitizeWorktreeFor</code></td></tr>
+  <tr><td>web · lib</td><td><code>preferences.ts</code> · <code>use-preferences.ts</code></td><td><code>worktree</code> pref (default <code>auto</code> → wire omit) + localStorage fast-path</td></tr>
+  <tr><td>web · lib</td><td><code>workspaces.ts</code> · <code>threads.ts</code></td><td>DTO passthrough for <code>worktreeCapable</code> / <code>noWorktree</code></td></tr>
+  <tr><td>web · ui</td><td><code>session-launcher.tsx</code> <span class="pill blue">new</span></td><td>the card (reuses B1 gating + DS SegmentedControl/Select)</td></tr>
+  <tr><td>web · ui</td><td><code>chat-view.tsx</code> · <code>page.tsx</code></td><td>render card in empty state; send <code>worktree</code>; thread props; testids</td></tr>
+</table>
+
+<h2>Dogfood evidence — deployed &amp; live</h2>
+<div class="grid cols-3">
+  <div class="card"><h3>Server projection</h3><p class="mono-small">GET /workspaces →<br><strong>ws-default worktreeCapable=false</strong></p><p style="font-size:13px">Correct: the VPS is global-<code>noWorktree</code> → toggle forced-root.</p></div>
+  <div class="card"><h3>B2 read-back</h3><p class="mono-small">GET /threads →<br>df-b2-false-1 · <strong>noWorktree=true</strong><br>df-b2-true-1 · <strong>noWorktree=true</strong></p><p style="font-size:13px">B2's persist + safety-downgrade, now HTTP-visible.</p></div>
+  <div class="card"><h3>Shipped to browsers</h3><p class="mono-small">.next/static/chunks/…js contains<br><strong>session-launcher · launcher-worktree · launcher-start</strong></p><p style="font-size:13px">The card is in the deployed client bundle.</p></div>
+</div>
+
+<div class="note amber"><strong>Environment note (not a defect).</strong> The pixel-level Chrome dogfood via Interceptor was blocked: the local Chrome's secure-DNS (DoH) can't resolve the <code>*.ts.net</code> MagicDNS name (curl/OS + iPhone resolve fine; the site returns 200; <code>sudo</code> unavailable to add an <code>/etc/hosts</code> entry). Proven live via the deployed-bundle grep + the server projections above; the visual check completes on the iPhone at the deployed URL.</div>
+
+<h2>Adversarial review (P20 · Strata B)</h2>
+<p>A fresh-context subagent under a devil's-advocate brief scored the diff <strong>9/10 · PASS</strong>, refuting a wrong-output scenario in all eight focus areas — including confirming the capability fold matches <code>runTurn</code>, the Radix <code>value</code> is always in-set (no white-screen), and the card/composer never diverge on what they send. The single deducted point (a declared-but-unread web <code>noWorktree</code> field) was resolved with an intent comment in <code>12fd9fa</code>.</p>
+
+<footer>
+  Generated by the <code>/autonomous</code> P18 reflex · 2026-07-02 · Genesis · BRO-1657 →
+  <a href="https://linear.app/broomva/issue/BRO-1657">Linear</a> ·
+  <a href="https://github.com/broomva/genesis/pull/84">PR&nbsp;#84</a>.
+  Design spec: <code>docs/specs/2026-07-01-session-launcher.html</code>.
+</footer>
+
+</div>
+</body>
+</html>
