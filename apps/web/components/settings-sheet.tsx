@@ -27,6 +27,7 @@ import {
   sanitizeModelFor,
   workspaceShowsPicker,
 } from "@/lib/chat-options";
+import { gateEngineOptions, isEngineAvailable } from "@/lib/engines";
 import { type Preferences, THEME_OPTIONS } from "@/lib/preferences";
 import { cn } from "@/lib/utils";
 import { type AddWorkspaceResult, type Workspace, resolveWorkspace } from "@/lib/workspaces";
@@ -116,6 +117,7 @@ export function SettingsSheet({
   onUpdate,
   workspaces,
   defaultWorkspaceId,
+  availableEngines,
   onAddWorkspace,
   onAddWorkspaceByUrl,
   onRemoveWorkspace,
@@ -128,6 +130,10 @@ export function SettingsSheet({
    *  self-hides when there's ≤1. `defaultWorkspaceId` is the server fallback. */
   workspaces: Workspace[];
   defaultWorkspaceId: string;
+  /** Backend-advertised runnable engines (BRO-1622) — null = unknown → the engine
+   *  picker degrades OPEN (all options). Otherwise engines not in the set are shown
+   *  DISABLED so a thread can't be silently sticky-bound to one the box can't run. */
+  availableEngines: string[] | null;
   /** Register a picked project dir (BRO-1629 slice 3); parent refreshes the list. */
   onAddWorkspace: (pick: string) => Promise<AddWorkspaceResult>;
   /** Clone + register a public git URL (BRO-1629 slice 5); parent refreshes the list. */
@@ -208,14 +214,33 @@ export function SettingsSheet({
                   value={prefs.engine}
                   onValueChange={(v) => v && onUpdate({ engine: v })}
                   aria-label="Engine"
+                  data-testid="engine-picker"
                 >
-                  {ENGINE_OPTIONS.map((o) => (
-                    <SegmentedControlItem key={o.value} value={o.value}>
+                  {/* Gate on backend-advertised engines (BRO-1622): an engine the box
+                      can't run is shown DISABLED, not hidden — so a thread can't be
+                      silently sticky-bound to the fallback. Degrades open when the
+                      advertised set is unknown. */}
+                  {gateEngineOptions(ENGINE_OPTIONS, availableEngines).map((o) => (
+                    <SegmentedControlItem
+                      key={o.value}
+                      value={o.value}
+                      disabled={o.disabled}
+                      data-testid={`engine-option-${o.value}`}
+                      title={o.disabled ? "Not available on this server" : undefined}
+                    >
                       {o.label}
                     </SegmentedControlItem>
                   ))}
                 </SegmentedControl>
               </Row>
+              {/* Surface a persisted pref pointing at an unavailable engine (BRO-1622)
+                  — don't silently switch it; tell the user new chats fall back. */}
+              {!isEngineAvailable(prefs.engine, availableEngines) ? (
+                <p className="text-muted-foreground -mt-1 px-0.5 text-xs leading-snug">
+                  <span className="text-foreground font-medium">{prefs.engine}</span> isn't
+                  available on this server — new chats will start on an available engine.
+                </p>
+              ) : null}
               {/* Default workspace (BRO-1627) — the repo new chats run in. Hidden
                   when there's ≤1 workspace. A chat keeps the workspace it started
                   in (bound on its first turn); change it per-chat in the composer. */}
