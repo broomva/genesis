@@ -46,7 +46,11 @@ export interface ThreadSummary {
   workspaceName?: string;
   /** The thread's bound worktree posture (BRO-1656/1657) — `true` = runs at the
    *  workspace root, `false` = in a per-session worktree. Absent on a never-run
-   *  thread (inherits the workspace/global default until its first turn binds it). */
+   *  thread (inherits the workspace/global default until its first turn binds it).
+   *  Projected end-to-end (supervisor → GET /threads) and mirrored here for type
+   *  parity, but NOT yet READ by any component: the launcher card only shows for a
+   *  new thread (no bound posture to reflect). Forward-plumbing for a future
+   *  "show this thread's committed root/worktree" affordance on an existing thread. */
   noWorktree?: boolean;
 }
 
