@@ -738,6 +738,50 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(t?.workspaceName).toBe("alpha");
   });
 
+  test("listWorkspaces surfaces worktreeCapable, folding global + per-workspace (BRO-1657)", async () => {
+    // Global default = worktrees ON. wsA inherits it (capable), wsB declares
+    // noWorktree (not capable), the default ws-1 inherits (capable).
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      noWorktree: false,
+      run: fakeRunner("x"),
+    });
+    const byId = new Map((await sup.listWorkspaces()).map((w) => [w.id, w.worktreeCapable]));
+    expect(byId.get("ws-1")).toBe(true);
+    expect(byId.get("ws-a")).toBe(true);
+    expect(byId.get("ws-b")).toBe(false); // per-workspace noWorktree → not capable
+  });
+
+  test("listWorkspaces worktreeCapable is false for EVERY workspace on a global-noWorktree box (BRO-1657)", async () => {
+    // A deploy that forces root globally (e.g. GENESIS_NO_WORKTREE=1) reports every
+    // workspace as incapable, so the launcher toggle is forced-root everywhere.
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      noWorktree: true,
+      run: fakeRunner("x"),
+    });
+    for (const w of await sup.listWorkspaces()) {
+      expect(w.worktreeCapable).toBe(false);
+    }
+  });
+
+  test("listThreads carries the bound worktree posture (BRO-1656/1657)", async () => {
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      store,
+      workspaceExists: () => true,
+      run: cwdRunner({}),
+    });
+    // worktree:false → the session binds noWorktree=true (run at root), surfaced.
+    await sup.dispatch("twt", "go", undefined, { workspaceId: "ws-a", worktree: false });
+    const t = (await sup.listThreads()).find((x) => x.threadId === "twt");
+    expect(t?.noWorktree).toBe(true);
+  });
+
   test("a deconfigured workspace that ALREADY RAN errors instead of silently re-cwd'ing", async () => {
     const store = new InMemoryStore();
     await store.upsertSession({

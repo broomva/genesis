@@ -157,6 +157,12 @@ export interface ThreadSummary {
    *  the workspace was deconfigured since the thread bound it. */
   workspaceId?: string;
   workspaceName?: string;
+  /** The thread's bound worktree posture (BRO-1656/1657) — `true` = runs at the
+   *  workspace root, `false` = in a per-session worktree. Surfaced (like `engine`
+   *  / `workspaceId`) so the client can reflect the thread's committed posture.
+   *  Absent on a never-run thread (it inherits the workspace/global default until
+   *  its first turn binds it). */
+  noWorktree?: boolean;
 }
 
 /** First-user-turn → a short thread title (BRO-1592). First line, collapsed
@@ -648,6 +654,7 @@ export class Supervisor {
           engine: s.engine,
           workspaceId: s.workspaceId,
           workspaceName: this.workspaceRegistry.get(s.workspaceId)?.name,
+          noWorktree: s.noWorktree,
         };
       }),
     );
@@ -685,9 +692,22 @@ export class Supervisor {
    *  than persisted (a transient unmount self-heals when it returns — no stale
    *  flag). The client can render an unavailable workspace distinctly instead of
    *  letting a thread bind one that will error at cwd time. rootPath still never
-   *  leaves the server — only the boolean. */
+   *  leaves the server — only the boolean.
+   *
+   *  `worktreeCapable` (BRO-1657): would a session on this workspace ACTUALLY get
+   *  a per-session worktree if it asked for one? Folds the same inputs the B2
+   *  decision uses — the per-workspace `noWorktree` (BRO-1512, nested-repo → root)
+   *  AND the supervisor global — into one honest client-facing boolean, so the
+   *  launcher's root/worktree toggle can offer "worktree" only where it's real
+   *  (on a global-`noWorktree` box every workspace reports `false` → the toggle
+   *  is forced-root everywhere). A capability flag, not a path — safe to expose. */
   async listWorkspaces(): Promise<
-    Array<Pick<Workspace, "id" | "name" | "isGitRepo"> & { available: boolean }>
+    Array<
+      Pick<Workspace, "id" | "name" | "isGitRepo"> & {
+        available: boolean;
+        worktreeCapable: boolean;
+      }
+    >
   > {
     await this.ensureWorkspace();
     return [...this.workspaceRegistry.values()].map((w) => ({
@@ -695,6 +715,8 @@ export class Supervisor {
       name: w.name,
       isGitRepo: w.isGitRepo,
       available: this.workspaceExists(w.rootPath),
+      // Mirror the runTurn default: workspace override wins, else the global.
+      worktreeCapable: !(w.noWorktree ?? this.noWorktree),
     }));
   }
 

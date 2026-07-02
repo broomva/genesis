@@ -339,9 +339,13 @@ export default function ChatPage() {
             theme={prefs.theme}
             onThemeChange={(theme) => update({ theme })}
             engine={activeEngine}
+            availableEngines={availableEngines}
+            onEngineChange={(value) => update({ engine: value })}
             workspace={activeWorkspace}
             workspaces={workspaces}
             onWorkspaceChange={(value) => update({ workspace: value })}
+            worktree={prefs.worktree}
+            onWorktreeChange={(value) => update({ worktree: value })}
             serverPhase={activeThread?.phase}
           />
         ) : (

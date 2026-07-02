@@ -28,12 +28,12 @@ import {
   PromptInputTools,
   usePromptInputController,
 } from "@/components/ai-elements/prompt-input";
-import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { SkillPart, ToolPart } from "@/components/ai-elements/tool";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { MessageActions, RunTimer } from "@/components/message-actions";
 import { QuestionCard } from "@/components/question-card";
+import { SessionLauncher } from "@/components/session-launcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ThinkingIndicator } from "@/components/thinking-indicator";
 import { Button } from "@/components/ui/button";
@@ -58,8 +58,10 @@ import {
   modelToBody,
   sanitizeEffortFor,
   sanitizeModelFor,
+  sanitizeWorktreeFor,
   workspaceShowsPicker,
   workspaceToBody,
+  worktreeToBody,
 } from "@/lib/chat-options";
 import { recallDirection, recallStep } from "@/lib/input-history";
 import type { ThemeChoice } from "@/lib/preferences";
@@ -386,6 +388,8 @@ function RecallTextarea({ history }: { history: readonly string[] }) {
         className="px-2.5"
         placeholder="Message the agent… (/help for commands)"
         aria-label="Message the agent"
+        // Stable hook for the launcher's Start-session focus + E2E drivability (BRO-1634).
+        data-testid="composer-input"
         onKeyDown={onKeyDown}
         onChange={onChange}
       />
@@ -415,9 +419,13 @@ export function ChatView({
   theme,
   onThemeChange,
   engine,
+  availableEngines,
+  onEngineChange,
   workspace,
   workspaces,
   onWorkspaceChange,
+  worktree,
+  onWorktreeChange,
   serverPhase,
 }: {
   threadId: string;
@@ -442,12 +450,22 @@ export function ChatView({
    *  first turn). Interactive ignores per-turn model/effort, so those selectors
    *  are hidden when it's active. */
   engine: string;
+  /** Backend-advertised runnable engines (BRO-1622) — null degrades OPEN. Passed to
+   *  the launcher card so its engine picker gates like the settings sheet's. */
+  availableEngines: string[] | null;
+  /** Change the (global) engine pref from the launcher card (BRO-1657). */
+  onEngineChange: (value: string) => void;
   /** Selected workspace id (BRO-1627) — the repo the thread runs in, sent on the
    *  first turn (sticky at session create). Locked once the thread has run. */
   workspace: string;
   /** The selectable workspaces; the picker self-hides when there's ≤1. */
   workspaces: Workspace[];
   onWorkspaceChange: (value: string) => void;
+  /** Root/worktree posture for a new thread (BRO-1656/1657) — "auto"|"root"|
+   *  "worktree", sent on the first turn (sticky). Clamped to the selected
+   *  workspace's capability before it rides the wire. */
+  worktree: string;
+  onWorktreeChange: (value: string) => void;
   /** The active thread's last-known SERVER phase (BRO-1640), from the parent's
    *  thread-list poll. Seeds the reconcile mode so opening an already-running thread
    *  (or returning to one after a dropped stream) shows "Working" without waiting for
@@ -533,6 +551,12 @@ export function ChatView({
   // the pref) preserves the other provider's choice across an engine switch.
   const effModel = sanitizeModelFor(model, engine);
   const effEffort = sanitizeEffortFor(effort, engine);
+  // Effective worktree posture (BRO-1656/1657): clamp the pref to what the SELECTED
+  // workspace can actually host — a nested-repo / global-noWorktree workspace forces
+  // Root, so the wire value never lies. `worktreeCapable === false` only; undefined
+  // (older engine) stays as chosen (the server still enforces the safety downgrade).
+  const worktreeCapable = workspaces.find((w) => w.id === workspace)?.worktreeCapable !== false;
+  const effWorktree = sanitizeWorktreeFor(worktree, worktreeCapable);
   // Interactive binds its model at session SPAWN; once the thread has produced an
   // assistant turn the live session exists and the model is locked (BRO-1623).
   const modelLocked = modelIsSpawnPinned(engine) && messages.some((m) => m.role === "assistant");
@@ -603,10 +627,23 @@ export function ChatView({
           // The workspace binds at session create (BRO-1627) — sent every turn but
           // honored only on the first; the server ignores it once bound.
           workspaceId: workspaceToBody(workspace),
+          // Worktree posture binds sticky on turn 1 (BRO-1656) — sent every turn but
+          // frozen after the first; "auto" omits it (inherit the workspace default).
+          worktree: worktreeToBody(effWorktree),
         },
       },
     );
   }
+
+  // The launcher's "Start session" (BRO-1657): focus the composer so the user types
+  // their first message. Lazy by design — no thread/session is created until that
+  // first send, so a configured-but-abandoned launcher leaves no ghost thread.
+  const startSession = useCallback(() => {
+    const ta = stageRef.current?.querySelector<HTMLTextAreaElement>(
+      '[data-testid="composer-input"]',
+    );
+    ta?.focus();
+  }, []);
 
   // PromptInput owns the textarea state + clears on submit. While a turn is in
   // flight the submit control is a STOP button (status drives the icon), so a
@@ -668,18 +705,27 @@ export function ChatView({
             <MessageScrollerViewport className="px-4">
               <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[var(--composer-h,4.5rem)]">
                 {messages.length === 0 ? (
-                  <div className="message-in flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
-                    <p className="text-foreground text-[1.375rem] font-semibold">
-                      Start a conversation
-                    </p>
-                    <p className="text-muted-foreground max-w-sm text-sm">
-                      Message the agent, or pick a starting point.
-                    </p>
-                    <Suggestions className="mt-2 justify-center">
-                      {STARTERS.map((s) => (
-                        <Suggestion key={s} suggestion={s} onClick={send} />
-                      ))}
-                    </Suggestions>
+                  // The Session Launcher (BRO-1657) — the pre-session configurator
+                  // card. Surfaces every sticky binding (workspace/engine/model/
+                  // effort/worktree) + starters; the bottom composer stays the input.
+                  <div className="flex min-h-[60vh] flex-col items-center justify-center">
+                    <SessionLauncher
+                      workspace={workspace}
+                      workspaces={workspaces}
+                      onWorkspaceChange={onWorkspaceChange}
+                      engine={engine}
+                      availableEngines={availableEngines}
+                      onEngineChange={onEngineChange}
+                      model={effModel}
+                      onModelChange={onModelChange}
+                      effort={effEffort}
+                      onEffortChange={onEffortChange}
+                      worktree={effWorktree}
+                      onWorktreeChange={onWorktreeChange}
+                      onStart={startSession}
+                      onStarter={send}
+                      starters={STARTERS}
+                    />
                   </div>
                 ) : (
                   messages.map((message, index) => {
@@ -717,6 +763,7 @@ export function ChatView({
                                     : undefined,
                                   engine: engineToBody(engine),
                                   workspaceId: workspaceToBody(workspace),
+                                  worktree: worktreeToBody(effWorktree),
                                 },
                               })
                             }

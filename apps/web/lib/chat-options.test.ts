@@ -17,9 +17,12 @@ import {
   modelOptionsFor,
   sanitizeEffortFor,
   sanitizeModelFor,
+  sanitizeWorktreeFor,
   workspaceShowsPicker,
   workspaceToBody,
+  worktreeToBody,
 } from "./chat-options";
+import { DEFAULT_WORKTREE, isKnownWorktree } from "./chat-options";
 
 describe("engineProvider", () => {
   test("codex → openai; everything else → anthropic", () => {
@@ -114,5 +117,52 @@ describe("workspace helpers (BRO-1627)", () => {
     expect(workspaceShowsPicker(0)).toBe(false);
     expect(workspaceShowsPicker(1)).toBe(false);
     expect(workspaceShowsPicker(2)).toBe(true);
+  });
+});
+
+describe("worktree helpers (BRO-1656/1657)", () => {
+  test("worktreeToBody: auto → omit; root → false; worktree → true", () => {
+    // The runner flag is `worktree` = "cut a worktree", so root is FALSE, not omit.
+    expect(worktreeToBody("auto")).toBeUndefined();
+    expect(worktreeToBody("root")).toBe(false);
+    expect(worktreeToBody("worktree")).toBe(true);
+  });
+
+  test("worktreeToBody: an unknown value is treated as auto (omit)", () => {
+    expect(worktreeToBody("bogus")).toBeUndefined();
+  });
+
+  test("isKnownWorktree accepts the three postures, rejects anything else", () => {
+    expect(isKnownWorktree("auto")).toBe(true);
+    expect(isKnownWorktree("root")).toBe(true);
+    expect(isKnownWorktree("worktree")).toBe(true);
+    expect(isKnownWorktree("branch")).toBe(false);
+    expect(isKnownWorktree(null)).toBe(false);
+  });
+
+  test("DEFAULT_WORKTREE is 'auto' (inherit the workspace default → wire omit)", () => {
+    expect(DEFAULT_WORKTREE).toBe("auto");
+    expect(worktreeToBody(DEFAULT_WORKTREE)).toBeUndefined();
+  });
+
+  test("sanitizeWorktreeFor: a non-capable workspace forces Root", () => {
+    // A nested-repo / global-noWorktree workspace can't host a worktree → clamp so
+    // the wire value never lies (the server would safety-downgrade anyway).
+    expect(sanitizeWorktreeFor("worktree", false)).toBe("root");
+    expect(sanitizeWorktreeFor("auto", false)).toBe("root");
+    expect(sanitizeWorktreeFor("root", false)).toBe("root");
+  });
+
+  test("sanitizeWorktreeFor: a capable workspace keeps the choice; undefined stays as chosen", () => {
+    expect(sanitizeWorktreeFor("worktree", true)).toBe("worktree");
+    expect(sanitizeWorktreeFor("auto", true)).toBe("auto");
+    // undefined = an older engine that doesn't report the flag → keep the choice
+    // (the server still enforces the safety downgrade).
+    expect(sanitizeWorktreeFor("worktree", undefined)).toBe("worktree");
+  });
+
+  test("sanitizeWorktreeFor: an unknown pref falls back to the default before clamping", () => {
+    expect(sanitizeWorktreeFor("bogus", true)).toBe("auto");
+    expect(sanitizeWorktreeFor("bogus", false)).toBe("root");
   });
 });
