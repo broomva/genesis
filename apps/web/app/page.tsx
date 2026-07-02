@@ -347,6 +347,7 @@ export default function ChatPage() {
             worktree={prefs.worktree}
             onWorktreeChange={(value) => update({ worktree: value })}
             title={activeThread?.title}
+            boundWorkspaceName={activeThread?.workspaceName}
             boundNoWorktree={activeThread?.noWorktree}
             serverPhase={activeThread?.phase}
           />
