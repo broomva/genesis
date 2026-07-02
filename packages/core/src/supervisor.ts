@@ -437,31 +437,34 @@ export class Supervisor {
     // posture, else the deploy global — both mark "run at root" for a nested-repo
     // context where worktrees break.
     const defaultNoWorktree = workspace.noWorktree ?? this.noWorktree;
-    // Bind the per-SESSION choice STICKY on the first turn (mirrors the engine bind
-    // below). SAFELY: forcing ROOT is always allowed; a WORKTREE is bound only where
-    // the default already permits one AND the workspace is authoritatively REGISTERED
-    // (P20 F5) — the registry carries the real `noWorktree`; a DB-row fallback drops it
-    // (it's registry-only), so a worktree choice there could unknowingly land on a
-    // deregistered nested-repo workspace. Stay conservative (root) unless we can verify.
-    if (
-      session.noWorktree === undefined &&
-      turnOpts?.worktree !== undefined &&
-      session.agentSessionId === undefined // turn 1 only (sticky, like engine)
-    ) {
-      if (turnOpts.worktree === false)
-        session.noWorktree = true; // → root (always safe)
-      else if (!defaultNoWorktree && registered) session.noWorktree = false; // → worktree, only where the registry vouches it's safe
+    // FREEZE the effective posture on the first turn (mirrors the engine bind). A
+    // thread's cwd must not change across turns — `claude --resume` is cwd-scoped, so
+    // an inheriting thread bouncing root↔worktree when the workspace default later
+    // flips would break continuity (CodeRabbit). So the derived posture is persisted
+    // once and reused. Derivation, most-restrictive first:
+    //   - explicit ROOT (worktree:false) → root (always safe);
+    //   - explicit WORKTREE (worktree:true) → worktree ONLY where the REGISTRY vouches
+    //     the workspace allows it (registry carries the real `noWorktree`; a DB-row
+    //     fallback drops it, so an unverifiable workspace stays root — P20 F5);
+    //   - INHERIT (undefined) → the registered default, else root (unverifiable).
+    if (session.noWorktree === undefined && session.agentSessionId === undefined) {
+      const canWorktree = !!registered && !defaultNoWorktree;
+      session.noWorktree =
+        turnOpts?.worktree === false
+          ? true
+          : turnOpts?.worktree === true
+            ? !canWorktree
+            : registered
+              ? defaultNoWorktree
+              : true;
     }
-    // Effective posture:
-    //  - A non-REGISTERED (fallback DB-row) workspace forces ROOT (P20 F5): its
-    //    registry-only `noWorktree` is lost, so we can't prove it isn't a nested repo
-    //    — never cut a worktree we can't verify is safe.
-    //  - Else the sticky choice wins, EXCEPT a stored "worktree" (false) is downgraded
-    //    to root if the default now forbids it (the workspace/deploy changed since the
-    //    choice was bound — never cut a worktree onto a now-nested-repo tree).
-    const noWorktree = !registered
-      ? true
-      : session.noWorktree === false && defaultNoWorktree
+    // The frozen choice wins, EXCEPT a stored "worktree" (false) is still downgraded to
+    // root if the default now FORBIDS one (the workspace became nested since the freeze)
+    // — safety beats resume continuity: a broken worktree checkout is worse than a
+    // broken resume. (`?? defaultNoWorktree` covers legacy pre-BRO-1656 ran rows that
+    // never froze a posture.)
+    const noWorktree =
+      session.noWorktree === false && defaultNoWorktree
         ? true
         : (session.noWorktree ?? defaultNoWorktree);
     await this.store.addTurn({ sessionId: session.id, role: "user", text });

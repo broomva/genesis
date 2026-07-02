@@ -367,6 +367,23 @@ describe("supervisor", () => {
     expect(seen).toEqual([false]); // forced root — can't verify the workspace isn't nested
   });
 
+  test("an inheriting thread FREEZES its posture on turn 1 — no cwd bounce on a later default flip (BRO-1656 CodeRabbit)", async () => {
+    const seen: (boolean | undefined)[] = [];
+    const store = new InMemoryStore();
+    // No explicit choice + deploy-global root → the thread INHERITS root, and that
+    // posture is persisted so a later workspace-default flip can't bounce its cwd
+    // (which would break claude --resume continuity).
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      store,
+      noWorktree: true,
+      run: worktreeSpy(seen),
+    });
+    await sup.dispatch("tf", "one"); // inherit → root
+    expect(seen).toEqual([false]);
+    expect((await store.findSessionByThread("tf"))?.noWorktree).toBe(true); // FROZEN, not undefined
+  });
+
   test("blocked phase propagates to the dispatch result", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("boom", "s", "blocked") });
     const r = await sup.dispatch("t3", "break it");
