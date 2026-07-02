@@ -42,6 +42,12 @@ export interface Session {
    *  requested engine; an existing thread that already ran (pre-BRO-1620 row) is
    *  bound to the supervisor's defaultEngine to preserve its actual engine. */
   engine?: string;
+  /** Sticky per-session worktree posture (BRO-1656) — bound on the first turn from
+   *  the client's root/worktree choice: `true` = run at the workspace root, `false`
+   *  = cut a per-session worktree. Reused after, and PERSISTED so a resumed thread
+   *  keeps its cwd instead of re-deriving from the (mutable) workspace registry.
+   *  Absent → inherit the workspace's `noWorktree` default (BRO-1512), else global. */
+  noWorktree?: boolean;
 }
 
 export interface Turn {

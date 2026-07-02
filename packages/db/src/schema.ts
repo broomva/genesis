@@ -32,6 +32,11 @@ export const sessions = pgTable("sessions", {
   // the first turn, reused after. Additive — see the ALTER block. NULL → the
   // supervisor's defaultEngine at read time.
   engine: text("engine"),
+  // Per-thread sticky worktree posture (BRO-1656): true = run at the workspace root,
+  // false = cut a per-session worktree. Set on the first turn, reused after — so a
+  // resumed thread keeps its cwd posture instead of re-deriving it from the (mutable)
+  // workspace registry. NULL → inherit the workspace/global default at read time.
+  noWorktree: boolean("no_worktree"),
 });
 
 export const turns = pgTable(
@@ -103,6 +108,7 @@ CREATE INDEX IF NOT EXISTS turns_session_idx ON turns (session_id);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engine text;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS no_worktree boolean;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS input_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;

@@ -344,6 +344,7 @@ export function build(opts: BuildOpts) {
           effort: incoming.effort,
           engine: incoming.engine,
           workspaceId: incoming.workspaceId,
+          worktree: incoming.worktree,
         },
       );
       emit({

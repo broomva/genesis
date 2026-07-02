@@ -42,6 +42,12 @@ export interface TurnOptions {
    *  thread's first turn, when the session row is minted); ignored after.
    *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`. */
   workspaceId?: string;
+  /** Requested worktree posture (BRO-1656) — `true` = cut a per-session worktree,
+   *  `false` = run at the workspace root. Honored only on a thread's FIRST turn
+   *  (sticky), and only when the workspace ALLOWS a worktree (a nested-repo
+   *  workspace with `noWorktree` stays root-only — worktrees break there). Mirrors
+   *  `engine`/`workspaceId`. */
+  worktree?: boolean;
 }
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
@@ -427,9 +433,29 @@ export class Supervisor {
     }
     const workspace =
       registered ?? (await this.store.getWorkspace(session.workspaceId)) ?? this.defaultWorkspace;
-    // Per-workspace worktree posture wins over the supervisor global (BRO-1512):
-    // a nested-monorepo workspace runs direct; a single-repo one may worktree.
-    const noWorktree = workspace.noWorktree ?? this.noWorktree;
+    // Worktree posture (BRO-1656 layered on BRO-1512). The DEFAULT is the workspace's
+    // posture, else the deploy global — both mark "run at root" for a nested-repo
+    // context where worktrees break.
+    const defaultNoWorktree = workspace.noWorktree ?? this.noWorktree;
+    // Bind the per-SESSION choice STICKY on the first turn (mirrors the engine bind
+    // below). SAFELY: forcing ROOT is always allowed; a WORKTREE is bound only where
+    // the default already permits one — so a persisted choice is never itself unsafe.
+    if (
+      session.noWorktree === undefined &&
+      turnOpts?.worktree !== undefined &&
+      session.agentSessionId === undefined // turn 1 only (sticky, like engine)
+    ) {
+      if (turnOpts.worktree === false)
+        session.noWorktree = true; // → root (always safe)
+      else if (!defaultNoWorktree) session.noWorktree = false; // → worktree, only where allowed
+    }
+    // Effective posture: the sticky choice wins, EXCEPT a stored "worktree" (false) is
+    // downgraded to root if the default now forbids it (the workspace/deploy changed
+    // since the choice was bound — never cut a worktree onto a now-nested-repo tree).
+    const noWorktree =
+      session.noWorktree === false && defaultNoWorktree
+        ? true
+        : (session.noWorktree ?? defaultNoWorktree);
     await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
     // Derive a thread title from the first user turn (BRO-1592) — persisted with

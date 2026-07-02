@@ -200,6 +200,24 @@ describe("DrizzleStore (pglite) — session management (BRO-1592)", () => {
     await store.close();
   });
 
+  test("noWorktree round-trips through upsertSession — insert + update (BRO-1656)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    // Fresh row: no per-session choice → undefined (inherit the default).
+    await store.upsertSession({ id: "sW", threadId: "t-w", ...base });
+    let got = await store.findSessionByThread("t-w");
+    expect(got?.noWorktree).toBeUndefined();
+    // Bind a per-session choice (root) — must persist through the set-clause on update.
+    await store.upsertSession({ id: "sW", threadId: "t-w", ...base, noWorktree: true });
+    got = await store.findSessionByThread("t-w");
+    expect(got?.noWorktree).toBe(true);
+    // And the other posture (worktree) round-trips as false, not lost as falsy.
+    await store.upsertSession({ id: "sW", threadId: "t-w", ...base, noWorktree: false });
+    got = await store.findSessionByThread("t-w");
+    expect(got?.noWorktree).toBe(false);
+    await store.close();
+  });
+
   test("listSessions includes archived rows (drawer filters, not the store)", async () => {
     const store = await createPgliteStore();
     await store.upsertWorkspace(ws);

@@ -50,6 +50,7 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     effort?: unknown;
     engine?: unknown;
     workspaceId?: unknown;
+    worktree?: unknown;
   };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
@@ -94,8 +95,12 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   // so a stray value can never be reparsed as a flag.
   const wsRaw = typeof b.workspaceId === "string" ? b.workspaceId.trim() : "";
   const workspaceId = /^[A-Za-z0-9][\w.-]*$/.test(wsRaw) ? wsRaw : undefined;
+  // Worktree posture (BRO-1656) — a strict boolean; anything else is dropped so the
+  // Supervisor inherits the workspace/global default. Honored only on turn 1 (sticky),
+  // and only when the workspace allows a worktree (the Supervisor enforces that).
+  const worktree = typeof b.worktree === "boolean" ? b.worktree : undefined;
 
-  return { threadId, text, model, effort, engine, workspaceId };
+  return { threadId, text, model, effort, engine, workspaceId, worktree };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────
