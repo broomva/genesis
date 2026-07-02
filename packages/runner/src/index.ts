@@ -247,11 +247,19 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // skips worktrees entirely, so it is never persistent in that sense.
   const worktreePersistent = !!opts.sessionKey && !isMicroVM;
 
-  const wantWorktree = opts.worktree !== false && !isMicroVM && (await isGitRepo(host, opts.cwd));
+  const cwdIsRepo = !isMicroVM && (await isGitRepo(host, opts.cwd));
+  const wantWorktree = opts.worktree !== false && cwdIsRepo;
   if (wantWorktree) {
     const key = opts.sessionKey ? `session-${opts.sessionKey}` : id;
     ({ worktreePath, branch } = await ensureSessionWorktree(host, opts.cwd, key));
     runCwd = worktreePath; // run IN the worktree (was incorrectly opts.cwd in Phase 1)
+  } else if (cwdIsRepo && runCwd) {
+    // Root run on a git repo (BRO-1664): surface the cwd's current branch so the
+    // session header can show `<workspace> · <branch>`. Best-effort — a detached
+    // HEAD (empty output) or a resolve failure just leaves branch undefined and the
+    // header falls back to the run posture.
+    const b = await host.exec(["git", "branch", "--show-current"], { cwd: runCwd });
+    if (b.code === 0) branch = b.stdout.trim() || undefined;
   }
 
   // Scrub Genesis's own secrets from the agent's env (BRO-1527 #1): the agent

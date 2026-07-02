@@ -48,6 +48,11 @@ export interface Session {
    *  keeps its cwd instead of re-deriving from the (mutable) workspace registry.
    *  Absent → inherit the workspace's `noWorktree` default (BRO-1512), else global. */
   noWorktree?: boolean;
+  /** The git branch the session's cwd is on (BRO-1664) — captured from the run each
+   *  turn: `genesis/<key>` for a worktree session, the repo's current branch for a
+   *  root session. Refreshes if the branch changes. Absent on a never-run thread or a
+   *  non-git cwd (the header then falls back to the root/worktree posture). */
+  branch?: string;
 }
 
 export interface Turn {

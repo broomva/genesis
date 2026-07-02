@@ -28,6 +28,7 @@ interface SessionRow {
   title?: string | null;
   engine?: string | null;
   noWorktree?: boolean | null;
+  branch?: string | null;
 }
 
 interface TurnRow {
@@ -72,6 +73,7 @@ function toSession(r: SessionRow): Session {
     title: r.title ?? undefined,
     engine: r.engine ?? undefined,
     noWorktree: r.noWorktree ?? undefined,
+    branch: r.branch ?? undefined,
   };
 }
 
@@ -129,6 +131,7 @@ export class DrizzleStore implements Store {
       title: s.title ?? null,
       engine: s.engine ?? null,
       noWorktree: s.noWorktree ?? null,
+      branch: s.branch ?? null,
     };
     await this.db
       .insert(sessions)
@@ -146,6 +149,7 @@ export class DrizzleStore implements Store {
           title: row.title,
           engine: row.engine,
           noWorktree: row.noWorktree,
+          branch: row.branch,
         },
       });
     return s;

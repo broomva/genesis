@@ -218,6 +218,22 @@ describe("DrizzleStore (pglite) — session management (BRO-1592)", () => {
     await store.close();
   });
 
+  test("branch round-trips through upsertSession — insert + update (BRO-1664)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    await store.upsertSession({ id: "sB", threadId: "t-b", ...base });
+    let got = await store.findSessionByThread("t-b");
+    expect(got?.branch).toBeUndefined();
+    await store.upsertSession({ id: "sB", threadId: "t-b", ...base, branch: "main" });
+    got = await store.findSessionByThread("t-b");
+    expect(got?.branch).toBe("main");
+    // A branch change (user switched branches) must persist through the set-clause.
+    await store.upsertSession({ id: "sB", threadId: "t-b", ...base, branch: "feat/x" });
+    got = await store.findSessionByThread("t-b");
+    expect(got?.branch).toBe("feat/x");
+    await store.close();
+  });
+
   test("listSessions includes archived rows (drawer filters, not the store)", async () => {
     const store = await createPgliteStore();
     await store.upsertWorkspace(ws);

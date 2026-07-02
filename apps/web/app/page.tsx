@@ -361,6 +361,7 @@ export default function ChatPage() {
             title={activeThread?.title}
             boundWorkspaceName={activeThread?.workspaceName}
             boundNoWorktree={activeThread?.noWorktree}
+            branch={activeThread?.branch}
             serverPhase={activeThread?.phase}
           />
         ) : (
