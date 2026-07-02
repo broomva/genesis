@@ -159,6 +159,15 @@ export function addWorkspaceByUrl(gitUrl: string): Promise<AddWorkspaceResult> {
   return postWorkspace({ gitUrl });
 }
 
+/** Register an EXISTING folder by its absolute path (POST /workspaces {path},
+ *  BRO-1663) — owner-only (the BFF rejects the agent principal). For folders
+ *  OUTSIDE the discovery allow-root (e.g. ~/broomva). The engine sandboxes the
+ *  path to the server's add-roots (default $HOME) + resolves symlinks; a rejected
+ *  path comes back as the engine's safe 400. rootPath never returns to the client. */
+export function addWorkspaceByPath(path: string): Promise<AddWorkspaceResult> {
+  return postWorkspace({ path });
+}
+
 /** De-register a workspace (DELETE /workspaces/:id). The repo directory is left
  *  on disk; only the registry entry + its manifest are removed. */
 export async function removeWorkspace(id: string): Promise<boolean> {

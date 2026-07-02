@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderGit2, GitBranch, Plus, Trash2 } from "lucide-react";
+import { FolderGit2, FolderPlus, GitBranch, Plus, Trash2 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +28,7 @@ export function WorkspacesManager({
   defaultWorkspaceId,
   onAdd,
   onAddByUrl,
+  onAddByPath,
   onRemove,
 }: {
   workspaces: Workspace[];
@@ -39,6 +40,10 @@ export function WorkspacesManager({
    *  workspace list on success. The engine validates the URL (https + host allowlist
    *  + no credentials) — nothing is validated here beyond non-empty. */
   onAddByUrl: (gitUrl: string) => Promise<AddWorkspaceResult>;
+  /** Register an EXISTING folder by absolute path (BRO-1663) — owner-only; for folders
+   *  outside the discovery allow-root. The engine sandboxes the path to its add-roots +
+   *  resolves symlinks; nothing is validated here beyond non-empty. */
+  onAddByPath: (path: string) => Promise<AddWorkspaceResult>;
   /** De-register; the parent refreshes the workspace list on success. */
   onRemove: (id: string) => Promise<boolean>;
 }) {
@@ -46,6 +51,8 @@ export function WorkspacesManager({
   const [loading, setLoading] = useState(true);
   const [url, setUrl] = useState("");
   const [addingUrl, setAddingUrl] = useState(false);
+  const [path, setPath] = useState("");
+  const [addingPath, setAddingPath] = useState(false);
   // Track in-flight mutations PER id/name (P20 Forge N1): a single-slot busy
   // marker would re-enable an already-clicked row the moment a second row's
   // action starts, opening a double-submit window. Sets keep each row's spinner
@@ -111,6 +118,25 @@ export function WorkspacesManager({
       await refetch(); // keep the pickable list in sync (the clone may shadow a pick)
     },
     [url, addingUrl, onAddByUrl, refetch],
+  );
+
+  const doAddByPath = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const abs = path.trim();
+      if (!abs || addingPath) return;
+      setError(null);
+      setAddingPath(true);
+      const res = await onAddByPath(abs);
+      setAddingPath(false);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      setPath(""); // clear on success; the parent refresh surfaces the new workspace
+      await refetch();
+    },
+    [path, addingPath, onAddByPath, refetch],
   );
 
   const doRemove = useCallback(
@@ -252,6 +278,43 @@ export function WorkspacesManager({
             className="shrink-0"
           >
             {addingUrl ? <Spinner className="size-3.5" /> : "Clone"}
+          </Button>
+        </div>
+      </form>
+
+      {/* Add-by-absolute-path (BRO-1663) — owner-only; register an EXISTING folder
+          outside the discovery allow-root (e.g. ~/broomva). The engine sandboxes the
+          path to its add-roots (default $HOME) + resolves symlinks; here we only block
+          an empty submit. */}
+      <form onSubmit={doAddByPath} className="space-y-1.5 pt-1">
+        <label htmlFor="ws-path" className="text-muted-foreground text-xs">
+          Add an existing folder by path
+        </label>
+        <div className="flex items-center gap-1.5">
+          <div className="relative min-w-0 flex-1">
+            <FolderPlus className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+            <Input
+              id="ws-path"
+              type="text"
+              inputMode="text"
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              placeholder="/home/agent/broomva"
+              value={path}
+              disabled={addingPath}
+              onChange={(e) => setPath(e.target.value)}
+              className="h-9 pl-8 text-sm"
+            />
+          </div>
+          <Button
+            type="submit"
+            size="sm"
+            variant="secondary"
+            disabled={addingPath || path.trim().length === 0}
+            className="shrink-0"
+          >
+            {addingPath ? <Spinner className="size-3.5" /> : "Add"}
           </Button>
         </div>
       </form>

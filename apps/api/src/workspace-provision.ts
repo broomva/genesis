@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { devNull } from "node:os";
 import { resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -90,6 +90,75 @@ export function resolvePick(
   let id = `ws-${slugifyWorkspace(pick)}`;
   if (takenIds.has(id)) id = `${id}-${shortHash(rootPath)}`;
   return { id, name: pick, rootPath, isGitRepo: true };
+}
+
+// ─── Add-by-absolute-path provisioning (BRO-1663, owner-only) ──────────────────
+// This DELIBERATELY relaxes the "client never names a path" spine (resolvePick),
+// so it is tightly bounded: the path must resolve (realpath, symlink-safe) UNDER a
+// configured add-root, and it's owner-gated at the BFF (the agent principal is
+// refused). Purpose: register an EXISTING folder outside the discovery allow-root
+// (e.g. ~/broomva) without an admin hand-writing a manifest.
+
+/** The allowed base roots for add-by-absolute-path. A path is only registerable if
+ *  its realpath sits under one of these — so the owner can add anything in their own
+ *  space without exposing `/etc`, `/`, or another user's home. Default: the process
+ *  `$HOME`. Override with `GENESIS_WORKSPACE_PATH_ROOTS` (colon-separated absolute
+ *  paths). Empty (no HOME, no override) ⇒ the feature is OFF (resolvePathAdd throws). */
+export function pathAddRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const raw = env.GENESIS_WORKSPACE_PATH_ROOTS;
+  const list = raw !== undefined && raw.length > 0 ? raw.split(":") : [env.HOME ?? ""];
+  // Absolute, non-empty only — a relative or blank root would make the boundary
+  // check meaningless (everything is "under" "").
+  return list.map((p) => p.trim()).filter((p) => p.length > 0 && p.startsWith("/"));
+}
+
+/** Resolve an owner-supplied ABSOLUTE PATH into a Workspace. Unlike {@link resolvePick}
+ *  the path is not confined to the discovery allow-root — but its REAL path (symlinks
+ *  resolved) MUST sit under one of `roots` (a hard sandbox, not lexical). git is NOT
+ *  required (a non-repo folder is a valid root-only workspace, like the default one).
+ *  Throws {@link WorkspaceValidationError} (safe 400) on any rejection. */
+export function resolvePathAdd(
+  path: unknown,
+  roots: readonly string[],
+  takenIds: ReadonlySet<string>,
+): Workspace {
+  if (roots.length === 0)
+    throw new WorkspaceValidationError("add-by-path is not enabled on this server");
+  if (typeof path !== "string" || path.length === 0)
+    throw new WorkspaceValidationError("path must be a non-empty string");
+  if (!path.startsWith("/") || path.includes("\0"))
+    throw new WorkspaceValidationError("path must be an absolute path");
+  // Normalize `..`/`.`/trailing sep lexically first, then resolve symlinks — a
+  // missing path throws EOENT from realpathSync → mapped to a safe 404-ish message.
+  const normalized = resolve(path);
+  let realPath: string;
+  try {
+    realPath = realpathSync(normalized);
+  } catch {
+    throw new WorkspaceValidationError("path not found");
+  }
+  if (!statSync(realPath).isDirectory())
+    throw new WorkspaceValidationError("path is not a directory");
+  // HARD sandbox (P20): the REAL path must sit under one of the add-roots — computed
+  // against each root's OWN realpath so a symlinked root still bounds correctly, and
+  // so a symlink at `path` pointing outside every root is rejected.
+  const underRoot = roots.some((r) => {
+    let realRoot: string;
+    try {
+      realRoot = realpathSync(r);
+    } catch {
+      return false; // a configured root that doesn't exist can't contain anything
+    }
+    return realPath === realRoot || realPath.startsWith(realRoot + sep);
+  });
+  if (!underRoot)
+    throw new WorkspaceValidationError("path is outside the allowed roots for this server");
+  const name = realPath.split(sep).filter(Boolean).pop() ?? "workspace";
+  let id = `ws-${slugifyWorkspace(name)}`;
+  if (takenIds.has(id)) id = `${id}-${shortHash(realPath)}`;
+  // A folder need not be a git repo to be a root-only workspace (the default isn't).
+  const isGitRepo = existsSync(resolve(realPath, ".git"));
+  return { id, name, rootPath: realPath, isGitRepo };
 }
 
 // ─── Add-by-git-URL provisioning (BRO-1629, Phase 2.5b · slice 5) ──────────────

@@ -34,5 +34,17 @@ export async function POST(req: Request): Promise<Response> {
   // validation (charset, traversal, realpath boundary, git check) and returns a
   // safe 400 message on a bad pick, which proxyGenesisPostJson relays verbatim.
   const body = await req.text();
+  // Add-by-absolute-path (BRO-1663) is OWNER-ONLY: it names a filesystem path, so the
+  // machine/agent principal must not register arbitrary folders. The engine still
+  // sandboxes the path to the add-roots; this is the identity gate on top of that.
+  let namesPath = false;
+  try {
+    namesPath = (JSON.parse(body) as { path?: unknown })?.path !== undefined;
+  } catch {
+    namesPath = false; // unparseable → let the engine 400 it
+  }
+  if (namesPath && principal.asAgent) {
+    return Response.json({ error: "add-by-path is restricted to the owner" }, { status: 403 });
+  }
   return proxyGenesisPostJson("/workspaces", body, req);
 }

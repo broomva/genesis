@@ -18,7 +18,9 @@ import { PAGE } from "./ui";
 import {
   WorkspaceValidationError,
   availableWorkspaces,
+  pathAddRoots,
   provisionFromGitUrl,
+  resolvePathAdd,
   resolvePick,
 } from "./workspace-provision";
 
@@ -226,13 +228,22 @@ export function build(opts: BuildOpts) {
   // (add-by-git-URL, slice 5). A body with `gitUrl` takes the clone path; else pick.
   app.post("/workspaces", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const body = (await c.req.json().catch(() => ({}))) as { pick?: unknown; gitUrl?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      pick?: unknown;
+      gitUrl?: unknown;
+      path?: unknown;
+    };
     try {
       const taken = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
+      // Three add shapes: `{path}` = an owner-supplied absolute path (BRO-1663,
+      // owner-gated at the BFF) → sandboxed to the add-roots; `{gitUrl}` = clone a
+      // public repo into the allow-root; `{pick}` = a discovered dir name.
       const ws =
-        body.gitUrl !== undefined
-          ? await provisionFromGitUrl(opts.projectsRoot, body.gitUrl, taken)
-          : resolvePick(opts.projectsRoot, body.pick, taken);
+        body.path !== undefined
+          ? resolvePathAdd(body.path, pathAddRoots(), taken)
+          : body.gitUrl !== undefined
+            ? await provisionFromGitUrl(opts.projectsRoot, body.gitUrl, taken)
+            : resolvePick(opts.projectsRoot, body.pick, taken);
       const saved = await supervisor.registerWorkspace(ws);
       return c.json({ id: saved.id, name: saved.name, isGitRepo: saved.isGitRepo }, 201);
     } catch (e) {
