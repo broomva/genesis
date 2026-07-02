@@ -59,7 +59,6 @@ import {
   sanitizeEffortFor,
   sanitizeModelFor,
   sanitizeWorktreeFor,
-  workspaceShowsPicker,
   workspaceToBody,
   worktreeToBody,
 } from "@/lib/chat-options";
@@ -426,6 +425,8 @@ export function ChatView({
   onWorkspaceChange,
   worktree,
   onWorktreeChange,
+  title,
+  boundNoWorktree,
   serverPhase,
 }: {
   threadId: string;
@@ -466,6 +467,13 @@ export function ChatView({
    *  workspace's capability before it rides the wire. */
   worktree: string;
   onWorktreeChange: (value: string) => void;
+  /** The thread's title (BRO-1662) — shown as the header session name; absent on a
+   *  never-run thread (→ "New session" until the first turn auto-derives one). */
+  title?: string;
+  /** The thread's BOUND worktree posture (BRO-1662) — true = root, false = worktree.
+   *  Drives the header subtitle once the thread has run; absent → the header shows the
+   *  pending launcher choice instead. */
+  boundNoWorktree?: boolean;
   /** The active thread's last-known SERVER phase (BRO-1640), from the parent's
    *  thread-list poll. Seeds the reconcile mode so opening an already-running thread
    *  (or returning to one after a dropped stream) shows "Working" without waiting for
@@ -560,12 +568,27 @@ export function ChatView({
   // Interactive binds its model at session SPAWN; once the thread has produced an
   // assistant turn the live session exists and the model is locked (BRO-1623).
   const modelLocked = modelIsSpawnPinned(engine) && messages.some((m) => m.role === "assistant");
-  // Workspace binds at session CREATE — locked the moment the thread has ANY turn
-  // (broader than modelLocked, which is interactive-only: workspace = cwd, which
-  // can't change after the agent session is keyed to it, for every engine). The
-  // picker self-hides at ≤1 workspace, so single-workspace deploys are unchanged.
-  const showWorkspacePicker = workspaceShowsPicker(workspaces.length);
-  const workspaceLocked = messages.length > 0;
+
+  // Header session context (BRO-1662) — the workspace + run posture move OUT of the
+  // composer toolbar (which they crowded) INTO the header subtitle. Workspace binds
+  // at session create; pre-session selection lives in the launcher card, so the
+  // composer no longer carries the picker at all.
+  const workspaceName = workspaces.find((w) => w.id === workspace)?.name;
+  // Run posture for the subtitle: the thread's BOUND value once it has run, else the
+  // pending launcher choice (auto → the workspace default the server would pick).
+  const runLabel =
+    boundNoWorktree !== undefined
+      ? boundNoWorktree
+        ? "root"
+        : "worktree"
+      : effWorktree === "worktree"
+        ? "worktree"
+        : effWorktree === "root"
+          ? "root"
+          : worktreeCapable
+            ? "worktree"
+            : "root";
+  const sessionName = title?.trim() ? title.trim() : "New session";
 
   // Session usage for the composer context meter (BRO-1597). Sum cost + tokens
   // over assistant turns — live message-metadata and hydrated history both land
@@ -691,9 +714,20 @@ export function ChatView({
         >
           <PanelLeft className="size-4" />
         </Button>
-        <span className="text-foreground text-[0.95rem] font-medium tracking-tight">Genesis</span>
-        <span className="text-muted-foreground hidden text-sm sm:inline">Agent chat</span>
-        <div className="ml-auto flex items-center gap-2">
+        {/* Session identity (BRO-1662) — the thread name + a muted "workspace · posture"
+            subtitle, replacing the static "Genesis" label. The workspace context lives
+            here now instead of crowding the composer. */}
+        <div className="min-w-0 flex-1">
+          <p className="text-foreground truncate text-[0.95rem] font-medium leading-tight tracking-tight">
+            {sessionName}
+          </p>
+          {workspaceName ? (
+            <p className="text-muted-foreground truncate text-xs leading-tight">
+              {workspaceName} · {runLabel}
+            </p>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <RunSignal mode={runMode} liveStatus={status} onRetry={reconnect} />
           <ThemeToggle theme={theme} onChange={onThemeChange} />
         </div>
@@ -885,43 +919,10 @@ export function ChatView({
                             <PromptInputActionAddAttachments label="Attach text files" />
                           </PromptInputActionMenuContent>
                         </PromptInputActionMenu>
-                        {/* Workspace picker (BRO-1627) — which repo this thread runs
-                          in. Editable until the thread's first turn binds it, then
-                          disabled (a read-only chip showing the bound workspace).
-                          Self-hides at ≤1 workspace, so single-workspace deploys
-                          see no new control. */}
-                        {showWorkspacePicker ? (
-                          <PromptInputSelect
-                            value={workspace}
-                            onValueChange={onWorkspaceChange}
-                            disabled={workspaceLocked}
-                          >
-                            <PromptInputSelectTrigger
-                              aria-label={
-                                workspaceLocked ? "Workspace (locked — thread bound)" : "Workspace"
-                              }
-                            >
-                              <PromptInputSelectValue />
-                            </PromptInputSelectTrigger>
-                            <PromptInputSelectContent>
-                              {workspaces.map((w) => (
-                                // A vanished workspace (BRO-1630 RC3) can't be bound —
-                                // the server dispatch guard rejects it — so disable it
-                                // here rather than let the user pick a dead-on-arrival
-                                // thread. `available === false` only; undefined (older
-                                // engine) stays selectable.
-                                <PromptInputSelectItem
-                                  key={w.id}
-                                  value={w.id}
-                                  disabled={w.available === false}
-                                >
-                                  {w.name}
-                                  {w.available === false ? " (unavailable)" : ""}
-                                </PromptInputSelectItem>
-                              ))}
-                            </PromptInputSelectContent>
-                          </PromptInputSelect>
-                        ) : null}
+                        {/* Workspace picker removed from the composer (BRO-1662): the
+                          launcher card owns pre-session workspace selection and the
+                          header carries the bound workspace, so the toolbar no longer
+                          crowds the input with a workspace chip. */}
                         {/* Provider-aware model/effort (BRO-1623). Options follow the
                           engine's provider (claude aliases vs OpenAI models); the
                           model selector locks once an interactive thread's session
