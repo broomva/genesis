@@ -428,6 +428,7 @@ export function ChatView({
   title,
   boundWorkspaceName,
   boundNoWorktree,
+  branch,
   serverPhase,
 }: {
   threadId: string;
@@ -480,6 +481,10 @@ export function ChatView({
    *  Drives the header subtitle once the thread has run; absent → the header shows the
    *  pending launcher choice instead. */
   boundNoWorktree?: boolean;
+  /** The thread's cwd git branch (BRO-1664) — preferred in the header subtitle
+   *  (`<workspace> · <branch>`) once the thread has run; absent → falls back to the
+   *  root/worktree posture. */
+  branch?: string;
   /** The active thread's last-known SERVER phase (BRO-1640), from the parent's
    *  thread-list poll. Seeds the reconcile mode so opening an already-running thread
    *  (or returning to one after a dropped stream) shows "Working" without waiting for
@@ -598,6 +603,9 @@ export function ChatView({
           : worktreeCapable
             ? "worktree"
             : "root";
+  // Prefer the literal git branch (BRO-1664) once the thread has run — falls back to
+  // the root/worktree posture on a never-run thread or a non-git cwd.
+  const contextLabel = branch?.trim() ? branch.trim() : runLabel;
   const sessionName = title?.trim() ? title.trim() : "New session";
 
   // Session usage for the composer context meter (BRO-1597). Sum cost + tokens
@@ -733,7 +741,7 @@ export function ChatView({
           </p>
           {workspaceName ? (
             <p className="text-muted-foreground truncate text-xs leading-tight">
-              {workspaceName} · {runLabel}
+              {workspaceName} · {contextLabel}
             </p>
           ) : null}
         </div>

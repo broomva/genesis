@@ -782,6 +782,29 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(t?.noWorktree).toBe(true);
   });
 
+  test("listThreads carries the cwd branch captured from the run (BRO-1664)", async () => {
+    const store = new InMemoryStore();
+    // A runner that reports the cwd branch on its result (root → repo branch).
+    const branchRunner = async (): Promise<RunResult> => ({
+      state: { phase: "done", sessionId: "sb", lastText: "ok", turns: 1 },
+      events: [],
+      exitCode: 0,
+      branch: "main",
+    });
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      store,
+      workspaceExists: () => true,
+      run: branchRunner,
+    });
+    await sup.dispatch("tbr", "go", undefined, { workspaceId: "ws-a" });
+    const t = (await sup.listThreads()).find((x) => x.threadId === "tbr");
+    expect(t?.branch).toBe("main");
+    // Persisted on the session (survives reload).
+    expect((await store.findSessionByThread("tbr"))?.branch).toBe("main");
+  });
+
   test("a deconfigured workspace that ALREADY RAN errors instead of silently re-cwd'ing", async () => {
     const store = new InMemoryStore();
     await store.upsertSession({

@@ -163,6 +163,10 @@ export interface ThreadSummary {
    *  Absent on a never-run thread (it inherits the workspace/global default until
    *  its first turn binds it). */
   noWorktree?: boolean;
+  /** The git branch the session's cwd is on (BRO-1664) — for the header subtitle
+   *  (`<workspace> · <branch>`). `genesis/<key>` for a worktree session, the repo's
+   *  current branch for a root session. Absent on a never-run thread or a non-git cwd. */
+  branch?: string;
 }
 
 /** First-user-turn → a short thread title (BRO-1592). First line, collapsed
@@ -561,6 +565,10 @@ export class Supervisor {
       });
 
       if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
+      // Capture the cwd's branch (BRO-1664) — refreshes each turn (worktree branch or
+      // the root repo's current branch). Only when the run resolved one; a non-git cwd
+      // or a transient failure keeps the last-known value.
+      if (result.branch) session.branch = result.branch;
       session.phase = result.state.phase;
       await this.store.upsertSession(session);
 
@@ -655,6 +663,7 @@ export class Supervisor {
           workspaceId: s.workspaceId,
           workspaceName: this.workspaceRegistry.get(s.workspaceId)?.name,
           noWorktree: s.noWorktree,
+          branch: s.branch,
         };
       }),
     );

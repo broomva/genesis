@@ -47,6 +47,8 @@ class FakeLocalHost implements ExecutionHost {
     this.execCalls.push(cmd);
     if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
     if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" }; // isGitRepo → yes
+    if (cmd[1] === "branch" && cmd.includes("--show-current"))
+      return { code: 0, stdout: "main\n", stderr: "" }; // root-session branch (BRO-1664)
     return { code: 0, stdout: "", stderr: "" };
   }
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle {
@@ -100,6 +102,14 @@ describe("runAgent — local host worktree", () => {
     const host = new FakeLocalHost();
     await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
     expect(host.spawnCwd).toBe("/repo");
+  });
+
+  test("worktree:false on a git repo surfaces the cwd's current branch (BRO-1664)", async () => {
+    const host = new FakeLocalHost();
+    const r = await runAgent({ prompt: "go", cwd: "/repo", host, worktree: false });
+    expect(host.spawnCwd).toBe("/repo"); // ran at root, no worktree
+    expect(r.worktreePath).toBeUndefined();
+    expect(r.branch).toBe("main"); // resolved via `git branch --show-current`
   });
 
   test("spawns the agent with a scrubbed, replaced env (BRO-1527 #1)", async () => {

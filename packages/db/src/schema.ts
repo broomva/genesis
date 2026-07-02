@@ -37,6 +37,10 @@ export const sessions = pgTable("sessions", {
   // resumed thread keeps its cwd posture instead of re-deriving it from the (mutable)
   // workspace registry. NULL → inherit the workspace/global default at read time.
   noWorktree: boolean("no_worktree"),
+  // The git branch the session's cwd is on (BRO-1664) — captured from each run so a
+  // reloaded thread's header shows `<workspace> · <branch>`. Additive — see the ALTER
+  // block. NULL → non-git cwd / never-run (header falls back to the run posture).
+  branch: text("branch"),
 });
 
 export const turns = pgTable(
@@ -109,6 +113,7 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engine text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS no_worktree boolean;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch text;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS input_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;

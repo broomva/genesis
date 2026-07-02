@@ -52,6 +52,10 @@ export interface ThreadSummary {
    *  new thread (no bound posture to reflect). Forward-plumbing for a future
    *  "show this thread's committed root/worktree" affordance on an existing thread. */
   noWorktree?: boolean;
+  /** The git branch the thread's cwd is on (BRO-1664) — shown in the header subtitle
+   *  (`<workspace> · <branch>`). Absent on a never-run thread or a non-git cwd (the
+   *  header falls back to the root/worktree posture). */
+  branch?: string;
 }
 
 /** Mirror of the engine's TurnPart (packages/projection) — the persisted ordered
