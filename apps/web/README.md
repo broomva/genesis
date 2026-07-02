@@ -48,10 +48,14 @@ live channel while tailing logs. Rebuild + restart after merging a PWA PR:
 ssh agent@<vps> 'export PATH=$HOME/.bun/bin:$PATH; cd ~/genesis && \
   git fetch origin -q && git checkout main -q && git pull -q origin main && \
   bun install --frozen-lockfile && bun run --filter @genesis/web build && \
-  cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static && \
-  cp -r apps/web/public        apps/web/.next/standalone/apps/web/public && \
   systemctl --user restart genesis-web && systemctl --user is-active genesis-web'
 ```
+
+> The `.next/static` + `public` copy into the standalone dir is part of `build`
+> itself now (`scripts/copy-standalone-static.mjs`, BRO-1659) — no manual `cp -r`.
+> **Always verify assets served, not just HTML:** a standalone server with a
+> missing static dir returns **200 for HTML but 404 for every `/_next/static/*`**
+> → unstyled page stuck on "Loading…". Curl a referenced asset after redeploy.
 
 Then **observe** (`journalctl --user -u genesis-web -f`) while you **operate** the
 authed channel with the agent token (sourced on-box so it never leaves the
@@ -75,14 +79,14 @@ the systemd unit):
 
 > **Rebuild gotcha:** `next build` wipes `.next/standalone`. Keep `AUTH_DB_PATH`
 > **outside** the app tree (e.g. `~/.local/share/genesis-web/auth`) or a rebuild
-> erases the owner+passkey and forces a re-bootstrap. The `cp -r` of `.next/static`
-> + `public` into the standalone dir is required each rebuild (Next does not bundle
-> them).
+> erases the owner+passkey and forces a re-bootstrap. (The `.next/static` + `public`
+> copy Next omits from the standalone bundle is now automated in `build` — BRO-1659.)
 
 ### Before opening a PWA PR
 
 - [ ] Layer 1 green (`biome ci` · `typecheck` · `bun test` · standalone build emits `server.js`)
 - [ ] Layer 2 curl matrix passes on the standalone bundle (gate 401 / agent-token 200 / cookie 200)
+- [ ] Post-deploy: a referenced `/_next/static/*` asset returns **200** (not just the HTML) — catches the missing-standalone-static blank-page failure (BRO-1659)
 - [ ] For UI/render changes: Layer 3 visual check on the live URL after redeploy
 
 > The genesis repo is public — use placeholders (`<vps>`, `<engine-host>`) in docs
