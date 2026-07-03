@@ -72,6 +72,117 @@ export function normalizeFile(data: unknown): FileContent {
   };
 }
 
+/** BFF URL for a file's RAW bytes (images / pdf / html), for `<img>` / `<iframe>`. */
+export function rawFileUrl(workspaceId: string, path: string): string {
+  return `/api/workspaces/${encodeURIComponent(workspaceId)}/file/raw?path=${encodeURIComponent(path)}`;
+}
+
+/** How the viewer should render a file. */
+export type FileKind = "markdown" | "image" | "html" | "pdf" | "code" | "text";
+
+const IMAGE_EXT = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "avif",
+  "bmp",
+  "ico",
+  "svg", // rendered via <img> — img-context SVG can't execute scripts (safe)
+]);
+const MARKDOWN_EXT = new Set(["md", "markdown", "mdx"]);
+// ext → highlighter language hint.
+const CODE_LANG: Record<string, string> = {
+  ts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  jsx: "jsx",
+  mjs: "javascript",
+  cjs: "javascript",
+  json: "json",
+  jsonc: "json",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  rb: "ruby",
+  java: "java",
+  kt: "kotlin",
+  c: "c",
+  h: "c",
+  hpp: "cpp",
+  cpp: "cpp",
+  cc: "cpp",
+  cs: "csharp",
+  php: "php",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  sql: "sql",
+  css: "css",
+  scss: "scss",
+  less: "less",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "toml",
+  xml: "xml",
+  swift: "swift",
+  lua: "lua",
+  r: "r",
+};
+
+/** Classify a file by name for the viewer. `lang` (code only) hints the highlighter. */
+export function classifyFile(name: string): { kind: FileKind; lang?: string } {
+  const lower = name.toLowerCase();
+  const base = lower.slice(lower.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1) : "";
+  if (MARKDOWN_EXT.has(ext)) return { kind: "markdown" };
+  if (IMAGE_EXT.has(ext)) return { kind: "image" };
+  if (ext === "html" || ext === "htm") return { kind: "html" };
+  if (ext === "pdf") return { kind: "pdf" };
+  if (ext && CODE_LANG[ext]) return { kind: "code", lang: CODE_LANG[ext] };
+  if (base === "dockerfile") return { kind: "code", lang: "dockerfile" };
+  if (base === "makefile") return { kind: "code", lang: "makefile" };
+  return { kind: "text" };
+}
+
+/** Split a leading YAML frontmatter block (`---\n…\n---`) from a markdown body.
+ *  `frontmatter` is null when there is no block. Anchored to the very start. */
+export function splitFrontmatter(content: string): { frontmatter: string | null; body: string } {
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!m) return { frontmatter: null, body: content };
+  return { frontmatter: m[1] ?? "", body: content.slice(m[0].length) };
+}
+
+/** Light parse of a frontmatter block into [key, value] rows for a display table.
+ *  Handles the common flat `key: value` case + folds an indented list/block into the
+ *  value; a purely nested doc falls back to 0 rows (caller shows the raw block). Not a
+ *  full YAML parser. */
+export function parseFrontmatter(fm: string): Array<{ key: string; value: string }> {
+  const lines = fm.split(/\r?\n/);
+  const rows: Array<{ key: string; value: string }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i]?.match(/^([A-Za-z0-9_.-]+):\s?(.*)$/);
+    if (!m) {
+      i++;
+      continue;
+    }
+    let value = m[2] ?? "";
+    const cont: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && /^\s+\S/.test(lines[j] ?? "")) {
+      cont.push((lines[j] ?? "").trim().replace(/^-\s*/, ""));
+      j++;
+    }
+    if (cont.length) value = value ? `${value} ${cont.join(", ")}` : cont.join(", ");
+    rows.push({ key: m[1] ?? "", value });
+    i = j;
+  }
+  return rows;
+}
+
 /** List a directory under a workspace. `path` is RELATIVE ("" = root). Rejects with
  *  the engine's SAFE error message on a non-OK response (so the UI can surface it). */
 export async function fetchDir(

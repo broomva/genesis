@@ -5,9 +5,12 @@ import { join } from "node:path";
 import {
   MAX_DIR_ENTRIES,
   MAX_FILE_BYTES,
+  MAX_RAW_BYTES,
   WorkspaceFsError,
+  contentTypeFor,
   listWorkspaceDir,
   readWorkspaceFile,
+  readWorkspaceFileRaw,
   resolveInRoot,
 } from "./workspace-fs";
 
@@ -213,6 +216,61 @@ describe("readWorkspaceFile (BRO-1666)", () => {
     expect(() => readWorkspaceFile(dir, "../secret")).toThrow(/escapes/);
     try {
       readWorkspaceFile(dir, "nope.txt");
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect((e as WorkspaceFsError).status).toBe(404);
+    }
+  });
+});
+
+describe("contentTypeFor (BRO-1667)", () => {
+  test("maps known extensions to safe MIME types (case-insensitive)", () => {
+    expect(contentTypeFor("a.png")).toBe("image/png");
+    expect(contentTypeFor("A.JPG")).toBe("image/jpeg");
+    expect(contentTypeFor("x.jpeg")).toBe("image/jpeg");
+    expect(contentTypeFor("i.svg")).toBe("image/svg+xml");
+    expect(contentTypeFor("doc.pdf")).toBe("application/pdf");
+    expect(contentTypeFor("page.html")).toBe("text/html; charset=utf-8");
+    expect(contentTypeFor("page.htm")).toBe("text/html; charset=utf-8");
+    expect(contentTypeFor("n.txt")).toBe("text/plain; charset=utf-8");
+  });
+  test("falls back to octet-stream for unknown / no extension", () => {
+    expect(contentTypeFor("archive.zip")).toBe("application/octet-stream");
+    expect(contentTypeFor("Makefile")).toBe("application/octet-stream");
+    expect(contentTypeFor("weird.exe")).toBe("application/octet-stream");
+  });
+});
+
+describe("readWorkspaceFileRaw (BRO-1667)", () => {
+  test("returns bytes + a name-derived content type", () => {
+    const dir = root();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]); // PNG signature-ish
+    writeFileSync(join(dir, "logo.png"), png);
+    const r = readWorkspaceFileRaw(dir, "logo.png");
+    expect(r.contentType).toBe("image/png");
+    expect(r.size).toBe(png.length);
+    expect(Buffer.from(r.bytes).equals(png)).toBe(true);
+  });
+
+  test("throws 413 for a file over the raw cap", () => {
+    const dir = root();
+    // Sparse-ish: write a buffer just over the cap (bounded — the test env allows it).
+    writeFileSync(join(dir, "big.bin"), Buffer.alloc(MAX_RAW_BYTES + 1));
+    try {
+      readWorkspaceFileRaw(dir, "big.bin");
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect((e as WorkspaceFsError).status).toBe(413);
+    }
+  });
+
+  test("rejects traversal / directory / missing", () => {
+    const dir = root();
+    mkdirSync(join(dir, "d"));
+    expect(() => readWorkspaceFileRaw(dir, "../etc")).toThrow(/escapes/);
+    expect(() => readWorkspaceFileRaw(dir, "d")).toThrow(/directory/);
+    try {
+      readWorkspaceFileRaw(dir, "nope");
       throw new Error("should have thrown");
     } catch (e) {
       expect((e as WorkspaceFsError).status).toBe(404);

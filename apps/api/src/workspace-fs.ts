@@ -19,16 +19,17 @@
 // host.readFile; that is a Slice-1-follow-up, not required for the current deploy.
 
 import { closeSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { extname, resolve, sep } from "node:path";
 
 /** A rejected client request whose message is SAFE to echo (it never contains an
  *  absolute server path). `status` maps to the HTTP code the route returns: 400 for
  *  a bad/unsafe input, 404 for a missing path, 409 for a transient conflict (e.g. a
- *  git index lock), 500 for an unavailable workspace root (vanished out-of-band). */
+ *  git index lock), 413 for a file too large to serve raw, 500 for an unavailable
+ *  workspace root (vanished out-of-band). */
 export class WorkspaceFsError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 404 | 409 | 500 = 400,
+    readonly status: 400 | 404 | 409 | 413 | 500 = 400,
   ) {
     super(message);
     this.name = "WorkspaceFsError";
@@ -218,5 +219,90 @@ export function readWorkspaceFile(rootPath: string, relPath: unknown): FileConte
     truncated: size > MAX_FILE_BYTES,
     binary,
     size,
+  };
+}
+
+/** Hard ceiling on a RAW (bytes) file read (10 MB) — bounds memory for the raw
+ *  endpoint that serves images/pdf/html inline. Larger → 413. */
+export const MAX_RAW_BYTES = 10 * 1024 * 1024;
+
+/** Extension → a KNOWN, SAFE MIME type for the raw endpoint. Deliberately a small
+ *  allowlist (image/pdf/text/html/svg); anything unknown falls back to
+ *  `application/octet-stream` (never sniffed — the route sends `nosniff`). The type is
+ *  derived from the NAME only, never the content, so a mislabeled file can't coerce a
+ *  dangerous interpretation. */
+export function contentTypeFor(name: string): string {
+  const ext = extname(name).toLowerCase();
+  switch (ext) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".ico":
+      return "image/x-icon";
+    case ".svg":
+      return "image/svg+xml";
+    case ".pdf":
+      return "application/pdf";
+    case ".html":
+    case ".htm":
+      return "text/html; charset=utf-8";
+    case ".txt":
+    case ".text":
+    case ".log":
+      return "text/plain; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+export interface RawFile {
+  bytes: Buffer;
+  contentType: string;
+  size: number;
+}
+
+/** Read a file's RAW bytes (sandboxed, capped at {@link MAX_RAW_BYTES}) + its derived
+ *  MIME type, for the inline raw endpoint (images/pdf/html). Throws
+ *  {@link WorkspaceFsError}: 400 (bad path / directory / non-regular), 404 (missing),
+ *  413 (too large). The absolute path never leaves; only bytes + a name-derived type. */
+export function readWorkspaceFileRaw(rootPath: string, relPath: unknown): RawFile {
+  const { abs, rel } = resolveInRoot(rootPath, relPath);
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT")
+      throw new WorkspaceFsError("not found", 404);
+    throw e;
+  }
+  if (st.isDirectory()) throw new WorkspaceFsError("path is a directory", 400);
+  if (!st.isFile()) throw new WorkspaceFsError("not a regular file", 400);
+  if (st.size > MAX_RAW_BYTES) throw new WorkspaceFsError("file is too large to display", 413);
+  // BOUNDED read (P20 LOW-2): allocate + read at most `size` (≤ cap) bytes via readSync
+  // rather than an unbounded `readFileSync` that trusts `st.size` — so a file that GROWS
+  // between the stat and the read can never be read past the cap (it's truncated to the
+  // capped buffer instead). `size` is the stat size, which the response reflects.
+  const bytes = Buffer.alloc(st.size);
+  const fd = openSync(abs, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = bytes.length === 0 ? 0 : readSync(fd, bytes, 0, bytes.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    bytes: bytesRead === bytes.length ? bytes : bytes.subarray(0, bytesRead),
+    contentType: contentTypeFor(rel),
+    size: st.size,
   };
 }

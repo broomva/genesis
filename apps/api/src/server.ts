@@ -15,7 +15,12 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
-import { WorkspaceFsError, listWorkspaceDir, readWorkspaceFile } from "./workspace-fs";
+import {
+  WorkspaceFsError,
+  listWorkspaceDir,
+  readWorkspaceFile,
+  readWorkspaceFileRaw,
+} from "./workspace-fs";
 import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
 import {
   WorkspaceValidationError,
@@ -315,6 +320,34 @@ export function build(opts: BuildOpts) {
     if (!root) return c.json({ error: "unknown workspace" }, 404);
     try {
       return c.json(readWorkspaceFile(root, c.req.query("path")));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read file");
+    }
+  });
+
+  // RAW file bytes (BRO-1667) — serves images/pdf/html inline for the rich viewer.
+  // Same bearer gate + path sandbox as /file; the Content-Type is derived from the
+  // NAME (never sniffed) and paired with `nosniff` + a strict CSP + `sandbox`, so a
+  // mislabeled or HTML/SVG file can't execute if loaded as a top-level document. Size-
+  // capped (413). The absolute rootPath never leaves — only the bytes + a safe type.
+  app.get("/workspaces/:id/file/raw", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      const { bytes, contentType, size } = readWorkspaceFileRaw(root, c.req.query("path"));
+      return new Response(new Uint8Array(bytes), {
+        status: 200,
+        headers: {
+          "content-type": contentType,
+          "content-length": String(size),
+          "x-content-type-options": "nosniff",
+          "content-security-policy":
+            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+          "content-disposition": "inline",
+          "cache-control": "no-store",
+        },
+      });
     } catch (e) {
       return fsErrorResponse(c, e, "read file");
     }
