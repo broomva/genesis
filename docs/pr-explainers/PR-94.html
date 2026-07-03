@@ -1,0 +1,127 @@
+<!doctype html>
+<!--
+  PR explainer — BRO-1667: rich file rendering in the Repo Files viewer.
+  P18 · Audience: human-read; presentation carries the render-by-type + XSS model.
+  Category-C, self-contained. PR #94.
+  meta: { pr: 94, ticket: "BRO-1667", date: "2026-07-03" }
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR #94 — Rich file rendering (BRO-1667)</title>
+    <style>
+      :root {
+        --bg: #0e1016; --panel: #161a24; --panel-2: #1d2230; --ink: #e6e9f0;
+        --muted: #99a1b3; --line: #2a3040; --blue: #6ea8fe; --green: #57d38c;
+        --amber: #f0b866; --red: #f2708a; --violet: #b79bff;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: radial-gradient(1200px 700px at 70% -10%, #1a2030 0%, var(--bg) 60%);
+        color: var(--ink); font-family: var(--sans); line-height: 1.6; padding: clamp(1rem, 3vw, 3rem); }
+      .wrap { max-width: 960px; margin: 0 auto; }
+      header.hero { border: 1px solid var(--line); border-radius: 18px; padding: 1.6rem 1.8rem;
+        background: linear-gradient(160deg, var(--panel) 0%, #12151f 100%); }
+      .tag { display: inline-flex; gap: .4rem; align-items: center; font-family: var(--mono); font-size: .72rem;
+        letter-spacing: .04em; text-transform: uppercase; color: var(--blue); border: 1px solid var(--line);
+        border-radius: 999px; padding: .2rem .6rem; }
+      h1 { font-size: clamp(1.4rem, 3.5vw, 2rem); margin: .8rem 0 .3rem; letter-spacing: -.02em; }
+      h2 { font-size: 1.15rem; margin: 2.4rem 0 .8rem; letter-spacing: -.01em; display: flex; align-items: center; gap: .6rem; }
+      h2::before { content: ""; width: 8px; height: 22px; border-radius: 3px; background: linear-gradient(var(--blue), var(--violet)); display: inline-block; }
+      p.lede { color: var(--muted); font-size: 1.02rem; margin: .4rem 0 0; }
+      a { color: var(--blue); }
+      code { font-family: var(--mono); font-size: .86em; background: var(--panel-2); padding: .1rem .38rem; border-radius: 6px; border: 1px solid var(--line); }
+      table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      th, td { text-align: left; padding: .6rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+      td code { white-space: nowrap; }
+      .safe { color: var(--green); font-weight: 600; }
+      .kind { font-family: var(--mono); font-size: .82rem; color: var(--violet); }
+      ul.clean { list-style: none; padding: 0; margin: .6rem 0; }
+      ul.clean li { padding: .3rem 0 .3rem 1.5rem; position: relative; color: var(--muted); }
+      ul.clean li::before { content: "▸"; color: var(--blue); position: absolute; left: .3rem; }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); margin-top: 1rem; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.2rem; }
+      .card h3 { margin: 0 0 .4rem; font-size: .95rem; }
+      .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+      figure { margin: 1.2rem 0; } figcaption { color: var(--muted); font-size: .82rem; text-align: center; margin-top: .5rem; }
+      svg { width: 100%; height: auto; display: block; }
+      footer { margin-top: 2.6rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="tag">● PR #94 · BRO-1667</span>
+        <h1>Rich file rendering — by type, safely</h1>
+        <p class="lede">
+          The Repo Files viewer stops dumping every file as raw text. Markdown renders (with its
+          frontmatter as a metadata panel), images show, HTML renders in a sandbox, code is
+          highlighted — and none of it can run a script in the app.
+        </p>
+      </header>
+
+      <h2>One new idea: a raw-bytes endpoint</h2>
+      <p>
+        The text endpoint (Slice 1) returns UTF-8 + flags binary. Images/PDF/HTML need <em>bytes</em>,
+        so this adds <code>GET /workspaces/:id/file/raw</code> — same <code>resolveInRoot</code>
+        sandbox, 10&nbsp;MB cap (→ 413), and a <strong>name-derived</strong> Content-Type paired with
+        <code>X-Content-Type-Options: nosniff</code> + a strict CSP (<code>default-src 'none'; … sandbox</code>).
+        The BFF <strong>forwards those hardening headers</strong> — dropping them would re-open sniffing.
+      </p>
+
+      <h2>Render map — and why each is safe</h2>
+      <table>
+        <thead><tr><th>File</th><th>How it renders</th><th>Why it can't run a script</th></tr></thead>
+        <tbody>
+          <tr><td class="kind">markdown</td><td><code>&lt;Streamdown&gt;</code> (frontmatter split into a panel)</td>
+            <td><span class="safe">safe</span> — the same sanitizing renderer used for untrusted LLM output; no raw-HTML passthrough.</td></tr>
+          <tr><td class="kind">image / svg</td><td><code>&lt;img src=…/file/raw&gt;</code></td>
+            <td><span class="safe">safe</span> — an SVG loaded via <code>&lt;img&gt;</code> cannot execute its scripts (image context).</td></tr>
+          <tr><td class="kind">html</td><td><code>&lt;iframe sandbox=""&gt;</code></td>
+            <td><span class="safe">safe</span> — empty <code>sandbox</code> = no scripts, no same-origin, no top-nav; an opaque origin that can't touch the app.</td></tr>
+          <tr><td class="kind">code</td><td>Streamdown fenced block (highlighted)</td>
+            <td><span class="safe">safe</span> — fenced text; a file containing <code>```</code> falls back to plain <code>&lt;pre&gt;</code>.</td></tr>
+          <tr><td class="kind">text / other</td><td>plain <code>&lt;pre&gt;</code> / "Open in new tab"</td>
+            <td><span class="safe">safe</span> — inert text; binaries never inline.</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Defense in depth (if a file is opened directly)</h2>
+      <figure>
+        <svg viewBox="0 0 900 170" role="img" aria-label="Raw endpoint hardening">
+          <defs><style>
+            .b{fill:#161a24;stroke:#2a3040;stroke-width:1.5}.l{fill:#e6e9f0;font:600 13px ui-sans-serif}.s{fill:#99a1b3;font:11px ui-monospace,monospace}
+          </style></defs>
+          <rect class="b" x="20" y="55" width="180" height="60" rx="12"/><text x="36" y="82" class="l">.svg / .html file</text><text x="36" y="100" class="s">attacker-authored</text>
+          <rect class="b" x="250" y="40" width="230" height="90" rx="12"/><text x="266" y="66" class="l">/file/raw</text><text x="266" y="86" class="s">type from NAME (allowlist)</text><text x="266" y="104" class="s">nosniff · CSP sandbox · inline</text>
+          <rect class="b" x="530" y="40" width="150" height="90" rx="12"/><text x="546" y="66" class="l">BFF</text><text x="546" y="86" class="s">forwards</text><text x="546" y="104" class="s">all headers</text>
+          <rect class="b" x="730" y="40" width="150" height="90" rx="12"/><text x="746" y="72" class="l">browser</text><text x="746" y="94" class="s">can't sniff/execute</text>
+          <path d="M200 85 L246 85" stroke="#6ea8fe" stroke-width="2" fill="none" marker-end="url(#a)"/>
+          <path d="M480 85 L526 85" stroke="#6ea8fe" stroke-width="2" fill="none" marker-end="url(#a)"/>
+          <path d="M680 85 L726 85" stroke="#6ea8fe" stroke-width="2" fill="none" marker-end="url(#a)"/>
+          <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe"/></marker></defs>
+        </svg>
+        <figcaption>Even a direct navigation to a malicious SVG/HTML is neutralized: name-derived type + <code>nosniff</code> block MIME confusion; the CSP <code>sandbox</code> + <code>default-src 'none'</code> stop execution + exfiltration. The BFF forwards the headers intact.</figcaption>
+      </figure>
+
+      <h2>Frontmatter, done right</h2>
+      <div class="grid">
+        <div class="card"><h3>Detected, not dumped</h3><p>A leading <code>---…---</code> block is split out (anchored to the start; CRLF-aware) and shown as a labeled metadata panel — not mixed into the body.</p></div>
+        <div class="card"><h3>Parsed to rows</h3><p>Flat <code>key: value</code> pairs become a table; an indented list folds into its value; a purely nested doc falls back to the raw block.</p></div>
+        <div class="card"><h3>Toggle</h3><p>Markdown + HTML get a Rendered / Source switch — read the rendered doc or the exact bytes.</p></div>
+      </div>
+
+      <h2>Validation</h2>
+      <ul class="clean">
+        <li>+6 server tests (mime map + raw read: bytes/type, 413 cap, traversal/dir/missing) + 12 client tests (classify, split/parse frontmatter, url) · full suite <strong>676 pass / 0 fail</strong>.</li>
+        <li>Typecheck + Biome clean · <code>next build</code> OK (raw route present, standalone copy).</li>
+        <li>P20 adversarial review focused on the XSS surface (verdict on the PR) · post-merge dogfood: curl <code>/file/raw</code> for png/md/html + header checks.</li>
+      </ul>
+
+      <footer>PR&nbsp;#94 · <code>feat/bro-1667-rich-file-viewer</code> → <code>main</code> · genesis. Enhances Slice 1 (<a href="./PR-91.html">PR-91</a>).</footer>
+    </div>
+  </body>
+</html>
