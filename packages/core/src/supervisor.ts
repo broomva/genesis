@@ -191,6 +191,19 @@ export function deriveTitle(text: string): string | undefined {
  *  (haiku) via the print engine, independent of the thread's own engine. */
 export const TITLE_MODEL = "haiku";
 
+/** Bound the title-gen call (BRO-1665, P20) so a hung `claude -p` can't hold a host
+ *  lease / dangle a promise. Generous — a haiku one-shot completes in ~seconds. */
+const TITLE_TIMEOUT_MS = 30_000;
+
+/** Reject if `p` doesn't settle within `ms` (clears the timer either way). */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("title generation timed out")), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** Build the titling prompt (BRO-1665). SELF-CONTAINED — the conversation is inlined
  *  (both sides truncated), so the model never needs a tool, and it's told to output
  *  only the title. Keeps the call a single cheap completion. */
@@ -209,6 +222,9 @@ export function buildTitlePrompt(userText: string, replyText: string): string {
 export function sanitizeTitle(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   let t = (raw.trim().split("\n")[0] ?? "").trim();
+  // Strip control + format chars (P20): a NUL would throw in Postgres, and a
+  // bidi-override (U+202E) could spoof the displayed title. Do this FIRST.
+  t = t.replace(/[\p{Cc}\p{Cf}]/gu, "");
   t = t.replace(/^title:\s*/i, ""); // a "Title: X" lead
   t = t.replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, ""); // wrapping quotes/backticks
   t = t
@@ -709,7 +725,9 @@ export class Supervisor {
       if (!session) return;
       const workspace = this.workspaceRegistry.get(session.workspaceId) ?? this.defaultWorkspace;
       lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
-      const result = await print({
+      // Bound the call (P20): a hung `claude -p` must not hold the lease / dangle a
+      // promise forever. The late rejection is swallowed so it can't unhandled-reject.
+      const runP = print({
         prompt: buildTitlePrompt(userText, replyText),
         cwd: workspace.rootPath,
         host: lease.host,
@@ -718,16 +736,15 @@ export class Supervisor {
         remoteCwd: lease.remoteCwd ?? this.remoteCwd,
         extraArgs: this.extraArgs,
       });
+      runP.catch(() => {}); // a rejection after the timeout must not escape
+      const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
       const title = sanitizeTitle(result.state.lastText);
       if (!title) return;
-      // Re-read: the session may have advanced. Only upgrade while the title is STILL
-      // the heuristic we set — never clobber a user rename that landed meanwhile, and
-      // stay idempotent if this somehow fires twice.
-      const fresh = await this.store.findSessionByThread(threadId);
-      if (!fresh || fresh.title !== deriveTitle(userText)) return;
-      fresh.title = title;
-      await this.store.upsertSession(fresh);
-      console.log(`[genesis] title ✓ thread=${threadId} "${title}"`);
+      // Atomic, title-ONLY update (P20): replace the heuristic only while it's still
+      // the heuristic — never clobbers a concurrent turn's phase/agentSessionId/branch
+      // (a whole-row upsert from this stale snapshot would) nor a user rename.
+      const updated = await this.store.updateSessionTitle(session.id, title, deriveTitle(userText));
+      if (updated) console.log(`[genesis] title ✓ thread=${threadId} "${title}"`);
     } catch (e) {
       console.error(
         `[genesis] title generation failed (thread=${threadId}): ${e instanceof Error ? e.message : String(e)}`,

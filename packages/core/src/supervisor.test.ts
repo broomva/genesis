@@ -1061,6 +1061,10 @@ describe("title generation (BRO-1665)", () => {
     expect(sanitizeTitle("Deploy pipeline fix\nignored second line")).toBe("Deploy pipeline fix");
     expect(sanitizeTitle("  spaced   out   title  ")).toBe("spaced out title");
     expect(sanitizeTitle("`code title`")).toBe("code title");
+    // Control + format chars stripped (P20): a NUL (\x00) would throw in Postgres;
+    // the bidi override (\u202E) could spoof the rendered title.
+    expect(sanitizeTitle("ab\x00cd")).toBe("abcd");
+    expect(sanitizeTitle("safe\u202Etxet")).toBe("safetxet");
     expect(sanitizeTitle("")).toBeUndefined();
     expect(sanitizeTitle(undefined)).toBeUndefined();
     expect(sanitizeTitle("   ")).toBeUndefined();

@@ -8,6 +8,16 @@ export interface Store {
   upsertWorkspace(ws: Workspace): Promise<Workspace>;
   findSessionByThread(threadId: string): Promise<Session | undefined>;
   upsertSession(s: Session): Promise<Session>;
+  /** Atomically set a session's title ONLY if its current title still equals
+   *  `ifTitleEquals` (BRO-1665). A scoped check-then-act update: it touches only the
+   *  `title` column (so it can't clobber a concurrent turn's phase/agentSessionId/
+   *  branch the way a whole-row upsert from a stale snapshot would) and won't
+   *  overwrite a rename (the WHERE guard fails). Returns whether a row was updated. */
+  updateSessionTitle(
+    id: string,
+    title: string,
+    ifTitleEquals: string | undefined,
+  ): Promise<boolean>;
   /** Sessions whose stored phase is any of `phases`. Used for boot-time
    *  reconciliation of turns interrupted by a process crash (BRO-1530). */
   findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
@@ -46,6 +56,12 @@ export class InMemoryStore implements Store {
   async upsertSession(s: Session) {
     this.sessions.set(s.id, { ...s });
     return s;
+  }
+  async updateSessionTitle(sessionId: string, title: string, ifTitleEquals: string | undefined) {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.title !== ifTitleEquals) return false; // gone, renamed, or already upgraded
+    s.title = title;
+    return true;
   }
   async findSessionsByPhase(phases: readonly Session["phase"][]) {
     const want = new Set(phases);

@@ -234,6 +234,41 @@ describe("DrizzleStore (pglite) — session management (BRO-1592)", () => {
     await store.close();
   });
 
+  test("updateSessionTitle is atomic + title-only + guarded (BRO-1665)", async () => {
+    const store = await createPgliteStore();
+    await store.upsertWorkspace(ws);
+    // A ran session with a heuristic title + a live agentSessionId + phase.
+    await store.upsertSession({
+      id: "sT",
+      threadId: "t-t",
+      ...base,
+      phase: "done",
+      title: "Write a 1500 word",
+      agentSessionId: "sid-live",
+      branch: "main",
+    });
+    // Matching guard → upgrades, and touches ONLY the title (other fields intact).
+    expect(await store.updateSessionTitle("sT", "Consensus Comparison", "Write a 1500 word")).toBe(
+      true,
+    );
+    let got = await store.findSessionByThread("t-t");
+    expect(got?.title).toBe("Consensus Comparison");
+    expect(got?.agentSessionId).toBe("sid-live"); // NOT clobbered
+    expect(got?.branch).toBe("main"); // NOT clobbered
+    expect(got?.phase).toBe("done"); // NOT clobbered
+    // Stale guard (the title already changed / a rename) → no-op, returns false.
+    expect(await store.updateSessionTitle("sT", "Should Not Win", "Write a 1500 word")).toBe(false);
+    got = await store.findSessionByThread("t-t");
+    expect(got?.title).toBe("Consensus Comparison");
+    // A missing session → false, no throw.
+    expect(await store.updateSessionTitle("nope", "x", undefined)).toBe(false);
+    // NULL-title guard (never-titled thread) matches `undefined`.
+    await store.upsertSession({ id: "sN", threadId: "t-n", ...base });
+    expect(await store.updateSessionTitle("sN", "First Title", undefined)).toBe(true);
+    expect((await store.findSessionByThread("t-n"))?.title).toBe("First Title");
+    await store.close();
+  });
+
   test("listSessions includes archived rows (drawer filters, not the store)", async () => {
     const store = await createPgliteStore();
     await store.upsertWorkspace(ws);
