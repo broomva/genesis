@@ -1,0 +1,109 @@
+<!doctype html>
+<!--
+  PR explainer — BRO-1669: Checks tab (read-only CI status via gh). Capstone of the
+  mobile-git-client arc. P18 · Audience: human-read. Category-C, self-contained. PR #95.
+  meta: { pr: 95, ticket: "BRO-1669", date: "2026-07-03" }
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR #95 — Checks tab (BRO-1669)</title>
+    <style>
+      :root {
+        --bg: #0e1016; --panel: #161a24; --panel-2: #1d2230; --ink: #e6e9f0;
+        --muted: #99a1b3; --line: #2a3040; --blue: #6ea8fe; --green: #57d38c;
+        --amber: #f0b866; --red: #f2708a; --violet: #b79bff;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: radial-gradient(1200px 700px at 70% -10%, #1a2030 0%, var(--bg) 60%);
+        color: var(--ink); font-family: var(--sans); line-height: 1.6; padding: clamp(1rem, 3vw, 3rem); }
+      .wrap { max-width: 940px; margin: 0 auto; }
+      header.hero { border: 1px solid var(--line); border-radius: 18px; padding: 1.6rem 1.8rem;
+        background: linear-gradient(160deg, var(--panel) 0%, #12151f 100%); }
+      .tag { display: inline-flex; gap: .4rem; align-items: center; font-family: var(--mono); font-size: .72rem;
+        letter-spacing: .04em; text-transform: uppercase; color: var(--blue); border: 1px solid var(--line);
+        border-radius: 999px; padding: .2rem .6rem; }
+      h1 { font-size: clamp(1.4rem, 3.5vw, 2rem); margin: .8rem 0 .3rem; letter-spacing: -.02em; }
+      h2 { font-size: 1.15rem; margin: 2.4rem 0 .8rem; letter-spacing: -.01em; display: flex; align-items: center; gap: .6rem; }
+      h2::before { content: ""; width: 8px; height: 22px; border-radius: 3px; background: linear-gradient(var(--blue), var(--violet)); display: inline-block; }
+      p.lede { color: var(--muted); font-size: 1.02rem; margin: .4rem 0 0; }
+      a { color: var(--blue); }
+      code { font-family: var(--mono); font-size: .86em; background: var(--panel-2); padding: .1rem .38rem; border-radius: 6px; border: 1px solid var(--line); }
+      .steps { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+      .step { flex: 1 1 150px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: .9rem 1rem; }
+      .step .n { font-family: var(--mono); font-size: .7rem; color: var(--blue); }
+      .step .t { font-weight: 600; margin: .2rem 0; font-size: .92rem; }
+      .step .d { color: var(--muted); font-size: .82rem; }
+      .done { color: var(--green); }
+      ul.clean { list-style: none; padding: 0; margin: .6rem 0; }
+      ul.clean li { padding: .3rem 0 .3rem 1.5rem; position: relative; color: var(--muted); }
+      ul.clean li::before { content: "▸"; color: var(--blue); position: absolute; left: .3rem; }
+      table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+      footer { margin-top: 2.6rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="tag">● PR #95 · BRO-1669 · Slice 4a</span>
+        <h1>Checks — and the mobile git client is complete</h1>
+        <p class="lede">
+          The last read tab: recent CI runs for the workspace repo's branch, with a status
+          badge and a tap-through to the run. With this, the slide-over is a full mobile git
+          client — browse, diff, commit &amp; push, render, and watch CI.
+        </p>
+      </header>
+
+      <h2>The arc, complete</h2>
+      <div class="steps">
+        <div class="step"><div class="n">Slice 1 · #91</div><div class="t done">Repo Files ✓</div><div class="d">lazy tree + viewer</div></div>
+        <div class="step"><div class="n">Slice 2 · #92</div><div class="t done">Changes ✓</div><div class="d">git status + diff</div></div>
+        <div class="step"><div class="n">Slice 3 · #93</div><div class="t done">Commit &amp; Push ✓</div><div class="d">owner-only write</div></div>
+        <div class="step"><div class="n">BRO-1667 · #94</div><div class="t done">Rich render ✓</div><div class="d">md/html/images</div></div>
+        <div class="step"><div class="n">Slice 4a · #95</div><div class="t done">Checks ✓</div><div class="d">CI status</div></div>
+      </div>
+
+      <h2>How Checks works — and why it's safe</h2>
+      <p>
+        The engine shells the GitHub CLI (<code>gh</code>) read-only, the same disciplined way the
+        git routes shell <code>git</code>:
+      </p>
+      <table>
+        <thead><tr><th>Guarantee</th><th>How</th></tr></thead>
+        <tbody>
+          <tr><td>No injection</td><td><code>execFile</code> (no shell), <strong>fixed argv</strong>. The only dynamic value is the <strong>branch</strong>, derived server-side (<code>git branch --show-current</code>) — the route has no query params, so no client input reaches a gh argument.</td></tr>
+          <tr><td>Read-only</td><td>Only <code>gh repo view</code> + <code>gh run list</code> — no state-changing subcommand, nothing that spends the owner's token to mutate.</td></tr>
+          <tr><td>Confined</td><td>Reuses <code>isRepoRoot</code> — a subdir workspace can't surface the enclosing repo's CI.</td></tr>
+          <tr><td>Bounded</td><td>20 s timeout · maxBuffer · SIGKILL · non-interactive env (<code>GH_PROMPT_DISABLED</code>, <code>GH_PAGER=cat</code>) — gh hits the network but can't hang or page.</td></tr>
+          <tr><td>Graceful</td><td>Non-GitHub / unauthenticated / no-Actions → <code>{available:false}</code> / empty runs with a <strong>safe reason</strong> (<code>classifyGhError</code> never echoes stderr or paths).</td></tr>
+        </tbody>
+      </table>
+
+      <h2>What you see</h2>
+      <ul class="clean">
+        <li>A <code>owner/repo · branch</code> header + a <strong>Refresh</strong> button (re-poll CI).</li>
+        <li>Recent runs: a status icon (✓ success / ✗ failure / ◍ spinner running), the workflow name, the run title, a relative time, and a tap-through (<code>target="_blank" rel="noreferrer"</code>) to the run on GitHub.</li>
+      </ul>
+
+      <h2>Deferred (separate tickets)</h2>
+      <ul class="clean">
+        <li><strong>Scripts runner</strong> — running <code>package.json</code> scripts is <em>arbitrary code execution</em>; it needs its own owner-gate + careful P20, not a quiet add-on.</li>
+        <li><strong>Preview</strong> (run/proxy the app) — infra-heavy. <strong>Connect</strong> (GitHub OAuth) — largely moot: <code>gh</code> is already authed on the box.</li>
+      </ul>
+
+      <h2>Validation</h2>
+      <ul class="clean">
+        <li>+6 server tests (parse runs JSON defensively, gh-error → safe reason) + 5 client tests (normalize, run-state) · full suite <strong>686 pass / 0 fail</strong>.</li>
+        <li>Typecheck + Biome clean · <code>next build</code> OK (checks route present).</li>
+        <li>P20 adversarial review (gh injection / state-change / leakage / confinement) on the PR · post-merge dogfood against a repo with real Actions runs.</li>
+      </ul>
+
+      <footer>PR&nbsp;#95 · <code>feat/bro-1669-checks-tab</code> → <code>main</code> · genesis. Completes the mobile git client (<a href="./PR-91.html">Files</a> · <a href="./PR-92.html">Changes</a> · <a href="./PR-93.html">Commit</a> · <a href="./PR-94.html">Render</a> · Checks).</footer>
+    </div>
+  </body>
+</html>
