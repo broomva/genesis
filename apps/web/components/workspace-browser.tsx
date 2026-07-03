@@ -3,6 +3,9 @@
 import {
   ArrowLeft,
   ChevronRight,
+  CircleCheck,
+  CircleDot,
+  CircleX,
   ExternalLink,
   File as FileIcon,
   Folder,
@@ -10,6 +13,7 @@ import {
   GitBranch,
   GitCommitVertical,
   Loader2,
+  RefreshCw,
   X,
 } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
@@ -19,6 +23,7 @@ import "streamdown/styles.css";
 
 import { Button } from "@/components/ui/button";
 import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
+import { type ChecksData, type RunState, fetchChecks, runState } from "@/lib/checks";
 import {
   type DirListing,
   type FileContent,
@@ -41,7 +46,7 @@ import {
 } from "@/lib/git";
 import { cn } from "@/lib/utils";
 
-type Tab = "files" | "changes";
+type Tab = "files" | "changes" | "checks";
 
 /** Join a relative dir path with a child name (both relative to the workspace root). */
 function childPath(dir: string, name: string): string {
@@ -827,11 +832,126 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
   );
 }
 
+/** A compact relative time ("3m", "2h", "5d") from an ISO timestamp; "" when unknown. */
+function relTime(iso: string, nowMs: number): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+/** A CI run's status icon. */
+function RunBadge({ state }: { state: RunState }) {
+  if (state === "success")
+    return <CircleCheck className="size-4 shrink-0 text-[var(--bv-green-text,#2e7d32)]" />;
+  if (state === "failure") return <CircleX className="text-[var(--bv-danger)] size-4 shrink-0" />;
+  if (state === "running")
+    return <Loader2 className="size-4 shrink-0 animate-spin text-[var(--bv-blue-text)]" />;
+  return <CircleDot className="text-muted-foreground size-4 shrink-0" />;
+}
+
+/** The Checks tab (BRO-1669 Slice 4a): read-only recent CI runs for the workspace
+ *  repo's branch. Degrades gracefully (non-GitHub / unauthenticated / no runs). */
+function ChecksTab({ workspaceId, active }: { workspaceId: string; active: boolean }) {
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "error"; error: string }
+    | { status: "ready"; data: ChecksData }
+    | null
+  >(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [nowMs, setNowMs] = useState(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey is a deliberate refetch trigger
+  useEffect(() => {
+    if (!active || !workspaceId) return;
+    const ctrl = new AbortController();
+    setState({ status: "loading" });
+    setNowMs(Date.now()); // stamp for relative times (avoids per-render Date.now churn)
+    fetchChecks(workspaceId, ctrl.signal)
+      .then((data) => {
+        if (!ctrl.signal.aborted) setState({ status: "ready", data });
+      })
+      .catch((e: unknown) => {
+        if (ctrl.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
+        setState({ status: "error", error: e instanceof Error ? e.message : "failed to load" });
+      });
+    return () => ctrl.abort();
+  }, [workspaceId, active, reloadKey]);
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+      {!workspaceId ? (
+        <p className="text-muted-foreground p-4 text-sm">No workspace selected.</p>
+      ) : !state || state.status === "loading" ? (
+        <p className="text-muted-foreground flex items-center gap-1.5 p-4 text-sm">
+          <Loader2 className="size-3.5 animate-spin" /> Loading…
+        </p>
+      ) : state.status === "error" ? (
+        <p className="text-[var(--bv-danger)] p-4 text-sm">{state.error}</p>
+      ) : (
+        <>
+          <div className="text-muted-foreground mb-1 flex items-center gap-1.5 px-2 py-1 text-xs">
+            {state.data.repo ? (
+              <span className="text-foreground truncate font-medium">{state.data.repo}</span>
+            ) : null}
+            {state.data.branch ? <span className="truncate">· {state.data.branch}</span> : null}
+            <button
+              type="button"
+              onClick={() => setReloadKey((k) => k + 1)}
+              aria-label="Refresh checks"
+              className="hover:text-foreground ml-auto shrink-0 rounded p-1 [@media(pointer:coarse)]:size-8"
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+          </div>
+          {!state.data.available || state.data.runs.length === 0 ? (
+            <p className="text-muted-foreground p-4 text-sm italic">
+              {state.data.reason ?? "No recent CI runs."}
+            </p>
+          ) : (
+            state.data.runs.map((run) => (
+              <a
+                key={run.id}
+                href={run.url || undefined}
+                target="_blank"
+                rel="noreferrer"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-[var(--bv-canvas-soft-2)]"
+                data-testid="ws-check-row"
+              >
+                <RunBadge state={runState(run)} />
+                <span className="min-w-0 flex-1">
+                  <span className="text-foreground block truncate">
+                    {run.workflow || "workflow"}
+                  </span>
+                  {run.title ? (
+                    <span className="text-muted-foreground block truncate text-xs">
+                      {run.title}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-muted-foreground shrink-0 text-[0.7rem] tabular-nums">
+                  {relTime(run.createdAt, nowMs)}
+                </span>
+                <ExternalLink className="text-muted-foreground size-3.5 shrink-0" />
+              </a>
+            ))
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /** The read-only workspace filesystem browser (BRO-1666): a right-anchored slide-over
  *  (radix Dialog — focus-trap + Escape + scroll-lock), cloning the SettingsSheet
- *  structure. Two live tabs — Repo Files (Slice 1, lazy tree) + Changes (Slice 2, git
- *  status + diff); Checks is a stub for Slice 4. Browses the ACTIVE thread's bound
- *  workspace root. */
+ *  structure. Live tabs — Repo Files (Slice 1) + Changes (Slice 2) + Checks (Slice 4a,
+ *  read-only CI). Browses the ACTIVE thread's bound workspace root. */
 export function WorkspaceBrowser({
   open,
   onOpenChange,
@@ -903,7 +1023,7 @@ export function WorkspaceBrowser({
               type="single"
               value={tab}
               onValueChange={(v) => {
-                if (v === "files" || v === "changes") setTab(v);
+                if (v === "files" || v === "changes" || v === "checks") setTab(v);
               }}
               aria-label="Workspace section"
             >
@@ -913,13 +1033,15 @@ export function WorkspaceBrowser({
               <SegmentedControlItem value="changes" data-testid="ws-tab-changes">
                 Changes
               </SegmentedControlItem>
-              <SegmentedControlItem value="checks" disabled title="Coming soon">
+              <SegmentedControlItem value="checks" data-testid="ws-tab-checks">
                 Checks
               </SegmentedControlItem>
             </SegmentedControl>
           </div>
 
-          {tab === "changes" ? (
+          {tab === "checks" ? (
+            <ChecksTab workspaceId={workspaceId} active={open && tab === "checks"} />
+          ) : tab === "changes" ? (
             <ChangesPanel workspaceId={workspaceId} active={open && tab === "changes"} />
           ) : openFilePath ? (
             <FileViewer

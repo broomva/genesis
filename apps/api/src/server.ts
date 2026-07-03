@@ -15,6 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { workspaceChecks } from "./workspace-checks";
 import {
   WorkspaceFsError,
   listWorkspaceDir,
@@ -394,6 +395,21 @@ export function build(opts: BuildOpts) {
       return c.json(await gitCommit(root, { message: body.message, push: body.push === true }));
     } catch (e) {
       return fsErrorResponse(c, e, "commit");
+    }
+  });
+
+  // Read-only CI status (BRO-1669 Slice 4a) — the Checks tab. Shells `gh` read-only
+  // (fixed argv; the branch is derived server-side, never client input), confined to a
+  // repo root, and degrades gracefully (non-GitHub / unauthenticated → available:false).
+  // Same bearer gate; unknown workspace → 404.
+  app.get("/workspaces/:id/checks", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(await workspaceChecks(root));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read checks");
     }
   });
 

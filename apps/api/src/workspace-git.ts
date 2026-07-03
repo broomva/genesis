@@ -123,7 +123,7 @@ function gitOpts(rootPath: string) {
  *  the workspace root — defeating the Slice-1 rootPath sandbox. `--show-toplevel` returns
  *  a realpath'd absolute, and a stored rootPath may be non-realpath'd (resolvePick), so
  *  compare realpaths on both sides. Any failure (not a repo / vanished) → false. */
-async function isRepoRoot(rootPath: string): Promise<boolean> {
+export async function isRepoRoot(rootPath: string): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync(
       "git",
