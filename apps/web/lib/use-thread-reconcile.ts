@@ -16,6 +16,7 @@ import {
   type RunMode,
   deriveRunMode,
   fetchThreadStatus,
+  isInterruptedTurn,
   isRunningPhase,
 } from "./thread-status";
 import { type ThreadPhase, fetchThreadMessages } from "./threads";
@@ -37,7 +38,7 @@ export function useThreadReconcile(opts: {
   setMessages: (messages: UIMessage[]) => void;
   /** Clear useChat's sticky error → status returns to "ready", un-wedging the composer. */
   clearError: () => void;
-}): { mode: RunMode; reconnect: () => void } {
+}): { mode: RunMode; reconnect: () => void; interrupted: boolean } {
   const { threadId, liveStatus, error, initialPhase, setMessages, clearError } = opts;
   const [serverPhase, setServerPhase] = useState<ThreadPhase | null>(initialPhase ?? null);
   const [reconciling, setReconciling] = useState(false);
@@ -191,5 +192,11 @@ export function useThreadReconcile(opts: {
   return {
     mode: deriveRunMode({ liveStatus, serverPhase, reconciling, unresolved }),
     reconnect: () => void reconcile(),
+    // A genuinely-interrupted (blocked) turn (BRO-1674): the server reconciled this
+    // session to `blocked` after a crash/deploy killed the run mid-turn (BRO-1530).
+    // The consumer uses this to route Retry → RESUME (re-dispatch, which the engine
+    // continues via `--resume`, BRO-1630) instead of the plain reconcile() that only
+    // re-reads the same blocked transcript (the visible no-op this fixes).
+    interrupted: isInterruptedTurn(serverPhase),
   };
 }

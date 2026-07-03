@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type ChatStatus, deriveRunMode, fetchThreadStatus, isRunningPhase } from "./thread-status";
+import {
+  type ChatStatus,
+  deriveRunMode,
+  fetchThreadStatus,
+  isInterruptedTurn,
+  isRunningPhase,
+} from "./thread-status";
 import type { ThreadPhase } from "./threads";
 
 const origFetch = global.fetch;
@@ -18,6 +24,20 @@ describe("isRunningPhase (BRO-1640)", () => {
   test("null / undefined (unknown) are NOT running — but callers must not treat them as SETTLED (CodeRabbit)", () => {
     expect(isRunningPhase(null)).toBe(false);
     expect(isRunningPhase(undefined)).toBe(false);
+  });
+});
+
+describe("isInterruptedTurn (BRO-1674 — Retry must resume a blocked turn, not reconcile)", () => {
+  test("only a blocked phase is an interrupted turn", () => {
+    expect(isInterruptedTurn("blocked")).toBe(true);
+  });
+  test("running / awaiting / done / idle are NOT interrupted", () => {
+    for (const p of ["running", "awaiting", "done", "idle"] as const)
+      expect(isInterruptedTurn(p)).toBe(false);
+  });
+  test("null / undefined (unknown, e.g. dropped-stream error) are NOT interrupted → reconcile, not resume", () => {
+    expect(isInterruptedTurn(null)).toBe(false);
+    expect(isInterruptedTurn(undefined)).toBe(false);
   });
 });
 

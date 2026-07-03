@@ -506,7 +506,11 @@ export function ChatView({
   // failed") is recoverable, not a crash. On error / foreground-return this clears
   // the sticky error (un-wedging the composer), reads the server phase, and polls the
   // durable transcript until the turn settles. `mode` drives the run signal.
-  const { mode: runMode, reconnect } = useThreadReconcile({
+  const {
+    mode: runMode,
+    reconnect,
+    interrupted,
+  } = useThreadReconcile({
     threadId,
     liveStatus: status,
     error,
@@ -679,6 +683,50 @@ export function ChatView({
     );
   }
 
+  // Retry affordance for a run-signal error (BRO-1674). Two causes hide behind
+  // runMode "error" and need OPPOSITE recovery:
+  //   • interrupted (server phase "blocked") — the run was killed mid-turn (a
+  //     deploy/crash SIGTERM'd the engine, reconciled → blocked, BRO-1530). The turn
+  //     is durably resumable, so Retry RE-DISPATCHES it: regenerate() re-runs the
+  //     trailing user message (AI SDK v6 keeps a trailing user message in the
+  //     request), which the engine reads as the turn text and continues via
+  //     `--resume <agentSessionId>` (BRO-1630). A plain reconcile() only re-reads the
+  //     same blocked transcript → the old Retry was a visible no-op.
+  //   • transient (dropped stream / engine unconfirmable) — reconcile() refetches the
+  //     durable status + transcript; re-dispatching there could double-run a live turn.
+  // Self-contained double-run guard (P20): only re-dispatch when the UI is actually
+  // in the interrupted-error state. `runMode === "error"` implies no live stream —
+  // deriveRunMode returns "streaming" before it ever reaches the blocked→error branch
+  // — so this can't double-run a turn that's still live server-side, even in the brief
+  // window after regenerate() where `interrupted` (serverPhase "blocked") is still true
+  // but a stream has started, or if a future caller wires retryRun outside the banners.
+  const retryRun = useCallback(() => {
+    if (interrupted && runMode === "error" && messages.length > 0) {
+      void regenerate({
+        body: {
+          model: modelToBody(effModel),
+          effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
+          engine: engineToBody(engine),
+          workspaceId: workspaceToBody(workspace),
+          worktree: worktreeToBody(effWorktree),
+        },
+      });
+      return;
+    }
+    reconnect();
+  }, [
+    interrupted,
+    runMode,
+    messages.length,
+    regenerate,
+    reconnect,
+    effModel,
+    effEffort,
+    engine,
+    workspace,
+    effWorktree,
+  ]);
+
   // The launcher's "Start session" (BRO-1657): focus the composer so the user types
   // their first message. Lazy by design — no thread/session is created until that
   // first send, so a configured-but-abandoned launcher leaves no ghost thread.
@@ -749,7 +797,7 @@ export function ChatView({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <RunSignal mode={runMode} liveStatus={status} onRetry={reconnect} />
+          <RunSignal mode={runMode} liveStatus={status} onRetry={retryRun} />
           {/* Workspace files (BRO-1666) — opens the read-only fs browser slide-over
               for this session's bound workspace. */}
           <Button
@@ -853,7 +901,7 @@ export function ChatView({
                     <span>The agent run was interrupted.</span>
                     <button
                       type="button"
-                      onClick={reconnect}
+                      onClick={retryRun}
                       className="text-[var(--bv-blue-text)] underline underline-offset-2 hover:opacity-80"
                     >
                       Retry
