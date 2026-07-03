@@ -13,10 +13,13 @@ export interface FsEntry {
   size?: number;
 }
 
-/** A directory listing: the canonical relative `path` (""= root) + its entries. */
+/** A directory listing: the canonical relative `path` (""= root) + its entries.
+ *  `truncated` is true when the directory had more than the server cap (the entries
+ *  are the first N — dirs-first). */
 export interface DirListing {
   path: string;
   entries: FsEntry[];
+  truncated: boolean;
 }
 
 /** A file read result — mirrors the engine's `readWorkspaceFile` shape. */
@@ -50,7 +53,11 @@ export function normalizeListing(data: unknown): DirListing {
           ...(typeof e.size === "number" ? { size: e.size } : {}),
         }))
     : [];
-  return { path: typeof d.path === "string" ? d.path : "", entries };
+  return {
+    path: typeof d.path === "string" ? d.path : "",
+    entries,
+    truncated: (d as { truncated?: unknown }).truncated === true,
+  };
 }
 
 /** Coerce an untrusted `/file` body into a clean {@link FileContent}. */

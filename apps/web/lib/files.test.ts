@@ -16,7 +16,17 @@ describe("normalizeListing (BRO-1666)", () => {
         { name: "lib", type: "dir" },
         { name: "index.ts", type: "file", size: 42 },
       ],
+      truncated: false,
     } satisfies DirListing);
+  });
+
+  test("passes the truncated flag through when the server sets it", () => {
+    const out = normalizeListing({
+      path: "",
+      entries: [{ name: "a", type: "file" }],
+      truncated: true,
+    });
+    expect(out.truncated).toBe(true);
   });
 
   test("drops malformed entries (bad/empty name, bad type) without crashing", () => {
@@ -35,9 +45,13 @@ describe("normalizeListing (BRO-1666)", () => {
   });
 
   test("tolerates a missing/empty body → empty listing at root", () => {
-    expect(normalizeListing(undefined)).toEqual({ path: "", entries: [] });
-    expect(normalizeListing({})).toEqual({ path: "", entries: [] });
-    expect(normalizeListing({ entries: "not-an-array" })).toEqual({ path: "", entries: [] });
+    expect(normalizeListing(undefined)).toEqual({ path: "", entries: [], truncated: false });
+    expect(normalizeListing({})).toEqual({ path: "", entries: [], truncated: false });
+    expect(normalizeListing({ entries: "not-an-array" })).toEqual({
+      path: "",
+      entries: [],
+      truncated: false,
+    });
   });
 
   test("drops a non-numeric size rather than forwarding it", () => {

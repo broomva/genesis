@@ -195,6 +195,14 @@ function FsNodes({
           <FileRow key={path} entry={entry} path={path} depth={depth} onOpen={onOpenFile} />
         );
       })}
+      {listing.truncated ? (
+        <p
+          className="text-muted-foreground py-1 text-xs italic"
+          style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        >
+          …folder truncated (showing {listing.entries.length})
+        </p>
+      ) : null}
     </>
   );
 }

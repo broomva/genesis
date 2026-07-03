@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MAX_DIR_ENTRIES,
   MAX_FILE_BYTES,
   WorkspaceFsError,
   listWorkspaceDir,
@@ -105,12 +106,28 @@ describe("listWorkspaceDir (BRO-1666)", () => {
     mkdirSync(join(dir, "alpha"));
     writeFileSync(join(dir, "readme.md"), "hello"); // 5 bytes
     writeFileSync(join(dir, ".env"), "SECRET=1"); // dotfiles ARE listed (screenshot parity)
-    const { path, entries } = listWorkspaceDir(dir, "");
+    const { path, entries, truncated } = listWorkspaceDir(dir, "");
     expect(path).toBe("");
+    expect(truncated).toBe(false);
     expect(entries.map((e) => e.name)).toEqual(["alpha", "zeta", ".env", "readme.md"]);
     expect(entries.filter((e) => e.type === "dir").map((e) => e.name)).toEqual(["alpha", "zeta"]);
     expect(entries.find((e) => e.name === "readme.md")?.size).toBe(5);
     expect(entries.find((e) => e.name === "alpha")?.size).toBeUndefined();
+  });
+
+  test("caps a huge directory + flags truncated, dirs still first (P20 F1)", () => {
+    const dir = root();
+    // 3 dirs + (cap) files → cap+3 total → over the cap.
+    for (const name of ["d-a", "d-b", "d-c"]) mkdirSync(join(dir, name));
+    for (let i = 0; i < MAX_DIR_ENTRIES; i++) {
+      writeFileSync(join(dir, `f-${String(i).padStart(5, "0")}.txt`), "x");
+    }
+    const { entries, truncated } = listWorkspaceDir(dir, "");
+    expect(truncated).toBe(true);
+    expect(entries.length).toBe(MAX_DIR_ENTRIES);
+    // The 3 dirs sort first (dirs-first is preserved under the cap).
+    expect(entries.slice(0, 3).map((e) => e.name)).toEqual(["d-a", "d-b", "d-c"]);
+    expect(entries.slice(0, 3).every((e) => e.type === "dir")).toBe(true);
   });
 
   test("lists a nested directory by relative path", () => {

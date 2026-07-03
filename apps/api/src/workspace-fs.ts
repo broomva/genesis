@@ -109,55 +109,75 @@ export function resolveInRoot(
   return { abs, rel, realRoot };
 }
 
+/** Max entries returned per directory listing (P20 F1). Bounds the per-entry
+ *  `statSync`/`realpathSync` work so a huge directory (a 100k-entry `node_modules`)
+ *  can't pin the single-threaded engine's event loop. Classification comes from the
+ *  cheap `readdir` Dirent type (no syscall), so ONLY the ≤cap survivors are stat'd;
+ *  a listing that hit the cap is flagged `truncated`. */
+export const MAX_DIR_ENTRIES = 2000;
+
 /** List the directory at `relPath` (default: the root). Dirs first (alpha), then
- *  files (alpha). Symlinks are followed for classification but only surfaced when
- *  they stay INSIDE the root (an out-of-root link is hidden, and its target size is
- *  never leaked). Throws {@link WorkspaceFsError} on an escape / a non-directory. */
+ *  files (alpha), capped at {@link MAX_DIR_ENTRIES} (`truncated` when the cap is hit).
+ *  Symlinks are followed for classification but only surfaced when they stay INSIDE
+ *  the root (an out-of-root link is hidden, and its target size is never leaked).
+ *  Throws {@link WorkspaceFsError} on an escape / a non-directory. */
 export function listWorkspaceDir(
   rootPath: string,
   relPath: unknown,
-): { path: string; entries: DirEntry[] } {
+): { path: string; entries: DirEntry[]; truncated: boolean } {
   const { abs, rel, realRoot } = resolveInRoot(rootPath, relPath);
   if (!statSync(abs).isDirectory()) throw new WorkspaceFsError("not a directory", 400);
 
-  const entries: DirEntry[] = [];
+  // Classify from the Dirent type ALONE (no syscall per entry) so we never stat more
+  // than the cap. Symlinks are resolved lazily below, only for the survivors — so a
+  // symlink-to-dir sorts among files (a minor, rare-in-repos ordering quirk, worth it
+  // to keep the syscall count bounded rather than statting every entry to classify).
+  const dirNames: string[] = [];
+  const rest: { name: string; sym: boolean }[] = [];
   for (const d of readdirSync(abs, { withFileTypes: true })) {
-    if (d.isDirectory()) {
-      entries.push({ name: d.name, type: "dir" });
-    } else if (d.isFile()) {
+    if (d.isDirectory()) dirNames.push(d.name);
+    else if (d.isFile()) rest.push({ name: d.name, sym: false });
+    else if (d.isSymbolicLink()) rest.push({ name: d.name, sym: true });
+    // sockets / fifos / devices → skipped (nothing to browse)
+  }
+  const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" });
+  dirNames.sort(byName);
+  rest.sort((a, b) => byName(a.name, b.name));
+  const truncated = dirNames.length + rest.length > MAX_DIR_ENTRIES;
+
+  // Emit dirs-first, then files — stat'ing (size) / realpath'ing (symlink) ONLY the
+  // capped survivors, so the expensive syscalls are bounded by MAX_DIR_ENTRIES.
+  const entries: DirEntry[] = [];
+  for (const name of dirNames) {
+    if (entries.length >= MAX_DIR_ENTRIES) break;
+    entries.push({ name, type: "dir" });
+  }
+  for (const { name, sym } of rest) {
+    if (entries.length >= MAX_DIR_ENTRIES) break;
+    if (!sym) {
       let size: number | undefined;
       try {
-        size = statSync(resolve(abs, d.name)).size;
+        size = statSync(resolve(abs, name)).size;
       } catch {
         size = undefined; // racing unlink / perms → list it without a size
       }
-      entries.push(
-        size !== undefined ? { name: d.name, type: "file", size } : { name: d.name, type: "file" },
-      );
-    } else if (d.isSymbolicLink()) {
+      entries.push(size !== undefined ? { name, type: "file", size } : { name, type: "file" });
+    } else {
       // Follow the link, but keep the sandbox: only surface it when the target stays
       // in-root, and never expose an external target's size (defense-in-depth — the
       // read path re-validates anyway, but hiding out-of-root links avoids the tease).
       try {
-        const target = realpathSync(resolve(abs, d.name));
+        const target = realpathSync(resolve(abs, name));
         if (target !== realRoot && !target.startsWith(realRoot + sep)) continue;
         const s = statSync(target);
-        if (s.isDirectory()) entries.push({ name: d.name, type: "dir" });
-        else if (s.isFile()) entries.push({ name: d.name, type: "file" });
+        if (s.isDirectory()) entries.push({ name, type: "dir" });
+        else if (s.isFile()) entries.push({ name, type: "file" });
       } catch {
         // broken / dangling link → skip
       }
     }
-    // sockets / fifos / devices → skipped (nothing to browse)
   }
-  entries.sort((a, b) =>
-    a.type !== b.type
-      ? a.type === "dir"
-        ? -1
-        : 1
-      : a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
-  );
-  return { path: rel, entries };
+  return { path: rel, entries, truncated };
 }
 
 /** Read the file at `relPath`, capped at {@link MAX_FILE_BYTES}. A file with a NUL
@@ -166,7 +186,17 @@ export function listWorkspaceDir(
  *  on an escape / a directory / a non-regular file. */
 export function readWorkspaceFile(rootPath: string, relPath: unknown): FileContent {
   const { abs, rel } = resolveInRoot(rootPath, relPath);
-  const st = statSync(abs);
+  // A file deleted between resolveInRoot's realpath and here (a tiny race) → 404, not
+  // a raw ENOENT bubbling to a generic 500 (P20 F3). Non-ENOENT errors (EACCES) still
+  // surface as a generic 500 via the route.
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(abs);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT")
+      throw new WorkspaceFsError("not found", 404);
+    throw e;
+  }
   if (st.isDirectory()) throw new WorkspaceFsError("path is a directory", 400);
   if (!st.isFile()) throw new WorkspaceFsError("not a regular file", 400);
 
