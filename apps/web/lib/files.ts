@@ -1,0 +1,110 @@
+// Client helpers for the read-only workspace filesystem browser (BRO-1666 Slice 1).
+// Talks to the BFF proxy (/api/workspaces/:id/files|file) — never the engine
+// directly. Only RELATIVE paths + file contents ever come back; the server-only
+// rootPath never leaves the engine. The normalizers are pure (testable without a
+// fetch) and defensive: a malformed entry is dropped rather than crashing the tree.
+
+/** One filesystem entry in a directory listing. */
+export interface FsEntry {
+  /** A single path segment (never a path). */
+  name: string;
+  type: "dir" | "file";
+  /** Byte size, files only. */
+  size?: number;
+}
+
+/** A directory listing: the canonical relative `path` (""= root) + its entries. */
+export interface DirListing {
+  path: string;
+  entries: FsEntry[];
+}
+
+/** A file read result — mirrors the engine's `readWorkspaceFile` shape. */
+export interface FileContent {
+  path: string;
+  /** UTF-8 contents (empty when `binary`), capped server-side (~256 KB). */
+  content: string;
+  /** True when the file exceeds the server cap (content is the leading slice). */
+  truncated: boolean;
+  /** True when the file is binary (content is ""). */
+  binary: boolean;
+  /** The file's full byte size on disk. */
+  size: number;
+}
+
+/** Coerce an untrusted `/files` body into a clean {@link DirListing}. Drops any
+ *  malformed entry (bad name / type) so a single bad row can't break the tree. */
+export function normalizeListing(data: unknown): DirListing {
+  const d = (data ?? {}) as { path?: unknown; entries?: unknown };
+  const entries: FsEntry[] = Array.isArray(d.entries)
+    ? d.entries
+        .filter(
+          (e): e is { name: string; type: "dir" | "file"; size?: unknown } =>
+            typeof (e as FsEntry)?.name === "string" &&
+            (e as FsEntry).name.length > 0 &&
+            ((e as FsEntry)?.type === "dir" || (e as FsEntry)?.type === "file"),
+        )
+        .map((e) => ({
+          name: e.name,
+          type: e.type,
+          ...(typeof e.size === "number" ? { size: e.size } : {}),
+        }))
+    : [];
+  return { path: typeof d.path === "string" ? d.path : "", entries };
+}
+
+/** Coerce an untrusted `/file` body into a clean {@link FileContent}. */
+export function normalizeFile(data: unknown): FileContent {
+  const d = (data ?? {}) as Record<string, unknown>;
+  return {
+    path: typeof d.path === "string" ? d.path : "",
+    content: typeof d.content === "string" ? d.content : "",
+    truncated: d.truncated === true,
+    binary: d.binary === true,
+    size: typeof d.size === "number" ? d.size : 0,
+  };
+}
+
+/** List a directory under a workspace. `path` is RELATIVE ("" = root). Rejects with
+ *  the engine's SAFE error message on a non-OK response (so the UI can surface it). */
+export async function fetchDir(
+  workspaceId: string,
+  path = "",
+  signal?: AbortSignal,
+): Promise<DirListing> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/files${qs}`, {
+    signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof (data as { error?: unknown })?.error === "string"
+        ? (data as { error: string }).error
+        : "could not list directory",
+    );
+  }
+  return normalizeListing(data);
+}
+
+/** Read a file under a workspace. `path` is RELATIVE. Rejects with the engine's SAFE
+ *  error message on a non-OK response. */
+export async function fetchFile(
+  workspaceId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileContent> {
+  const res = await fetch(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof (data as { error?: unknown })?.error === "string"
+        ? (data as { error: string }).error
+        : "could not read file",
+    );
+  }
+  return normalizeFile(data);
+}

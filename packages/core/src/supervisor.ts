@@ -854,6 +854,19 @@ export class Supervisor {
     return this.defaultWorkspace.id;
   }
 
+  /** Resolve a registered workspace's SERVER-ONLY `rootPath` by id (BRO-1666, the
+   *  fs browser). Returns undefined for an unknown id. This is the ONE place the
+   *  rootPath is handed out server-side — the caller (an auth-gated fs route) uses
+   *  it purely to sandbox filesystem reads under it and returns only RELATIVE paths
+   *  + file contents. The rootPath itself NEVER leaves the engine (unlike
+   *  {@link listWorkspaces}, whose public DTO deliberately omits it). Registry-
+   *  backed (no Store round-trip); awaits hydration so a first-call before any
+   *  dispatch still resolves. */
+  async resolveWorkspaceRoot(id: string): Promise<string | undefined> {
+    await this.ensureWorkspace();
+    return this.workspaceRegistry.get(id)?.rootPath;
+  }
+
   // --- /control (BRO-1493) — resolve threadId → sessionKey, delegate to engine.
 
   /** The live-session control surface for a thread's bound engine (BRO-1620).

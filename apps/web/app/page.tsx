@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChatView } from "@/components/chat-view";
 import { SettingsSheet } from "@/components/settings-sheet";
 import { ThreadDrawer } from "@/components/thread-drawer";
+import { WorkspaceBrowser } from "@/components/workspace-browser";
 import { fetchAvailableEngines } from "@/lib/engines";
 import {
   type ThreadSummary,
@@ -38,6 +39,9 @@ export default function ChatPage() {
   const [initialMessages, setInitialMessages] = useState<UIMessage[] | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Workspace filesystem browser slide-over (BRO-1666) — browses the active
+  // thread's bound workspace root, read-only.
+  const [filesOpen, setFilesOpen] = useState(false);
   // Selectable workspaces (BRO-1627) — fetched once; the per-thread picker offers
   // these and self-hides when there's ≤1. `defaultWorkspaceId` is the server's
   // fallback (what a thread binds when none is chosen).
@@ -315,6 +319,10 @@ export default function ChatPage() {
     defaultWorkspaceId,
     workspaces,
   );
+  // Display name for the files browser header — the thread's BOUND workspace name
+  // (authoritative + stable) once it has run, else the resolved selection's name.
+  const activeWorkspaceName =
+    activeThread?.workspaceName ?? workspaces.find((w) => w.id === activeWorkspace)?.name;
 
   return (
     <div className="bg-background text-foreground fixed inset-0 flex overflow-hidden">
@@ -342,6 +350,7 @@ export default function ChatPage() {
             initialMessages={initialMessages}
             onActivity={onActivity}
             onMenuClick={() => setDrawerOpen(true)}
+            onOpenFiles={() => setFilesOpen(true)}
             onNewThread={newThread}
             model={prefs.model}
             effort={activeEffort}
@@ -383,6 +392,13 @@ export default function ChatPage() {
         onAddWorkspaceByUrl={onAddWorkspaceByUrl}
         onAddWorkspaceByPath={onAddWorkspaceByPath}
         onRemoveWorkspace={onRemoveWorkspace}
+      />
+
+      <WorkspaceBrowser
+        open={filesOpen}
+        onOpenChange={setFilesOpen}
+        workspaceId={activeWorkspace}
+        workspaceName={activeWorkspaceName}
       />
     </div>
   );
