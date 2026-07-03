@@ -51,7 +51,8 @@ describe("GET /workspaces/browse route (BRO-1673)", () => {
   const prevRoots = process.env.GENESIS_WORKSPACE_PATH_ROOTS;
   afterEach(() => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-    if (prevRoots === undefined) delete process.env.GENESIS_WORKSPACE_PATH_ROOTS;
+    if (prevRoots === undefined)
+      Reflect.deleteProperty(process.env, "GENESIS_WORKSPACE_PATH_ROOTS");
     else process.env.GENESIS_WORKSPACE_PATH_ROOTS = prevRoots;
   });
 
@@ -67,7 +68,9 @@ describe("GET /workspaces/browse route (BRO-1673)", () => {
     const r = addRoot();
     mkdirSync(join(r, "proj"));
     const { app } = build({ workspaceRoot: tmpdir() });
-    const res = await app.fetch(new Request(`http://x/workspaces/browse?path=${encodeURIComponent(r)}`));
+    const res = await app.fetch(
+      new Request(`http://x/workspaces/browse?path=${encodeURIComponent(r)}`),
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { path: string; entries: { name: string }[] };
     expect(body.path).toBe(r);

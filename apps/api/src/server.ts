@@ -15,6 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
   WorkspaceFsError,
@@ -22,7 +23,6 @@ import {
   readWorkspaceFile,
   readWorkspaceFileRaw,
 } from "./workspace-fs";
-import { browseForAdd } from "./workspace-browse";
 import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
 import {
   WorkspaceValidationError,

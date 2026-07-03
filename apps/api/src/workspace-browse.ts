@@ -122,13 +122,20 @@ export function browseForAdd(path: unknown, roots: readonly string[]): BrowseRes
 
   // Synthetic top level (no path yet).
   if (raw === "") {
-    if (usableRoots.length === 1) return listSubdirs(realpathSync(usableRoots[0]!), usableRoots);
+    // One root → descend straight in (skip a redundant tap). The guard keeps the type
+    // narrow without a non-null assertion.
+    const soleRoot = usableRoots.length === 1 ? usableRoots[0] : undefined;
+    if (soleRoot) return listSubdirs(realpathSync(soleRoot), usableRoots);
     const rootPaths = usableRoots.map((r) => realpathSync(r)).sort();
     return {
       path: null,
       parent: null,
       registerable: false, // "all roots" isn't a registerable folder
-      entries: rootPaths.map((r) => ({ name: r, path: r, isGitRepo: existsSync(resolve(r, ".git")) })),
+      entries: rootPaths.map((r) => ({
+        name: r,
+        path: r,
+        isGitRepo: existsSync(resolve(r, ".git")),
+      })),
       truncated: false,
     };
   }
