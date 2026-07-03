@@ -17,6 +17,18 @@ export function isRunningPhase(p: ThreadPhase | null | undefined): boolean {
   return p === "running" || p === "awaiting";
 }
 
+/** Whether a run-signal error is a genuinely-INTERRUPTED (blocked) turn — one that
+ *  must be RESUMED (re-dispatched) rather than merely reconciled (BRO-1674). `blocked`
+ *  is the durable status the server reconciles a session to after a crash/deploy
+ *  SIGTERM'd the engine mid-turn (BRO-1530). The turn is durably resumable via the
+ *  persisted `agentSessionId` (`--resume`, BRO-1630), so the UI's Retry must re-run
+ *  it — a plain reconcile() only re-reads the same blocked transcript (a visible
+ *  no-op). Kept separate from the transient error causes (dropped stream / engine
+ *  unconfirmable), which reconcile() is the correct recovery for. */
+export function isInterruptedTurn(p: ThreadPhase | null | undefined): boolean {
+  return p === "blocked";
+}
+
 /** useChat's status enum (mirrors @ai-sdk/react). */
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
