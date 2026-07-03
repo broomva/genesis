@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
-import { Supervisor, deriveTitle } from "./supervisor";
+import { Supervisor, buildTitlePrompt, deriveTitle, sanitizeTitle } from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
 
 // A pid-unique real dir (not a fixed /tmp path) so the BRO-1630 RC3 vanished-
@@ -1051,5 +1051,78 @@ describe("supervisor — workspace availability guard (BRO-1629 slice 4 / BRO-16
     });
     await sup.dispatch("t-inject", "hi");
     expect(ran).toBe(true);
+  });
+});
+
+describe("title generation (BRO-1665)", () => {
+  test("sanitizeTitle strips quotes / 'Title:' / trailing punctuation, first line, caps length", () => {
+    expect(sanitizeTitle('"Consensus Algorithms."')).toBe("Consensus Algorithms");
+    expect(sanitizeTitle("Title: Raft vs Paxos")).toBe("Raft vs Paxos");
+    expect(sanitizeTitle("Deploy pipeline fix\nignored second line")).toBe("Deploy pipeline fix");
+    expect(sanitizeTitle("  spaced   out   title  ")).toBe("spaced out title");
+    expect(sanitizeTitle("`code title`")).toBe("code title");
+    // Control + format chars stripped (P20): a NUL (\x00) would throw in Postgres;
+    // the bidi override (\u202E) could spoof the rendered title.
+    expect(sanitizeTitle("ab\x00cd")).toBe("abcd");
+    expect(sanitizeTitle("safe\u202Etxet")).toBe("safetxet");
+    expect(sanitizeTitle("")).toBeUndefined();
+    expect(sanitizeTitle(undefined)).toBeUndefined();
+    expect(sanitizeTitle("   ")).toBeUndefined();
+    // Over-long → capped with an ellipsis (code-point safe).
+    const long = "a".repeat(80);
+    expect([...(sanitizeTitle(long) ?? "")].length).toBe(61); // 60 + ellipsis
+  });
+
+  test("buildTitlePrompt inlines both sides (truncated) so the model needs no tools", () => {
+    const p = buildTitlePrompt("x".repeat(1000), "y".repeat(1000));
+    expect(p).toContain("Output ONLY the title");
+    expect(p).toContain("do not use any tools");
+    expect(p).toContain(`User: ${"x".repeat(600)}\n`); // user capped at 600
+    expect(p).toContain(`Assistant: ${"y".repeat(400)}\n`); // reply capped at 400
+    // A missing reply drops the Assistant line.
+    expect(buildTitlePrompt("hi", "")).not.toContain("Assistant:");
+  });
+
+  test("generateTitleAsync upgrades the heuristic title via the print runner", async () => {
+    const store = new InMemoryStore();
+    // The print runner returns a messy title → exercises the sanitize path.
+    const titleRunner = async (): Promise<RunResult> => ({
+      state: { phase: "done", sessionId: "s", lastText: '"Consensus Algorithms."', turns: 1 },
+      events: [],
+      exitCode: 0,
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: titleRunner });
+    const prompt = "Write a 1500-word essay comparing Paxos, Raft, and PBFT";
+    await sup.dispatch("tt", prompt, undefined, {});
+    // The instant heuristic is set on the first turn.
+    expect((await store.findSessionByThread("tt"))?.title).toBe(deriveTitle(prompt));
+    // Run the (normally fire-and-forget) title-gen deterministically.
+    await (
+      sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+    ).generateTitleAsync("tt", prompt, "some reply");
+    expect((await store.findSessionByThread("tt"))?.title).toBe("Consensus Algorithms");
+  });
+
+  test("generateTitleAsync does NOT clobber a user-renamed title", async () => {
+    const store = new InMemoryStore();
+    const titleRunner = async (): Promise<RunResult> => ({
+      state: { phase: "done", sessionId: "s", lastText: "LLM Generated Title", turns: 1 },
+      events: [],
+      exitCode: 0,
+    });
+    const sup = new Supervisor({ defaultWorkspace: ws, store, run: titleRunner });
+    const prompt = "help me with something";
+    await sup.dispatch("tr", prompt, undefined, {});
+    // Simulate a user rename between the first turn and the title-gen completing.
+    const renamed = await store.findSessionByThread("tr");
+    if (renamed) {
+      renamed.title = "My Own Title";
+      await store.upsertSession(renamed);
+    }
+    await (
+      sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+    ).generateTitleAsync("tr", prompt, "reply");
+    // The rename wins — the LLM title must not overwrite it.
+    expect((await store.findSessionByThread("tr"))?.title).toBe("My Own Title");
   });
 });

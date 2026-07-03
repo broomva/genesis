@@ -108,6 +108,9 @@ export function build(opts: BuildOpts) {
     runners: opts.runners,
     controls: opts.controls,
     defaultEngine: opts.defaultEngine,
+    // Auto-generate semantic thread titles (BRO-1665). Degrades gracefully — a deploy
+    // without a usable `claude` (e.g. codex-only) just keeps the first-prompt heuristic.
+    generateTitles: process.env.GENESIS_GENERATE_TITLES !== "0",
   });
 
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {

@@ -11,7 +11,7 @@ import {
   isoNow,
   newId,
 } from "@genesis/core";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -153,6 +153,28 @@ export class DrizzleStore implements Store {
         },
       });
     return s;
+  }
+
+  async updateSessionTitle(
+    id: string,
+    title: string,
+    ifTitleEquals: string | undefined,
+  ): Promise<boolean> {
+    // Scoped, atomic check-then-act (BRO-1665): SET title WHERE id AND title matches
+    // the expected current value. Touches only `title`, so it never clobbers a
+    // concurrent turn's phase/agentSessionId/branch, and the WHERE guard makes the
+    // "don't overwrite a rename" check race-free (a NULL title uses IS NULL).
+    const rows = await this.db
+      .update(sessions)
+      .set({ title })
+      .where(
+        and(
+          eq(sessions.id, id),
+          ifTitleEquals === undefined ? isNull(sessions.title) : eq(sessions.title, ifTitleEquals),
+        ),
+      )
+      .returning({ id: sessions.id });
+    return rows.length > 0;
   }
 
   async deleteSession(id: string): Promise<void> {
