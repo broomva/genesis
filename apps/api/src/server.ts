@@ -149,16 +149,20 @@ export function build(opts: BuildOpts) {
         "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
     );
   }
-  // BRO-1666 Slice 3 (P20 HIGH-2): the git/commit WRITE route (commit+push to the
-  // owner's real remote) is OWNER-gated only at the BFF — the engine can't tell a
-  // human from the agent. With no GENESIS_TOKEN, a direct :8787 caller (the on-box
-  // agent, or anything on the tailnet) can commit+push, bypassing that gate. Hard
-  // deployment invariant: bind :8787 to localhost + set GENESIS_TOKEN.
+  // BRO-1666 Slice 3 (P20 HIGH-2) + BRO-1673 (P20 review finding #1): two routes are
+  // OWNER-gated ONLY at the BFF — the engine can't tell a human from the agent, so it
+  // applies only the bearer gate. POST /workspaces/:id/git/commit is a WRITE route
+  // (commit+push to the owner's real remote); GET /workspaces/browse is a READ route
+  // that discloses the host-FS layout UNDER the add-roots ($HOME) with absolute paths.
+  // With no GENESIS_TOKEN, a direct :8787 caller (the on-box agent, or anything on the
+  // tailnet) bypasses the owner gate on both. Hard deployment invariant: bind :8787 to
+  // localhost + set GENESIS_TOKEN. (Both are still sandboxed — commit to the workspace,
+  // browse to the add-roots — so this is bypass-of-owner-gate, not arbitrary-FS.)
   if (!opts.token) {
     console.warn(
-      "[genesis] WARNING: POST /workspaces/:id/git/commit is a WRITE route (commit+push) " +
-        "owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct :8787 caller can " +
-        "commit+push. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
+      "[genesis] WARNING: POST /workspaces/:id/git/commit (write) and GET /workspaces/browse " +
+        "(host-FS-layout read) are owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct " +
+        ":8787 caller reaches both. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
     );
   }
 

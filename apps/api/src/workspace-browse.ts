@@ -17,7 +17,7 @@
 // so a direct fs read is the simplest correct implementation and keeps the sandbox
 // unit-testable in isolation.
 
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { WorkspaceValidationError } from "./workspace-provision";
 
@@ -48,8 +48,11 @@ export interface BrowseResult {
   truncated: boolean;
 }
 
-/** Max subdirectories returned per listing — bounds the per-entry realpath/stat work so
- *  a huge directory can't pin the single-threaded engine's event loop. */
+/** Max subdirectories RETURNED per listing. This caps the expensive per-entry
+ *  realpath/stat/`.git`-probe work (the dominant cost) — NOT the `readdirSync` itself,
+ *  which materializes the whole dirent array regardless (a pathological million-entry
+ *  in-root dir would still cost that one syscall; streaming via `opendir` is a noted
+ *  follow-up, low-risk since browsing is owner/agent-triggered and add-root-scoped). */
 export const MAX_BROWSE_ENTRIES = 2000;
 
 /** The realpath of whichever add-root CONTAINS (or equals) `realTarget`, else null. A
@@ -77,9 +80,18 @@ function listSubdirs(dir: string, roots: readonly string[]): BrowseResult {
   // the root boundary, else the (in-root) parent directory.
   const parent = root && dir !== root ? dirname(dir) : null;
 
+  // Wrap the read (P20 review #2/#4): an unreadable in-root dir (EACCES) or a dir that
+  // vanished after the caller's check → a SAFE 400, never an unwrapped throw that the
+  // route would map to a generic 500 (the message never carries the absolute path).
+  let dirents: Dirent[];
+  try {
+    dirents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    throw new WorkspaceValidationError("cannot read this folder");
+  }
   const candidates: string[] = [];
   let total = 0;
-  for (const d of readdirSync(dir, { withFileTypes: true })) {
+  for (const d of dirents) {
     if (!(d.isDirectory() || d.isSymbolicLink())) continue; // files/sockets aren't pickable
     total++;
     if (candidates.length < MAX_BROWSE_ENTRIES) candidates.push(d.name);
@@ -151,7 +163,14 @@ export function browseForAdd(path: unknown, roots: readonly string[]): BrowseRes
   }
   if (!containingRoot(realTarget, usableRoots))
     throw new WorkspaceValidationError("path is outside the allowed roots for this server");
-  if (!statSync(realTarget).isDirectory())
-    throw new WorkspaceValidationError("path is not a directory");
+  // Wrap the stat (P20 review #2): a path that vanished between realpath + here → a SAFE
+  // "path not found" 400, never an unwrapped throw the route maps to a generic 500.
+  let targetStat: ReturnType<typeof statSync>;
+  try {
+    targetStat = statSync(realTarget);
+  } catch {
+    throw new WorkspaceValidationError("path not found");
+  }
+  if (!targetStat.isDirectory()) throw new WorkspaceValidationError("path is not a directory");
   return listSubdirs(realTarget, usableRoots);
 }

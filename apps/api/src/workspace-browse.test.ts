@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { browseForAdd } from "./workspace-browse";
@@ -115,5 +123,29 @@ describe("browseForAdd (BRO-1673)", () => {
   test("a non-string path is rejected", () => {
     const r = root();
     expect(() => browseForAdd(42, [r])).toThrow(WorkspaceValidationError);
+  });
+
+  // P20 review #2/#4: an unreadable in-root dir must surface as a SAFE WorkspaceValidationError
+  // (→ route 400), not an unwrapped EACCES that maps to a generic 500. Root bypasses perms,
+  // so skip the assertion there (CI may run as root).
+  test("an unreadable in-root directory → a safe validation error (no unwrapped throw)", () => {
+    if (process.getuid?.() === 0) return; // root ignores the perm bits
+    const r = root();
+    const locked = join(r, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      let threw: unknown;
+      try {
+        browseForAdd(locked, [r]);
+      } catch (e) {
+        threw = e;
+      }
+      expect(threw).toBeInstanceOf(WorkspaceValidationError);
+      // The safe message never carries the absolute path (no filesystem-layout leak).
+      expect((threw as Error).message).not.toContain("/");
+    } finally {
+      chmodSync(locked, 0o700); // restore so afterEach can rm it
+    }
   });
 });
