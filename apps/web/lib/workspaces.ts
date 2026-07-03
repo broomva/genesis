@@ -103,6 +103,71 @@ export async function fetchAvailableWorkspaces(signal?: AbortSignal): Promise<Av
   }
 }
 
+// ─── Filesystem navigator (BRO-1673) — the browse-to-pick backend for add-by-path ──
+
+/** A navigable subdirectory returned by the browse endpoint. `path` is absolute — an
+ *  OWNER-ONLY surface (the BFF gates /api/workspaces/browse to the owner). */
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  isGitRepo: boolean;
+}
+
+/** One level of the filesystem navigator (mirrors the engine's BrowseResult). */
+export interface BrowseResult {
+  /** The current directory (absolute), or null at the synthetic multi-root top. */
+  path: string | null;
+  /** The parent to navigate up to (null at a root / the synthetic top). */
+  parent: string | null;
+  /** Can the CURRENT `path` be registered as a workspace? (false at the synthetic top). */
+  registerable: boolean;
+  /** Subdirectories to descend into. */
+  entries: BrowseEntry[];
+  /** True when the directory had more subdirectories than the server cap. */
+  truncated: boolean;
+}
+
+export type BrowseOutcome = { ok: true; result: BrowseResult } | { ok: false; error: string };
+
+/** Browse the host filesystem for a folder to register (owner-only). No `path` → the
+ *  server's starting level (a single add-root's contents, or the roots list). Returns the
+ *  engine's safe message on a rejected/inaccessible path; every field is defensively
+ *  validated so a malformed body can't crash the picker. */
+export async function browseForAdd(path?: string, signal?: AbortSignal): Promise<BrowseOutcome> {
+  try {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await fetch(`/api/workspaces/browse${qs}`, { signal });
+    const data = (await res.json().catch(() => ({}))) as Partial<BrowseResult> & {
+      error?: unknown;
+    };
+    if (!res.ok) {
+      const error =
+        typeof data.error === "string" && data.error ? data.error : "could not browse this folder";
+      return { ok: false, error };
+    }
+    return {
+      ok: true,
+      result: {
+        path: typeof data.path === "string" ? data.path : null,
+        parent: typeof data.parent === "string" ? data.parent : null,
+        registerable: data.registerable === true,
+        entries: Array.isArray(data.entries)
+          ? data.entries.filter(
+              (e): e is BrowseEntry =>
+                typeof e?.name === "string" &&
+                e.name.length > 0 &&
+                typeof e?.path === "string" &&
+                e.path.length > 0,
+            )
+          : [],
+        truncated: data.truncated === true,
+      },
+    };
+  } catch {
+    return { ok: false, error: "network error — could not browse" };
+  }
+}
+
 /** The outcome of an add — the new workspace on success, or the engine's SAFE
  *  400 message on a rejected pick (bad name / traversal / not-a-repo). */
 export type AddWorkspaceResult = { ok: true; workspace: Workspace } | { ok: false; error: string };

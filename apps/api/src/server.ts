@@ -15,6 +15,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
   WorkspaceFsError,
@@ -148,16 +149,20 @@ export function build(opts: BuildOpts) {
         "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
     );
   }
-  // BRO-1666 Slice 3 (P20 HIGH-2): the git/commit WRITE route (commit+push to the
-  // owner's real remote) is OWNER-gated only at the BFF — the engine can't tell a
-  // human from the agent. With no GENESIS_TOKEN, a direct :8787 caller (the on-box
-  // agent, or anything on the tailnet) can commit+push, bypassing that gate. Hard
-  // deployment invariant: bind :8787 to localhost + set GENESIS_TOKEN.
+  // BRO-1666 Slice 3 (P20 HIGH-2) + BRO-1673 (P20 review finding #1): two routes are
+  // OWNER-gated ONLY at the BFF — the engine can't tell a human from the agent, so it
+  // applies only the bearer gate. POST /workspaces/:id/git/commit is a WRITE route
+  // (commit+push to the owner's real remote); GET /workspaces/browse is a READ route
+  // that discloses the host-FS layout UNDER the add-roots ($HOME) with absolute paths.
+  // With no GENESIS_TOKEN, a direct :8787 caller (the on-box agent, or anything on the
+  // tailnet) bypasses the owner gate on both. Hard deployment invariant: bind :8787 to
+  // localhost + set GENESIS_TOKEN. (Both are still sandboxed — commit to the workspace,
+  // browse to the add-roots — so this is bypass-of-owner-gate, not arbitrary-FS.)
   if (!opts.token) {
     console.warn(
-      "[genesis] WARNING: POST /workspaces/:id/git/commit is a WRITE route (commit+push) " +
-        "owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct :8787 caller can " +
-        "commit+push. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
+      "[genesis] WARNING: POST /workspaces/:id/git/commit (write) and GET /workspaces/browse " +
+        "(host-FS-layout read) are owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct " +
+        ":8787 caller reaches both. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
     );
   }
 
@@ -252,6 +257,24 @@ export function build(opts: BuildOpts) {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     const registered = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
     return c.json({ available: availableWorkspaces(opts.projectsRoot, registered) });
+  });
+
+  // Filesystem navigator for the add-by-path picker (BRO-1673). Lists the immediate
+  // subdirectories of a directory under the add-roots (pathAddRoots(), default $HOME),
+  // so the owner can browse to a folder and register it instead of typing a path.
+  // OWNER-ONLY at the BFF (it surfaces absolute paths — same trust model as add-by-path
+  // BRO-1663); the bearer gate applies here. The engine enforces the HARD realpath
+  // sandbox — a path outside the roots / a symlink escape is a safe 400, never echoing
+  // an unexpected fs path.
+  app.get("/workspaces/browse", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    try {
+      return c.json(browseForAdd(c.req.query("path"), pathAddRoots()));
+    } catch (e) {
+      if (e instanceof WorkspaceValidationError) return c.json({ error: e.message }, 400);
+      console.error(`[genesis] browse failed: ${e instanceof Error ? e.stack : e}`);
+      return c.json({ error: "could not browse the filesystem" }, 500);
+    }
   });
 
   // Register a workspace at RUNTIME (BRO-1629) — no restart. Two safe add shapes,
