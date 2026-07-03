@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceFsError } from "./workspace-fs";
-import { gitDiff, gitStatus } from "./workspace-git";
+import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
 
 const dirs: string[] = [];
 function git(cwd: string, ...args: string[]): void {
@@ -23,6 +23,30 @@ function repo(): string {
 function commit(d: string, message = "c"): void {
   git(d, "add", "-A");
   git(d, "commit", "-qm", message);
+}
+/** A work repo with a local bare remote as its upstream (so `git push` works
+ *  offline). Returns the work tree + the bare remote path. */
+function repoWithRemote(): { work: string; remote: string } {
+  const base = mkdtempSync(join(tmpdir(), "genesis-gitr-"));
+  dirs.push(base);
+  const remote = join(base, "remote.git");
+  mkdirSync(remote);
+  git(remote, "init", "--bare", "-q");
+  const work = join(base, "work");
+  mkdirSync(work);
+  git(work, "init", "-q");
+  git(work, "config", "user.email", "t@example.com");
+  git(work, "config", "user.name", "Test");
+  git(work, "config", "commit.gpgsign", "false");
+  writeFileSync(join(work, "seed.txt"), "1\n");
+  git(work, "add", "-A");
+  git(work, "commit", "-qm", "seed");
+  git(work, "remote", "add", "origin", remote);
+  git(work, "push", "-q", "-u", "origin", "HEAD"); // sets the upstream
+  return { work, remote };
+}
+function headSha(dir: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
 }
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -158,5 +182,75 @@ describe("gitDiff (BRO-1666 Slice 2)", () => {
     // with it, `:/` is just a (non-existent) literal filename → empty diff.
     const r = await gitDiff(d, ":/");
     expect(r.diff).toBe("");
+  });
+});
+
+describe("gitCommit (BRO-1666 Slice 3 — write, owner-only)", () => {
+  test("commits all changes + pushes to the configured upstream", async () => {
+    const { work, remote } = repoWithRemote();
+    writeFileSync(join(work, "seed.txt"), "2\n");
+    writeFileSync(join(work, "extra.txt"), "new\n"); // untracked → add -A stages it too
+    const r = await gitCommit(work, { message: "dogfood change", push: true });
+    expect(r.committed).toBe(true);
+    expect(r.pushed).toBe(true);
+    expect(r.pushError).toBeUndefined();
+    expect(r.sha.length).toBeGreaterThan(0);
+    // The bare remote received the new commit.
+    expect(headSha(remote)).toBe(headSha(work));
+    expect(headSha(work)).toBe(r.sha);
+  });
+
+  test("commits without pushing when push is false", async () => {
+    const { work, remote } = repoWithRemote();
+    const before = headSha(remote);
+    writeFileSync(join(work, "seed.txt"), "3\n");
+    const r = await gitCommit(work, { message: "local only", push: false });
+    expect(r.committed).toBe(true);
+    expect(r.pushed).toBe(false);
+    expect(headSha(remote)).toBe(before); // remote unchanged
+    expect(headSha(work)).toBe(r.sha); // work advanced
+  });
+
+  test("treats a flag-like message as a literal message (no arg injection)", async () => {
+    const { work } = repoWithRemote();
+    writeFileSync(join(work, "seed.txt"), "4\n");
+    await gitCommit(work, { message: "--no-verify --amend", push: false });
+    const subject = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: work }).toString();
+    expect(subject).toContain("--no-verify --amend"); // it's the message, not flags
+  });
+
+  test("rejects an empty / whitespace / over-long message", async () => {
+    const { work } = repoWithRemote();
+    await expect(gitCommit(work, { message: "" })).rejects.toThrow(/required/);
+    await expect(gitCommit(work, { message: "   " })).rejects.toThrow(/required/);
+    await expect(gitCommit(work, { message: 42 as unknown })).rejects.toThrow(/required/);
+    await expect(gitCommit(work, { message: "x".repeat(5000) })).rejects.toThrow(/too long/);
+  });
+
+  test("nothing to commit → 400", async () => {
+    const { work } = repoWithRemote(); // clean after the seed commit
+    await expect(gitCommit(work, { message: "noop", push: false })).rejects.toThrow(
+      /nothing to commit/,
+    );
+  });
+
+  test("commit succeeds but push fails (no upstream) → committed:true, pushError set", async () => {
+    const d = repo(); // a repo with NO remote/upstream
+    writeFileSync(join(d, "a.txt"), "x\n");
+    commit(d, "init");
+    writeFileSync(join(d, "a.txt"), "y\n");
+    const r = await gitCommit(d, { message: "change", push: true });
+    expect(r.committed).toBe(true);
+    expect(r.pushed).toBe(false);
+    expect(r.pushError).toBeDefined();
+  });
+
+  test("refuses a subdirectory workspace (confinement)", async () => {
+    const { work } = repoWithRemote();
+    const sub = join(work, "sub");
+    mkdirSync(sub);
+    await expect(gitCommit(sub, { message: "x", push: false })).rejects.toThrow(
+      /not a git repository/,
+    );
   });
 });

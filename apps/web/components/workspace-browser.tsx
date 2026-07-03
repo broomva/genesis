@@ -7,6 +7,7 @@ import {
   Folder,
   FolderGit2,
   GitBranch,
+  GitCommitVertical,
   Loader2,
   X,
 } from "lucide-react";
@@ -19,10 +20,12 @@ import { type DirListing, type FileContent, fetchDir, fetchFile } from "@/lib/fi
 import {
   type GitFileEntry,
   type GitStatusData,
+  commitAndPush,
   fetchGitDiff,
   fetchGitStatus,
   fileIsStagedOnly,
   statusBadge,
+  validateCommitMessage,
 } from "@/lib/git";
 import { cn } from "@/lib/utils";
 
@@ -443,9 +446,88 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
   );
 }
 
-/** The Changes tab (BRO-1666 Slice 2): git status list + per-file diff. Read-only.
- *  Fetches status when the tab becomes active; tapping a file opens its diff (staged
- *  when the file is staged-only, else the working-tree diff). */
+/** Commit & Push composer (BRO-1666 Slice 3, owner-only) — a message field + a
+ *  Commit&Push action. Stages ALL changes, commits, pushes to the upstream; owner-
+ *  gated at the BFF (an agent principal gets 403, surfaced here as an error). */
+function CommitBox({
+  workspaceId,
+  onCommitted,
+}: {
+  workspaceId: string;
+  onCommitted: () => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  async function submit() {
+    const invalid = validateCommitMessage(message);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    setError(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await commitAndPush(workspaceId, message, true);
+      const short = r.sha.slice(0, 7);
+      setMessage("");
+      setNote(
+        r.pushed
+          ? `Committed + pushed (${short}).`
+          : r.pushError
+            ? `Committed (${short}) — ${r.pushError}`
+            : `Committed (${short}).`,
+      );
+      onCommitted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "commit failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="border-border mt-2 border-t px-2 pt-3">
+      <textarea
+        value={message}
+        onChange={(e) => {
+          setMessage(e.target.value);
+          setError(null);
+        }}
+        placeholder="Commit message…"
+        rows={2}
+        data-testid="ws-commit-message"
+        className="border-border bg-background focus-visible:ring-ring/50 w-full resize-none rounded-md border px-2.5 py-2 text-sm outline-none focus-visible:ring-3"
+      />
+      {error ? <p className="text-[var(--bv-danger)] mt-1 px-0.5 text-xs">{error}</p> : null}
+      {note ? <p className="text-muted-foreground mt-1 px-0.5 text-xs">{note}</p> : null}
+      <div className="mt-2 flex justify-end">
+        <Button
+          type="button"
+          size="sm"
+          onClick={submit}
+          disabled={busy || message.trim().length === 0}
+          data-testid="ws-commit-submit"
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <GitCommitVertical className="size-3.5" />
+          )}
+          Commit &amp; Push
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The Changes tab (BRO-1666 Slice 2/3): git status list + per-file diff (read-only)
+ *  + a Commit&Push composer (Slice 3, owner-only). Fetches status when the tab becomes
+ *  active (and after a commit); tapping a file opens its diff (staged when the file is
+ *  staged-only, else the working-tree diff). */
 function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: boolean }) {
   const [state, setState] = useState<
     | { status: "loading" }
@@ -454,7 +536,10 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
     | null
   >(null);
   const [openDiff, setOpenDiff] = useState<{ path: string; cached: boolean } | null>(null);
+  // Bumped after a commit so the status list refetches (files should clear).
+  const [reloadKey, setReloadKey] = useState(0);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey is a deliberate refetch trigger
   useEffect(() => {
     if (!active || !workspaceId) return;
     const ctrl = new AbortController();
@@ -468,7 +553,7 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
         setState({ status: "error", error: e instanceof Error ? e.message : "failed to load" });
       });
     return () => ctrl.abort();
-  }, [workspaceId, active]);
+  }, [workspaceId, active, reloadKey]);
   // Close any open diff when the workspace changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on workspace change
   useEffect(() => {
@@ -530,6 +615,9 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
             <p className="text-muted-foreground px-2 py-1 text-xs italic">
               …too many changes to show all.
             </p>
+          ) : null}
+          {state.data.files.length > 0 ? (
+            <CommitBox workspaceId={workspaceId} onCommitted={() => setReloadKey((k) => k + 1)} />
           ) : null}
         </>
       )}

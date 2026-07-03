@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   type GitStatusData,
   fileIsStagedOnly,
+  normalizeCommit,
   normalizeDiff,
   normalizeStatus,
   statusBadge,
+  validateCommitMessage,
 } from "./git";
 
 describe("normalizeStatus (BRO-1666 Slice 2)", () => {
@@ -126,5 +128,36 @@ describe("statusBadge + fileIsStagedOnly (BRO-1666 Slice 2)", () => {
     expect(fileIsStagedOnly(f({ x: "M", y: "M" }))).toBe(false);
     expect(fileIsStagedOnly(f({ x: " ", y: "M" }))).toBe(false);
     expect(fileIsStagedOnly(f({ untracked: true, x: "?", y: "?" }))).toBe(false);
+  });
+});
+
+describe("commit helpers (BRO-1666 Slice 3)", () => {
+  test("validateCommitMessage flags empty/whitespace/over-long, passes a real message", () => {
+    expect(validateCommitMessage("")).toMatch(/enter/i);
+    expect(validateCommitMessage("   ")).toMatch(/enter/i);
+    expect(validateCommitMessage("x".repeat(5000))).toMatch(/too long/i);
+    expect(validateCommitMessage("fix: a real message")).toBeNull();
+  });
+
+  test("normalizeCommit coerces the result shape", () => {
+    expect(
+      normalizeCommit({ committed: true, pushed: true, sha: "abc123", branch: "main" }),
+    ).toEqual({
+      committed: true,
+      pushed: true,
+      sha: "abc123",
+      branch: "main",
+      pushError: undefined,
+    });
+    expect(
+      normalizeCommit({ committed: true, pushed: false, sha: "d", pushError: "no upstream" }),
+    ).toMatchObject({ committed: true, pushed: false, pushError: "no upstream" });
+    expect(normalizeCommit({})).toEqual({
+      committed: false,
+      pushed: false,
+      sha: "",
+      branch: undefined,
+      pushError: undefined,
+    });
   });
 });

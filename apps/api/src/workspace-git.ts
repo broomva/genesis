@@ -331,3 +331,103 @@ export async function gitDiff(
     binary,
   };
 }
+
+// ─── Commit & Push (BRO-1666 Slice 3 — WRITE, owner-only) ─────────────────────
+// This is the only WRITE path. It is owner-gated at the BFF (the agent principal is
+// refused, exactly like BRO-1663's add-by-path). The engine still keeps the blast
+// radius tight: a FIXED argv (the only client input is the commit message, passed as
+// a single `-m` arg — never a flag, no shell); `git add -A` stages the working tree;
+// `git push` (no refspec) only ever targets the branch's CONFIGURED upstream (no
+// client-named remote/branch). Unlike the read paths, the env is NOT hermetic — a
+// commit needs the repo's identity + its own hooks (e.g. the owner's gitleaks
+// pre-commit), which are desired here (it IS the owner committing their own repo).
+
+/** Max commit-message length — generous, but bounds a pathological payload. */
+const MAX_COMMIT_MSG = 4000;
+
+export interface CommitResult {
+  committed: boolean;
+  pushed: boolean;
+  /** The new HEAD sha (short-ish full sha). */
+  sha: string;
+  branch?: string;
+  /** Set when the commit succeeded but the push did not (upstream/remote/network). */
+  pushError?: string;
+}
+
+/** execFile options for a WRITE git op — inherits the full env (identity + PATH for
+ *  hooks) + never prompts; SIGKILL-reaps on timeout. */
+function writeGitOpts(rootPath: string, timeoutMs: number) {
+  return {
+    cwd: rootPath,
+    timeout: timeoutMs,
+    maxBuffer: GIT_MAXBUFFER,
+    killSignal: "SIGKILL" as const,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  };
+}
+
+/** Stage ALL changes, commit with `message`, and (optionally) push to the branch's
+ *  configured upstream. Owner-only (enforced at the BFF). Throws
+ *  {@link WorkspaceFsError} on a bad message / non-repo / nothing-to-commit; a commit
+ *  that succeeds but fails to push returns `{committed:true, pushed:false, pushError}`
+ *  (the commit is NOT lost). */
+export async function gitCommit(
+  rootPath: string,
+  opts: { message: unknown; push?: boolean },
+): Promise<CommitResult> {
+  const { message, push } = opts;
+  if (typeof message !== "string" || message.trim().length === 0)
+    throw new WorkspaceFsError("a commit message is required", 400);
+  if (message.length > MAX_COMMIT_MSG)
+    throw new WorkspaceFsError("commit message is too long", 400);
+  if (!(await isRepoRoot(rootPath))) throw new WorkspaceFsError("not a git repository", 400);
+
+  // Stage everything (tracked mods + new + deletions) — the "commit all my changes"
+  // model of the button. `add -A` takes no client pathspec.
+  await execFileAsync("git", ["add", "-A"], writeGitOpts(rootPath, 30_000));
+
+  try {
+    // Message is a SINGLE argv element to `-m` — never parsed as a flag, no shell.
+    await execFileAsync("git", ["commit", "-m", message], writeGitOpts(rootPath, 60_000));
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string };
+    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    if (/nothing to commit/i.test(out))
+      throw new WorkspaceFsError("nothing to commit — the working tree is clean", 400);
+    // A pre-commit/commit-msg hook rejection or any other commit failure. Keep the
+    // message bounded + generic (owner-only, but still no raw stderr dump).
+    throw new WorkspaceFsError(
+      "commit failed — a pre-commit hook may have rejected the change",
+      400,
+    );
+  }
+
+  const { stdout: sha } = await execFileAsync(
+    "git",
+    ["rev-parse", "HEAD"],
+    writeGitOpts(rootPath, 10_000),
+  );
+  const branch = await execFileAsync(
+    "git",
+    ["branch", "--show-current"],
+    writeGitOpts(rootPath, 10_000),
+  )
+    .then((r) => r.stdout.trim() || undefined)
+    .catch(() => undefined);
+
+  let pushed = false;
+  let pushError: string | undefined;
+  if (push) {
+    try {
+      // No refspec → pushes the current branch to its CONFIGURED upstream only; a
+      // client can never name a remote/branch. A longer timeout (network).
+      await execFileAsync("git", ["push"], writeGitOpts(rootPath, 120_000));
+      pushed = true;
+    } catch {
+      pushError = "push failed — no upstream is configured, or the remote rejected it";
+    }
+  }
+
+  return { committed: true, pushed, sha: sha.trim(), branch, ...(pushError ? { pushError } : {}) };
+}
