@@ -447,8 +447,11 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
 }
 
 /** Commit & Push composer (BRO-1666 Slice 3, owner-only) — a message field + a
- *  Commit&Push action. Stages ALL changes, commits, pushes to the upstream; owner-
- *  gated at the BFF (an agent principal gets 403, surfaced here as an error). */
+ *  Commit&Push action. Commits TRACKED edits (not untracked, P20 HIGH-1), pushes to
+ *  the upstream; owner-gated at the BFF (an agent principal gets 403, surfaced here as
+ *  an error). The success confirmation is lifted to the PARENT (`onCommitted(note)`),
+ *  because a clean tree after commit unmounts this box (CodeRabbit) — the note would
+ *  otherwise vanish before it's read. */
 function CommitBox({
   workspaceId,
   hasUntracked,
@@ -458,12 +461,13 @@ function CommitBox({
   /** True when the change set includes untracked files — they are NOT committed
    *  (commit stages tracked edits only, P20 HIGH-1), so tell the user. */
   hasUntracked: boolean;
-  onCommitted: () => void;
+  /** Called on a successful commit with a human-readable confirmation note; the
+   *  parent owns + persists it (this box may unmount when the tree goes clean). */
+  onCommitted: (note: string) => void;
 }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   async function submit() {
     const invalid = validateCommitMessage(message);
@@ -472,20 +476,18 @@ function CommitBox({
       return;
     }
     setError(null);
-    setNote(null);
     setBusy(true);
     try {
       const r = await commitAndPush(workspaceId, message, true);
       const short = r.sha.slice(0, 7);
       setMessage("");
-      setNote(
+      onCommitted(
         r.pushed
           ? `Committed + pushed (${short}).`
           : r.pushError
             ? `Committed (${short}) — ${r.pushError}`
             : `Committed (${short}).`,
       );
-      onCommitted();
     } catch (e) {
       setError(e instanceof Error ? e.message : "commit failed");
     } finally {
@@ -512,7 +514,6 @@ function CommitBox({
         </p>
       ) : null}
       {error ? <p className="text-[var(--bv-danger)] mt-1 px-0.5 text-xs">{error}</p> : null}
-      {note ? <p className="text-muted-foreground mt-1 px-0.5 text-xs">{note}</p> : null}
       <div className="mt-2 flex justify-end">
         <Button
           type="button"
@@ -547,6 +548,9 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
   const [openDiff, setOpenDiff] = useState<{ path: string; cached: boolean } | null>(null);
   // Bumped after a commit so the status list refetches (files should clear).
   const [reloadKey, setReloadKey] = useState(0);
+  // Commit confirmation, owned HERE so it survives CommitBox unmounting when the tree
+  // goes clean after a commit (CodeRabbit).
+  const [commitNote, setCommitNote] = useState<string | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey is a deliberate refetch trigger
   useEffect(() => {
@@ -563,10 +567,11 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
       });
     return () => ctrl.abort();
   }, [workspaceId, active, reloadKey]);
-  // Close any open diff when the workspace changes.
+  // Close any open diff + clear the commit note when the workspace changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on workspace change
   useEffect(() => {
     setOpenDiff(null);
+    setCommitNote(null);
   }, [workspaceId]);
 
   if (openDiff) {
@@ -607,6 +612,14 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
               ) : null}
             </div>
           ) : null}
+          {commitNote ? (
+            <p
+              className="mb-1 rounded-md bg-[var(--bv-canvas-soft-2)] px-2.5 py-1.5 text-xs text-[var(--bv-green-text,#2e7d32)]"
+              data-testid="ws-commit-note"
+            >
+              {commitNote}
+            </p>
+          ) : null}
           {state.data.files.length === 0 ? (
             <p className="text-muted-foreground p-4 text-sm italic">
               No changes — the working tree is clean.
@@ -629,7 +642,10 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
             <CommitBox
               workspaceId={workspaceId}
               hasUntracked={state.data.files.some((f) => f.untracked)}
-              onCommitted={() => setReloadKey((k) => k + 1)}
+              onCommitted={(note) => {
+                setCommitNote(note);
+                setReloadKey((k) => k + 1);
+              }}
             />
           ) : null}
         </>
