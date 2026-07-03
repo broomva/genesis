@@ -100,7 +100,7 @@
           <path class="fl" d="M460 110 L536 96"/><path class="fl" d="M710 120 L710 132"/>
           <text x="150" y="205" class="sub" fill="#f2708a">agent token</text><path class="no" d="M250 200 L200 200"/>
         </svg>
-        <figcaption>The owner gate lives at the BFF (agent → 403). The engine keeps the blast radius tight even for the human: fixed argv, repo-root confinement, validated message, hooks as the secret-scan net.</figcaption>
+        <figcaption>The owner gate lives at the BFF (agent → 403). The engine keeps the blast radius tight even for the human: fixed argv, repo-root confinement, validated message, tracked-only staging + hooks as secret nets. <strong>Deployment invariant (P20 HIGH-2):</strong> the engine can't tell human from agent, so bind <code>:8787</code> to localhost/tailnet + set <code>GENESIS_TOKEN</code> — a boot warning enforces the reminder.</figcaption>
       </figure>
 
       <h2>Commit-message injection: neutralized</h2>
@@ -119,7 +119,7 @@
       <div class="grid">
         <div class="card"><h3>Push target</h3><p><code>git push</code> with <strong>no refspec</strong> → only the branch's <em>configured</em> upstream. A client can't name a remote or branch.</p></div>
         <div class="card"><h3>Confinement</h3><p>Reuses the Slice-2 <code>isRepoRoot</code> guard — a subdir workspace can't commit into the enclosing repo (unit-tested).</p></div>
-        <div class="card"><h3>Hooks = safety net</h3><p><code>add -A</code> stages everything, so the owner's <strong>gitleaks pre-commit</strong> runs (no <code>--no-verify</code>) — a secret-bearing commit fails <em>safe</em>.</p></div>
+        <div class="card"><h3>No untracked sweep</h3><p>Staging is <code>commit -a</code> (tracked edits only) — a brand-new untracked secret file is <strong>never</strong> auto-committed (P20 HIGH-1). The owner's gitleaks pre-commit runs as a second net.</p></div>
         <div class="card"><h3>Honest failures</h3><p>A commit that lands but can't push returns <code>{committed:true, pushError}</code> — the work is never silently lost.</p></div>
       </div>
 

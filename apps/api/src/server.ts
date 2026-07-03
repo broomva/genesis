@@ -132,6 +132,18 @@ export function build(opts: BuildOpts) {
         "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
     );
   }
+  // BRO-1666 Slice 3 (P20 HIGH-2): the git/commit WRITE route (commit+push to the
+  // owner's real remote) is OWNER-gated only at the BFF — the engine can't tell a
+  // human from the agent. With no GENESIS_TOKEN, a direct :8787 caller (the on-box
+  // agent, or anything on the tailnet) can commit+push, bypassing that gate. Hard
+  // deployment invariant: bind :8787 to localhost + set GENESIS_TOKEN.
+  if (!opts.token) {
+    console.warn(
+      "[genesis] WARNING: POST /workspaces/:id/git/commit is a WRITE route (commit+push) " +
+        "owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct :8787 caller can " +
+        "commit+push. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
+    );
+  }
 
   const app = new Hono();
 

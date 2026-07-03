@@ -186,10 +186,9 @@ describe("gitDiff (BRO-1666 Slice 2)", () => {
 });
 
 describe("gitCommit (BRO-1666 Slice 3 — write, owner-only)", () => {
-  test("commits all changes + pushes to the configured upstream", async () => {
+  test("commits tracked edits + pushes to the configured upstream", async () => {
     const { work, remote } = repoWithRemote();
-    writeFileSync(join(work, "seed.txt"), "2\n");
-    writeFileSync(join(work, "extra.txt"), "new\n"); // untracked → add -A stages it too
+    writeFileSync(join(work, "seed.txt"), "2\n"); // tracked modification
     const r = await gitCommit(work, { message: "dogfood change", push: true });
     expect(r.committed).toBe(true);
     expect(r.pushed).toBe(true);
@@ -198,6 +197,33 @@ describe("gitCommit (BRO-1666 Slice 3 — write, owner-only)", () => {
     // The bare remote received the new commit.
     expect(headSha(remote)).toBe(headSha(work));
     expect(headSha(work)).toBe(r.sha);
+  });
+
+  test("does NOT auto-stage untracked files (P20 HIGH-1: commit -a, not add -A)", async () => {
+    const { work } = repoWithRemote();
+    writeFileSync(join(work, "seed.txt"), "edited\n"); // tracked edit → committed
+    writeFileSync(join(work, "secret.key"), "TOP-SECRET\n"); // untracked → must NOT be committed
+    await gitCommit(work, { message: "edit tracked only", push: false });
+    // The untracked file is still untracked (not staged/committed). `--others` without
+    // `--exclude-standard` so a global gitignore (e.g. *.key) can't hide it from the test.
+    const untracked = execFileSync("git", ["ls-files", "--others"], {
+      cwd: work,
+    }).toString();
+    expect(untracked).toContain("secret.key");
+    // And it is NOT in HEAD, while the tracked edit IS.
+    const tree = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: work,
+    }).toString();
+    expect(tree).not.toContain("secret.key");
+    expect(tree).toContain("seed.txt");
+  });
+
+  test("only untracked changes → nothing to commit (untracked not auto-staged)", async () => {
+    const { work } = repoWithRemote();
+    writeFileSync(join(work, "brand-new.txt"), "x\n"); // untracked only
+    await expect(gitCommit(work, { message: "noop", push: false })).rejects.toThrow(
+      /nothing to commit/,
+    );
   });
 
   test("commits without pushing when push is false", async () => {

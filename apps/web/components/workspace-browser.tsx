@@ -451,9 +451,13 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
  *  gated at the BFF (an agent principal gets 403, surfaced here as an error). */
 function CommitBox({
   workspaceId,
+  hasUntracked,
   onCommitted,
 }: {
   workspaceId: string;
+  /** True when the change set includes untracked files — they are NOT committed
+   *  (commit stages tracked edits only, P20 HIGH-1), so tell the user. */
+  hasUntracked: boolean;
   onCommitted: () => void;
 }) {
   const [message, setMessage] = useState("");
@@ -502,6 +506,11 @@ function CommitBox({
         data-testid="ws-commit-message"
         className="border-border bg-background focus-visible:ring-ring/50 w-full resize-none rounded-md border px-2.5 py-2 text-sm outline-none focus-visible:ring-3"
       />
+      {hasUntracked ? (
+        <p className="text-muted-foreground mt-1 px-0.5 text-xs">
+          New (U) files aren't included — only edits to tracked files are committed.
+        </p>
+      ) : null}
       {error ? <p className="text-[var(--bv-danger)] mt-1 px-0.5 text-xs">{error}</p> : null}
       {note ? <p className="text-muted-foreground mt-1 px-0.5 text-xs">{note}</p> : null}
       <div className="mt-2 flex justify-end">
@@ -617,7 +626,11 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
             </p>
           ) : null}
           {state.data.files.length > 0 ? (
-            <CommitBox workspaceId={workspaceId} onCommitted={() => setReloadKey((k) => k + 1)} />
+            <CommitBox
+              workspaceId={workspaceId}
+              hasUntracked={state.data.files.some((f) => f.untracked)}
+              onCommitted={() => setReloadKey((k) => k + 1)}
+            />
           ) : null}
         </>
       )}

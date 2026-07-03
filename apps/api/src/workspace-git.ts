@@ -336,11 +336,17 @@ export async function gitDiff(
 // This is the only WRITE path. It is owner-gated at the BFF (the agent principal is
 // refused, exactly like BRO-1663's add-by-path). The engine still keeps the blast
 // radius tight: a FIXED argv (the only client input is the commit message, passed as
-// a single `-m` arg — never a flag, no shell); `git add -A` stages the working tree;
-// `git push` (no refspec) only ever targets the branch's CONFIGURED upstream (no
-// client-named remote/branch). Unlike the read paths, the env is NOT hermetic — a
-// commit needs the repo's identity + its own hooks (e.g. the owner's gitleaks
-// pre-commit), which are desired here (it IS the owner committing their own repo).
+// a single `-m` arg — never a flag, no shell); `git push` (no refspec) only ever
+// targets the branch's CONFIGURED upstream (no client-named remote/branch). Unlike
+// the read paths, the env is NOT hermetic — a commit needs the repo's identity + its
+// own hooks (e.g. the owner's gitleaks pre-commit), which are desired here.
+//
+// P20 Slice-3 HIGH-1: staging is `commit -a` (tracked modifications + deletions),
+// NOT `add -A`. This DELIBERATELY does not auto-sweep UNTRACKED files — so a brand-new
+// secret file (a downloaded key, a fresh config.json) can never be silently committed
+// + pushed to the real remote when the owner's gitleaks pre-commit hook is fail-open
+// (skipped if `gitleaks` isn't on the engine's PATH). Committing a brand-new file is
+// therefore a deliberate future step (per-file staging, Slice 3b), not a one-tap sweep.
 
 /** Max commit-message length — generous, but bounds a pathological payload. */
 const MAX_COMMIT_MSG = 4000;
@@ -367,8 +373,9 @@ function writeGitOpts(rootPath: string, timeoutMs: number) {
   };
 }
 
-/** Stage ALL changes, commit with `message`, and (optionally) push to the branch's
- *  configured upstream. Owner-only (enforced at the BFF). Throws
+/** Commit TRACKED changes (modifications + deletions, via `commit -a`) with `message`,
+ *  and (optionally) push to the branch's configured upstream. Untracked/new files are
+ *  NOT auto-staged (P20 HIGH-1). Owner-only (enforced at the BFF). Throws
  *  {@link WorkspaceFsError} on a bad message / non-repo / nothing-to-commit; a commit
  *  that succeeds but fails to push returns `{committed:true, pushed:false, pushError}`
  *  (the commit is NOT lost). */
@@ -383,31 +390,38 @@ export async function gitCommit(
     throw new WorkspaceFsError("commit message is too long", 400);
   if (!(await isRepoRoot(rootPath))) throw new WorkspaceFsError("not a git repository", 400);
 
-  // Stage everything (tracked mods + new + deletions) — the "commit all my changes"
-  // model of the button. `add -A` takes no client pathspec.
-  await execFileAsync("git", ["add", "-A"], writeGitOpts(rootPath, 30_000));
-
   try {
-    // Message is a SINGLE argv element to `-m` — never parsed as a flag, no shell.
-    await execFileAsync("git", ["commit", "-m", message], writeGitOpts(rootPath, 60_000));
+    // `-a` stages TRACKED modifications + deletions (never untracked — P20 HIGH-1).
+    // The message is a SINGLE argv element to `-m` — never parsed as a flag, no shell.
+    await execFileAsync("git", ["commit", "-a", "-m", message], writeGitOpts(rootPath, 60_000));
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string };
     const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    if (/nothing to commit/i.test(out))
-      throw new WorkspaceFsError("nothing to commit — the working tree is clean", 400);
-    // A pre-commit/commit-msg hook rejection or any other commit failure. Keep the
-    // message bounded + generic (owner-only, but still no raw stderr dump).
+    if (/nothing to commit|nothing added to commit|no changes added to commit/i.test(out))
+      throw new WorkspaceFsError(
+        "nothing to commit — only edits to already-tracked files are committed (new files aren't staged automatically)",
+        400,
+      );
+    // Distinguish the common non-hook causes (P20 LOW-1) so a missing identity or a
+    // stale lock isn't mislabeled a hook rejection. Messages stay bounded + path-free.
+    if (/please tell me who you are|user\.(email|name)/i.test(out))
+      throw new WorkspaceFsError("commit failed — git identity (user.name/email) is not set", 400);
+    if (/index\.lock|unable to create.*lock|another git process/i.test(out))
+      throw new WorkspaceFsError(
+        "commit failed — the repo is locked by another operation; retry",
+        409,
+      );
     throw new WorkspaceFsError(
       "commit failed — a pre-commit hook may have rejected the change",
       400,
     );
   }
 
-  const { stdout: sha } = await execFileAsync(
-    "git",
-    ["rev-parse", "HEAD"],
-    writeGitOpts(rootPath, 10_000),
-  );
+  // The commit LANDED. Never let a post-commit read failure invert that into a 500
+  // (P20 LOW-2) — degrade the sha to "" rather than throw.
+  const sha = await execFileAsync("git", ["rev-parse", "HEAD"], writeGitOpts(rootPath, 10_000))
+    .then((r) => r.stdout.trim())
+    .catch(() => "");
   const branch = await execFileAsync(
     "git",
     ["branch", "--show-current"],
@@ -429,5 +443,5 @@ export async function gitCommit(
     }
   }
 
-  return { committed: true, pushed, sha: sha.trim(), branch, ...(pushError ? { pushError } : {}) };
+  return { committed: true, pushed, sha, branch, ...(pushError ? { pushError } : {}) };
 }
