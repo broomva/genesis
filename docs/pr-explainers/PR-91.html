@@ -1,0 +1,225 @@
+<!doctype html>
+<!--
+  PR explainer — BRO-1666 Slice 1: read-only workspace filesystem browser.
+  P18 · Audience: human-read artifact where presentation carries the knowledge
+  (the security boundary + data flow). Category-C, generatively authored, self-
+  contained (inline SVG + CSS, no build step). PR #91 · genesis.
+  meta: { pr: 91, ticket: "BRO-1666", slice: 1, date: "2026-07-03" }
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR #91 — Workspace filesystem browser (BRO-1666 · Slice 1)</title>
+    <style>
+      :root {
+        --bg: #0e1016; --panel: #161a24; --panel-2: #1d2230; --ink: #e6e9f0;
+        --muted: #99a1b3; --line: #2a3040; --blue: #6ea8fe; --green: #57d38c;
+        --amber: #f0b866; --red: #f2708a; --violet: #b79bff;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: radial-gradient(1200px 700px at 70% -10%, #1a2030 0%, var(--bg) 60%);
+        color: var(--ink); font-family: var(--sans); line-height: 1.6;
+        padding: clamp(1rem, 3vw, 3rem);
+      }
+      .wrap { max-width: 940px; margin: 0 auto; }
+      header.hero {
+        border: 1px solid var(--line); border-radius: 18px; padding: 1.6rem 1.8rem;
+        background: linear-gradient(160deg, var(--panel) 0%, #12151f 100%);
+      }
+      .tag { display: inline-flex; gap: .4rem; align-items: center; font-family: var(--mono);
+        font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; color: var(--blue);
+        border: 1px solid var(--line); border-radius: 999px; padding: .2rem .6rem; }
+      h1 { font-size: clamp(1.4rem, 3.5vw, 2rem); margin: .8rem 0 .3rem; letter-spacing: -.02em; }
+      h2 { font-size: 1.15rem; margin: 2.4rem 0 .8rem; letter-spacing: -.01em;
+        display: flex; align-items: center; gap: .6rem; }
+      h2::before { content: ""; width: 8px; height: 22px; border-radius: 3px;
+        background: linear-gradient(var(--blue), var(--violet)); display: inline-block; }
+      p.lede { color: var(--muted); font-size: 1.02rem; margin: .4rem 0 0; }
+      a { color: var(--blue); }
+      code { font-family: var(--mono); font-size: .86em; background: var(--panel-2);
+        padding: .1rem .38rem; border-radius: 6px; border: 1px solid var(--line); }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+        padding: 1.1rem 1.2rem; }
+      .card h3 { margin: 0 0 .4rem; font-size: .95rem; }
+      .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+      .chip { font-family: var(--mono); font-size: .72rem; color: var(--green); }
+      figure { margin: 1.2rem 0; }
+      figcaption { color: var(--muted); font-size: .82rem; text-align: center; margin-top: .5rem; }
+      svg { width: 100%; height: auto; display: block; }
+      table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line);
+        vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase;
+        letter-spacing: .04em; }
+      td code { white-space: nowrap; }
+      .rej { color: var(--red); font-family: var(--mono); font-size: .8rem; }
+      .acc { color: var(--green); font-family: var(--mono); font-size: .8rem; }
+      ul.clean { list-style: none; padding: 0; margin: .6rem 0; }
+      ul.clean li { padding: .3rem 0 .3rem 1.5rem; position: relative; color: var(--muted); }
+      ul.clean li::before { content: "▸"; color: var(--blue); position: absolute; left: .3rem; }
+      footer { margin-top: 2.6rem; padding-top: 1.2rem; border-top: 1px solid var(--line);
+        color: var(--muted); font-size: .82rem; }
+      .kbd { font-family: var(--mono); font-size: .82rem; color: var(--amber); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="tag">● PR #91 · BRO-1666 · Slice 1</span>
+        <h1>Read-only workspace filesystem browser</h1>
+        <p class="lede">
+          A header <strong>Files</strong> button opens a slide-over that browses the active
+          thread's bound workspace — the first slice of the mobile git client. Repo Files ships
+          now; Changes · Checks · Commit&nbsp;&amp;&nbsp;Push follow in Slices 2–4.
+        </p>
+      </header>
+
+      <h2>The one invariant this slice defends</h2>
+      <p>
+        The workspace <code>rootPath</code> is an absolute server path. It is
+        <strong>engine-internal</strong> — the public <code>listWorkspaces</code> DTO already omits
+        it. This feature reads the filesystem <em>under</em> that root, so two things must hold, no
+        matter what the client sends:
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>① No escape <span class="chip">sandbox</span></h3>
+          <p>A read can never leave the workspace root — not via <code>..</code>, an absolute path,
+            or a symlink pointing out. The boundary is checked on <em>real</em> paths, not lexical
+            ones.</p>
+        </div>
+        <div class="card">
+          <h3>② No leak <span class="chip">disclosure</span></h3>
+          <p>Only <strong>relative</strong> paths + file contents ever cross back. The absolute
+            <code>rootPath</code> never appears in a body, an entry, or an error message.</p>
+        </div>
+      </div>
+
+      <h2>Data flow &amp; trust boundaries</h2>
+      <figure>
+        <svg viewBox="0 0 900 300" role="img" aria-label="Data flow from browser through BFF to the engine sandbox">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe" />
+            </marker>
+            <style>
+              .box { fill: #161a24; stroke: #2a3040; stroke-width: 1.5; rx: 12; }
+              .lbl { fill: #e6e9f0; font: 600 14px ui-sans-serif, system-ui; }
+              .sub { fill: #99a1b3; font: 12px ui-monospace, monospace; }
+              .flow { stroke: #6ea8fe; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+              .zone { fill: none; stroke-dasharray: 5 4; stroke-width: 1.5; }
+            </style>
+          </defs>
+
+          <!-- trust zones -->
+          <rect x="6" y="6" width="300" height="288" rx="14" class="zone" stroke="#57d38c" />
+          <text x="18" y="28" class="sub" fill="#57d38c">browser (client)</text>
+          <rect x="318" y="6" width="240" height="288" rx="14" class="zone" stroke="#b79bff" />
+          <text x="330" y="28" class="sub" fill="#b79bff">web BFF (auth-gated)</text>
+          <rect x="570" y="6" width="324" height="288" rx="14" class="zone" stroke="#f0b866" />
+          <text x="582" y="28" class="sub" fill="#f0b866">engine · localhost/tailnet only</text>
+
+          <!-- nodes -->
+          <rect class="box" x="30" y="110" width="250" height="90" rx="12" />
+          <text x="46" y="145" class="lbl">WorkspaceBrowser</text>
+          <text x="46" y="167" class="sub">fetchDir / fetchFile</text>
+          <text x="46" y="185" class="sub">?path= (relative only)</text>
+
+          <rect class="box" x="336" y="110" width="204" height="90" rx="12" />
+          <text x="352" y="145" class="lbl">/api/workspaces</text>
+          <text x="352" y="164" class="sub">authorizePrincipal</text>
+          <text x="352" y="184" class="sub">proxyGenesisGetJson</text>
+
+          <rect class="box" x="590" y="70" width="284" height="72" rx="12" />
+          <text x="606" y="100" class="lbl">GET /workspaces/:id/files·file</text>
+          <text x="606" y="122" class="sub">resolveWorkspaceRoot(id) → rootPath</text>
+
+          <rect class="box" x="590" y="168" width="284" height="96" rx="12" />
+          <text x="606" y="198" class="lbl" fill="#f0b866">workspace-fs · sandbox</text>
+          <text x="606" y="220" class="sub">resolveInRoot → realpath + re-check</text>
+          <text x="606" y="238" class="sub">listWorkspaceDir / readWorkspaceFile</text>
+          <text x="606" y="256" class="sub">→ relative path + contents ONLY</text>
+
+          <!-- flows -->
+          <path class="flow" d="M280 155 L332 155" />
+          <path class="flow" d="M540 150 L586 118" />
+          <path class="flow" d="M732 142 L732 164" />
+          <path class="flow" d="M586 210 Q560 210 560 175 L544 160" stroke="#57d38c" />
+        </svg>
+        <figcaption>
+          The <span style="color:#f0b866">rootPath</span> is resolved on the engine and stays there;
+          only relative paths + contents flow back left (green return edge). Each dashed zone is a
+          trust boundary.
+        </figcaption>
+      </figure>
+
+      <h2>The sandbox: <code>resolveInRoot</code> reject matrix</h2>
+      <p>
+        Mirrors BRO-1663's <code>resolvePathAdd</code> discipline — a lexical check catches the
+        obvious escapes cheaply, then <code>realpathSync</code> + a second boundary check makes the
+        sandbox <strong>hard</strong> (symlink-safe), not lexical.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Input <code>?path=</code></th><th>Outcome</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>""</code> / <code>src/index.ts</code></td><td class="acc">✓ accept</td>
+            <td>In-root; returns its canonical relative path.</td></tr>
+          <tr><td><code>..</code> · <code>src/../../x</code></td><td class="rej">✗ 400 escapes</td>
+            <td>Lexical boundary check after <code>resolve()</code> normalizes <code>..</code>.</td></tr>
+          <tr><td><code>/etc/passwd</code></td><td class="rej">✗ 400 relative</td>
+            <td><code>resolve(root,"/x")==="/x"</code> — absolute is rejected up front.</td></tr>
+          <tr><td>symlink → outside root</td><td class="rej">✗ 400 escapes</td>
+            <td><code>realpathSync</code> lands outside → second (hard) boundary check fails.</td></tr>
+          <tr><td>symlink → inside root</td><td class="acc">✓ accept</td>
+            <td>Resolves in-root; returned as its real relative path.</td></tr>
+          <tr><td><code>a\0b</code> · non-string</td><td class="rej">✗ 400 invalid</td>
+            <td>NUL byte / type rejected before any fs touch.</td></tr>
+          <tr><td>missing path</td><td class="rej">✗ 404</td>
+            <td><code>realpathSync</code> throws ENOENT → mapped to 404 (path-free message).</td></tr>
+          <tr><td>root vanished on disk</td><td class="rej">✗ 500</td>
+            <td>Root <code>realpathSync</code> fails → generic 500 (still path-free).</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Reads are bounded &amp; honest</h2>
+      <ul class="clean">
+        <li><span class="kbd">256 KB cap</span> — a giant file is read only up to the cap (never
+          loaded whole) and flagged <code>truncated</code>; the viewer shows the leading slice + a note.</li>
+        <li><span class="kbd">binary</span> — a NUL byte in the read slice → <code>binary:true</code>,
+          empty content, a "not shown" notice.</li>
+        <li><span class="kbd">listing</span> — dirs first then files (alpha); dotfiles included
+          (screenshot parity); an out-of-root symlink is <em>hidden</em>, its target size never surfaced.</li>
+      </ul>
+
+      <h2>Surface changed</h2>
+      <div class="grid">
+        <div class="card"><h3>Server</h3><p><code>workspace-fs.ts</code> (sandbox core + tests),
+          two GET routes on <code>server.ts</code>, <code>Supervisor.resolveWorkspaceRoot</code>.</p></div>
+        <div class="card"><h3>BFF</h3><p><code>/workspaces/[id]/files</code> + <code>/file</code>
+          passthrough, same <code>authorizePrincipal</code> gate as <code>/threads</code>.</p></div>
+        <div class="card"><h3>Client</h3><p><code>lib/files.ts</code>, <code>workspace-browser.tsx</code>
+          (slide-over + lazy tree + viewer), header button + <code>page.tsx</code> wiring.</p></div>
+      </div>
+
+      <h2>Validation</h2>
+      <ul class="clean">
+        <li>Sandbox unit tests: <strong>20</strong> · client normalizers: <strong>7</strong> · full suite: <strong>628 pass / 0 fail</strong>.</li>
+        <li>Typecheck (api·core·web) clean · Biome clean · <code>next&nbsp;build</code> OK (both new routes, standalone copy).</li>
+        <li>P20 cross-model adversarial review fired on the sandbox core (verdict on the PR).</li>
+        <li>Post-merge dogfood on the VPS: curl the engine directly + asset-200 + bundle grep.</li>
+      </ul>
+
+      <footer>
+        Generated for PR&nbsp;#91 · <code>feat/bro-1666-repo-files</code> → <code>main</code> ·
+        genesis. Handoff: <code>docs/handoffs/2026-07-03-workspace-filesystem-browser.md</code>.
+      </footer>
+    </div>
+  </body>
+</html>

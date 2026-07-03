@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
-import { ArrowUp, PanelLeft, Paperclip, X } from "lucide-react";
+import { ArrowUp, FolderGit2, PanelLeft, Paperclip, X } from "lucide-react";
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
@@ -409,6 +409,7 @@ export function ChatView({
   initialMessages,
   onActivity,
   onMenuClick,
+  onOpenFiles,
   onNewThread,
   model,
   effort,
@@ -435,6 +436,8 @@ export function ChatView({
   initialMessages: UIMessage[];
   onActivity: () => void;
   onMenuClick: () => void;
+  /** Open the workspace filesystem browser slide-over (BRO-1666). */
+  onOpenFiles: () => void;
   /** Start a brand-new thread (the `/new` slash command). */
   onNewThread: () => void;
   /** Selected model + effort (owned by the parent so they survive ChatView's
@@ -747,6 +750,19 @@ export function ChatView({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <RunSignal mode={runMode} liveStatus={status} onRetry={reconnect} />
+          {/* Workspace files (BRO-1666) — opens the read-only fs browser slide-over
+              for this session's bound workspace. */}
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={onOpenFiles}
+            aria-label="Browse workspace files"
+            data-testid="open-workspace-browser"
+            className="[@media(pointer:coarse)]:size-11"
+          >
+            <FolderGit2 className="size-4" />
+          </Button>
           <ThemeToggle theme={theme} onChange={onThemeChange} />
         </div>
       </header>

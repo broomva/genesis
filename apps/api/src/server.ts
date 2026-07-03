@@ -8,13 +8,14 @@ import {
 } from "@genesis/core";
 import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { WorkspaceFsError, listWorkspaceDir, readWorkspaceFile } from "./workspace-fs";
 import {
   WorkspaceValidationError,
   availableWorkspaces,
@@ -269,6 +270,40 @@ export function build(opts: BuildOpts) {
       return ok ? c.json({ ok }) : c.json({ error: "cannot remove the default workspace" }, 400);
     } catch {
       return c.json({ error: "invalid workspace id" }, 400);
+    }
+  });
+
+  // Read-only workspace filesystem browser (BRO-1666 Slice 1). Two GETs on a
+  // workspace, path-SANDBOXED under its server-only rootPath (realpath boundary,
+  // mirroring BRO-1663). Same bearer gate as /threads. The client only ever sends a
+  // RELATIVE `?path=`; the absolute rootPath NEVER leaves the engine (only relative
+  // paths + file contents come back). An unknown workspace → 404; a bad/unsafe path
+  // → a safe 400 (never echoing a filesystem path); any other fs error → generic 500.
+  const fsErrorResponse = (c: Context, e: unknown, what: string) => {
+    if (e instanceof WorkspaceFsError) return c.json({ error: e.message }, e.status);
+    console.error(`[genesis] ${what} failed: ${e instanceof Error ? e.stack : e}`);
+    return c.json({ error: `could not ${what}` }, 500);
+  };
+
+  app.get("/workspaces/:id/files", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(listWorkspaceDir(root, c.req.query("path")));
+    } catch (e) {
+      return fsErrorResponse(c, e, "list directory");
+    }
+  });
+
+  app.get("/workspaces/:id/file", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(readWorkspaceFile(root, c.req.query("path")));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read file");
     }
   });
 
