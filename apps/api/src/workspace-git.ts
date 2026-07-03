@@ -16,6 +16,8 @@
 // VpsHost/microVM deploy would route these through `host.exec(["git",…])`.
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { devNull } from "node:os";
 import { isAbsolute, normalize } from "node:path";
 import { promisify } from "node:util";
 import { WorkspaceFsError } from "./workspace-fs";
@@ -73,9 +75,65 @@ export interface GitDiff {
   binary: boolean;
 }
 
-/** Read-only git env: never prompt (terminal/askpass), don't take an index lock. */
+/** Read-only, HERMETIC git env (P20 Slice 2 HIGH-1 + LOW-1). Mirrors the clone path's
+ *  hermeticGitEnv posture — `git diff` is exactly the command that honors config-driven
+ *  code-execution channels (`diff.external`, `[diff]textconv`, `GIT_EXTERNAL_DIFF`), so
+ *  strip every ambient git-config injection channel + pin global/system config to the
+ *  null device. `GIT_LITERAL_PATHSPECS=1` neutralizes ALL pathspec magic (`:/`, `:(top)`,
+ *  `:(glob)`, `:(attr)…`) so a `--`-separated client path can only ever be a literal
+ *  filename, never a repo-root-anchored escape. Never prompt; don't take an index lock. */
 function gitEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("GIT_CONFIG")) continue; // COUNT / KEY_* / VALUE_* / GLOBAL / SYSTEM / …
+    if (
+      k === "GIT_PROXY_COMMAND" ||
+      k === "GIT_ASKPASS" ||
+      k === "GIT_SSH_COMMAND" ||
+      k === "GIT_EXTERNAL_DIFF" ||
+      k === "GIT_PAGER"
+    )
+      continue;
+    env[k] = v;
+  }
+  env.GIT_TERMINAL_PROMPT = "0"; // never block on an auth prompt
+  env.GIT_OPTIONAL_LOCKS = "0"; // read-only: don't take the index lock
+  env.GIT_LITERAL_PATHSPECS = "1"; // kill pathspec magic — a path is only ever a literal
+  env.GIT_CONFIG_NOSYSTEM = "1"; // ignore /etc/gitconfig
+  env.GIT_CONFIG_GLOBAL = devNull; // ignore ~/.gitconfig (diff.external / textconv)
+  env.GIT_CONFIG_SYSTEM = devNull;
+  return env;
+}
+
+/** Common execFile options for a read-only git call. `killSignal: SIGKILL` (P20 LOW-2,
+ *  matching the clone path) so a git that ignores SIGTERM on timeout is still reaped. */
+function gitOpts(rootPath: string) {
+  return {
+    cwd: rootPath,
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_MAXBUFFER,
+    killSignal: "SIGKILL" as const,
+    env: gitEnv(),
+  };
+}
+
+/** True only when `rootPath` is the git repository ROOT (not a subdirectory of a larger
+ *  repo). The load-bearing confinement check (P20 HIGH-1): without it, git run in a
+ *  SUBDIR workspace resolves the ENCLOSING repo, so status/diff would leak files ABOVE
+ *  the workspace root — defeating the Slice-1 rootPath sandbox. `--show-toplevel` returns
+ *  a realpath'd absolute, and a stored rootPath may be non-realpath'd (resolvePick), so
+ *  compare realpaths on both sides. Any failure (not a repo / vanished) → false. */
+async function isRepoRoot(rootPath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      gitOpts(rootPath),
+    );
+    return realpathSync(stdout.trim()) === realpathSync(rootPath);
+  } catch {
+    return false; // not a git repository, or rootPath is gone
+  }
 }
 
 /** A non-zero git exit carries a NUMERIC `code` + `stderr`; a spawn failure (git
@@ -147,12 +205,11 @@ async function numstat(
 ): Promise<Map<string, { added: number | null; deleted: number | null }>> {
   const m = new Map<string, { added: number | null; deleted: number | null }>();
   try {
-    const { stdout } = await execFileAsync("git", ["diff", "--numstat", "HEAD", "--"], {
-      cwd: rootPath,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: GIT_MAXBUFFER,
-      env: gitEnv(),
-    });
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", "--numstat", "HEAD", "--"],
+      gitOpts(rootPath),
+    );
     for (const line of stdout.split("\n")) {
       if (!line) continue;
       const [a, d, ...rest] = line.split("\t");
@@ -170,12 +227,18 @@ async function numstat(
  *  status (with +/- counts vs HEAD). Read-only. Returns `{isGitRepo:false}` for a
  *  non-repo workspace rather than throwing (the UI degrades gracefully). */
 export async function gitStatus(rootPath: string): Promise<GitStatus> {
+  // Confinement guard (P20 HIGH-1): only a TRUE repo-root workspace is browsable — a
+  // subdir workspace would otherwise resolve the enclosing repo and leak files above
+  // the root. A non-repo (or subdir) → the graceful non-repo shape, never a leak.
+  if (!(await isRepoRoot(rootPath)))
+    return { isGitRepo: false, ahead: 0, behind: 0, files: [], truncated: false };
+
   let stdout: string;
   try {
     ({ stdout } = await execFileAsync(
       "git",
       ["status", "--porcelain=v1", "--branch", "-z", "-uall"],
-      { cwd: rootPath, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAXBUFFER, env: gitEnv() },
+      gitOpts(rootPath),
     ));
   } catch (e) {
     if (isNotARepo(e))
@@ -246,17 +309,15 @@ export async function gitDiff(
   opts: { cached?: boolean } = {},
 ): Promise<GitDiff> {
   const rel = sanitizePathspec(relPath);
+  // Same confinement guard as gitStatus (P20 HIGH-1) — refuse a subdir workspace so a
+  // diff can't reach the enclosing repo (belt-and-suspenders with GIT_LITERAL_PATHSPECS).
+  if (!(await isRepoRoot(rootPath))) throw new WorkspaceFsError("not a git repository", 400);
   const args = ["diff", "--no-color"];
   if (opts.cached) args.push("--cached");
   args.push("--", rel);
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync("git", args, {
-      cwd: rootPath,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: GIT_MAXBUFFER,
-      env: gitEnv(),
-    }));
+    ({ stdout } = await execFileAsync("git", args, gitOpts(rootPath)));
   } catch (e) {
     if (isNotARepo(e)) throw new WorkspaceFsError("not a git repository", 400);
     throw new WorkspaceFsError("could not compute diff", 500);

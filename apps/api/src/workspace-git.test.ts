@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceFsError } from "./workspace-fs";
@@ -77,6 +77,20 @@ describe("gitStatus (BRO-1666 Slice 2)", () => {
     expect(f?.x).toBe("A");
   });
 
+  test("refuses a SUBDIRECTORY workspace (P20 HIGH-1 confinement guard)", async () => {
+    const d = repo();
+    writeFileSync(join(d, "top.txt"), "a\n");
+    commit(d, "init");
+    writeFileSync(join(d, "top.txt"), "A\n"); // a change ABOVE the subdir
+    const sub = join(d, "sub");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "inner.txt"), "x\n");
+    // Browsing the subdir must NOT resolve the enclosing repo → no leak of top.txt.
+    const s = await gitStatus(sub);
+    expect(s.isGitRepo).toBe(false);
+    expect(s.files).toEqual([]);
+  });
+
   test("captures a rename's original path", async () => {
     const d = repo();
     writeFileSync(join(d, "old.txt"), "same content here\n");
@@ -133,5 +147,16 @@ describe("gitDiff (BRO-1666 Slice 2)", () => {
     await expect(gitDiff(d, "/etc/passwd")).rejects.toThrow(/relative/);
     await expect(gitDiff(d, "")).rejects.toThrow(/required/);
     await expect(gitDiff(d, "a\0b")).rejects.toThrow(WorkspaceFsError);
+  });
+
+  test("treats `:/` pathspec magic as a literal filename (P20 HIGH-1: GIT_LITERAL_PATHSPECS)", async () => {
+    const d = repo();
+    writeFileSync(join(d, "a.txt"), "one\n");
+    commit(d, "init");
+    writeFileSync(join(d, "a.txt"), "two\n"); // a real change exists in the repo
+    // Without GIT_LITERAL_PATHSPECS, `-- :/` would diff the WHOLE repo from its root;
+    // with it, `:/` is just a (non-existent) literal filename → empty diff.
+    const r = await gitDiff(d, ":/");
+    expect(r.diff).toBe("");
   });
 });
