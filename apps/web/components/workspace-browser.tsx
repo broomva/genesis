@@ -3,6 +3,7 @@
 import {
   ArrowLeft,
   ChevronRight,
+  ExternalLink,
   File as FileIcon,
   Folder,
   FolderGit2,
@@ -12,11 +13,22 @@ import {
   X,
 } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import { Streamdown } from "streamdown";
+import "streamdown/styles.css";
 
 import { Button } from "@/components/ui/button";
 import { SegmentedControl, SegmentedControlItem } from "@/components/ui/segmented-control";
-import { type DirListing, type FileContent, fetchDir, fetchFile } from "@/lib/files";
+import {
+  type DirListing,
+  type FileContent,
+  classifyFile,
+  fetchDir,
+  fetchFile,
+  parseFrontmatter,
+  rawFileUrl,
+  splitFrontmatter,
+} from "@/lib/files";
 import {
   type GitFileEntry,
   type GitStatusData,
@@ -221,23 +233,17 @@ function FsNodes({
   );
 }
 
-/** The open-file viewer — a plain, robust monospace code view (no highlighter
- *  dependency), with binary/truncated/empty notices. */
-function FileViewer({
-  workspaceId,
-  path,
-  onBack,
-}: {
-  workspaceId: string;
-  path: string;
-  onBack: () => void;
-}) {
-  const [state, setState] = useState<
-    | { status: "loading" }
-    | { status: "error"; error: string }
-    | { status: "ready"; file: FileContent }
-  >({ status: "loading" });
+type FileTextState =
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | { status: "ready"; file: FileContent };
+
+/** Fetch a file's TEXT contents when `enabled` (skipped for image/pdf, and for html
+ *  in rendered view). Aborts on unmount / dep change. */
+function useFileText(workspaceId: string, path: string, enabled: boolean): FileTextState | null {
+  const [state, setState] = useState<FileTextState | null>(null);
   useEffect(() => {
+    if (!enabled) return;
     const ctrl = new AbortController();
     setState({ status: "loading" });
     fetchFile(workspaceId, path, ctrl.signal)
@@ -249,7 +255,166 @@ function FileViewer({
         setState({ status: "error", error: e instanceof Error ? e.message : "failed to load" });
       });
     return () => ctrl.abort();
-  }, [workspaceId, path]);
+  }, [workspaceId, path, enabled]);
+  return state;
+}
+
+/** An "open in a new tab" affordance for binary / non-renderable files + a label. */
+function OpenRaw({ src, label }: { src: string; label: string }) {
+  return (
+    <div className="flex flex-col items-center gap-3 p-8 text-center">
+      <p className="text-muted-foreground text-sm italic">{label}</p>
+      <a
+        href={src}
+        target="_blank"
+        rel="noreferrer"
+        className="text-[var(--bv-blue-text)] inline-flex items-center gap-1.5 text-sm underline underline-offset-2"
+      >
+        <ExternalLink className="size-4" /> Open in a new tab
+      </a>
+    </div>
+  );
+}
+
+/** Render an image via <img> (SVG included — img-context SVG can't run scripts). */
+function ImageView({ src, alt }: { src: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <OpenRaw src={src} label="Couldn't display this image." />;
+  return (
+    <div className="flex min-h-full items-center justify-center p-4">
+      {/* Raw workspace bytes (dynamic, not a static asset) — next/image can't optimize it. */}
+      <img
+        src={src}
+        alt={alt}
+        className="max-h-full max-w-full object-contain"
+        onError={() => setFailed(true)}
+      />
+    </div>
+  );
+}
+
+/** The parsed YAML frontmatter of a markdown file, as a distinct metadata panel. */
+function FrontmatterPanel({ raw }: { raw: string }) {
+  const rows = parseFrontmatter(raw);
+  return (
+    <div className="border-border bg-[var(--bv-canvas-soft-2)] mb-4 rounded-lg border p-3">
+      <p className="text-muted-foreground mb-2 text-[0.65rem] font-semibold tracking-wider uppercase">
+        Frontmatter
+      </p>
+      {rows.length > 0 ? (
+        <dl className="grid grid-cols-[minmax(0,auto)_1fr] gap-x-3 gap-y-1 text-xs">
+          {rows.map((r) => (
+            <Fragment key={r.key}>
+              <dt className="text-muted-foreground font-mono">{r.key}</dt>
+              <dd className="text-foreground min-w-0 break-words">{r.value || "—"}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      ) : (
+        <pre className="text-foreground overflow-x-auto font-mono text-xs whitespace-pre-wrap">
+          {raw}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** Truncation notice shared across text renderers. */
+function TruncNote({ size }: { size: number }) {
+  return (
+    <p className="text-muted-foreground border-border border-t px-4 py-2 text-xs italic">
+      Truncated — showing the first {formatSize(256 * 1024)} of {formatSize(size)}.
+    </p>
+  );
+}
+
+/** Render fetched text per kind/view: markdown (frontmatter + Streamdown), highlighted
+ *  code, or plain monospace source; binary/empty/loading/error notices. */
+function TextContent({
+  text,
+  kind,
+  lang,
+  view,
+  rawUrl,
+}: {
+  text: FileTextState | null;
+  kind: "markdown" | "html" | "code" | "text";
+  lang?: string;
+  view: "rendered" | "source";
+  rawUrl: string;
+}) {
+  if (!text || text.status === "loading")
+    return (
+      <p className="text-muted-foreground flex items-center gap-1.5 p-4 text-xs">
+        <Loader2 className="size-3 animate-spin" /> Loading…
+      </p>
+    );
+  if (text.status === "error")
+    return <p className="text-[var(--bv-danger)] p-4 text-sm">{text.error}</p>;
+  const file = text.file;
+  if (file.binary)
+    return <OpenRaw src={rawUrl} label={`Binary file (${formatSize(file.size)}) — not shown.`} />;
+  if (file.content.length === 0)
+    return <p className="text-muted-foreground p-4 text-sm italic">Empty file.</p>;
+
+  const trunc = file.truncated ? <TruncNote size={file.size} /> : null;
+
+  // Markdown, rendered: frontmatter panel + streamdown body.
+  if (kind === "markdown" && view === "rendered") {
+    const { frontmatter, body } = splitFrontmatter(file.content);
+    return (
+      <div className="p-4">
+        {frontmatter ? <FrontmatterPanel raw={frontmatter} /> : null}
+        <div className="text-foreground text-[0.9rem] leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+          <Streamdown>{body}</Streamdown>
+        </div>
+        {trunc}
+      </div>
+    );
+  }
+  // Code, small + no stray fence: syntax-highlighted via a fenced block.
+  if (kind === "code" && lang && file.content.length < 100_000 && !file.content.includes("```")) {
+    return (
+      <div className="p-4 text-xs">
+        <Streamdown>{`\`\`\`${lang}\n${file.content}\n\`\`\``}</Streamdown>
+        {trunc}
+      </div>
+    );
+  }
+  // Plain source (text, large/edge code, markdown-source, html-source).
+  return (
+    <>
+      <pre className="text-foreground overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre">
+        {file.content}
+      </pre>
+      {trunc}
+    </>
+  );
+}
+
+/** The open-file viewer — routes by file type (BRO-1667): markdown (frontmatter +
+ *  rendered body), images/SVG (<img>), HTML (sandboxed iframe), highlighted code, or
+ *  plain text. Markdown + HTML get a Rendered/Source toggle. */
+function FileViewer({
+  workspaceId,
+  path,
+  onBack,
+}: {
+  workspaceId: string;
+  path: string;
+  onBack: () => void;
+}) {
+  const cls = classifyFile(path);
+  const [view, setView] = useState<"rendered" | "source">("rendered");
+  const rawUrl = rawFileUrl(workspaceId, path);
+  const canToggle = cls.kind === "markdown" || cls.kind === "html";
+  // Text is needed for md/code/text, and for html only in Source view.
+  const wantText =
+    cls.kind === "markdown" ||
+    cls.kind === "code" ||
+    cls.kind === "text" ||
+    (cls.kind === "html" && view === "source");
+  const text = useFileText(workspaceId, path, wantText);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="ws-file-view">
@@ -257,40 +422,48 @@ function FileViewer({
         <Button size="icon-sm" variant="ghost" onClick={onBack} aria-label="Back to files">
           <ArrowLeft className="size-4" />
         </Button>
-        <span className="text-foreground min-w-0 flex-1 truncate font-mono text-xs" title={path}>
+        <span
+          className="text-foreground min-w-0 flex-1 truncate font-mono text-xs"
+          title={path}
+          data-testid="ws-file-path"
+        >
           {path}
         </span>
+        {canToggle ? (
+          <SegmentedControl
+            type="single"
+            value={view}
+            onValueChange={(v) => {
+              if (v === "rendered" || v === "source") setView(v);
+            }}
+            aria-label="View mode"
+            className="shrink-0"
+          >
+            <SegmentedControlItem value="rendered" className="h-6 px-2 text-xs">
+              Rendered
+            </SegmentedControlItem>
+            <SegmentedControlItem value="source" className="h-6 px-2 text-xs">
+              Source
+            </SegmentedControlItem>
+          </SegmentedControl>
+        ) : null}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {state.status === "loading" ? (
-          <p className="text-muted-foreground flex items-center gap-1.5 p-4 text-xs">
-            <Loader2 className="size-3 animate-spin" /> Loading…
-          </p>
-        ) : null}
-        {state.status === "error" ? (
-          <p className="text-[var(--bv-danger)] p-4 text-sm">{state.error}</p>
-        ) : null}
-        {state.status === "ready" ? (
-          state.file.binary ? (
-            <p className="text-muted-foreground p-4 text-sm italic">
-              Binary file ({formatSize(state.file.size)}) — not shown.
-            </p>
-          ) : state.file.content.length === 0 ? (
-            <p className="text-muted-foreground p-4 text-sm italic">Empty file.</p>
-          ) : (
-            <>
-              <pre className="text-foreground overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre">
-                {state.file.content}
-              </pre>
-              {state.file.truncated ? (
-                <p className="text-muted-foreground border-border border-t px-4 py-2 text-xs italic">
-                  Truncated — showing the first {formatSize(256 * 1024)} of{" "}
-                  {formatSize(state.file.size)}.
-                </p>
-              ) : null}
-            </>
-          )
-        ) : null}
+        {cls.kind === "image" ? (
+          <ImageView src={rawUrl} alt={path} />
+        ) : cls.kind === "pdf" ? (
+          <OpenRaw src={rawUrl} label="PDF document." />
+        ) : cls.kind === "html" && view === "rendered" ? (
+          <iframe
+            title={path}
+            sandbox=""
+            src={rawUrl}
+            className="h-full w-full border-0 bg-white"
+            data-testid="ws-html-frame"
+          />
+        ) : (
+          <TextContent text={text} kind={cls.kind} lang={cls.lang} view={view} rawUrl={rawUrl} />
+        )}
       </div>
     </div>
   );

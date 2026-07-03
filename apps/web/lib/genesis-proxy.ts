@@ -35,6 +35,45 @@ export async function proxyGenesisGetJson(path: string, req: Request): Promise<R
   }
 }
 
+/** GET a RAW (bytes) resource from the genesis engine and STREAM it through,
+ *  preserving the content-type + the security headers (BRO-1667 raw file endpoint).
+ *  A non-OK upstream (JSON error) is passed through as-is. `path` must start with "/".
+ *  The caller's authorizePrincipal must already have run. */
+export async function proxyGenesisGetRaw(path: string, req: Request): Promise<Response> {
+  try {
+    const upstream = await fetch(`${GENESIS_URL}${path}`, {
+      headers: { ...(GENESIS_TOKEN ? { authorization: `Bearer ${GENESIS_TOKEN}` } : {}) },
+      signal: req.signal,
+    });
+    if (!upstream.ok) {
+      // Error bodies are JSON (the engine's safe messages) — relay verbatim.
+      return new Response(await upstream.text(), {
+        status: upstream.status,
+        headers: {
+          "content-type": upstream.headers.get("content-type") ?? "application/json; charset=utf-8",
+        },
+      });
+    }
+    // Stream the bytes through, carrying the engine's type + hardening headers so the
+    // browser can't sniff or execute a mislabeled / HTML / SVG file.
+    const headers = new Headers();
+    for (const h of [
+      "content-type",
+      "content-length",
+      "x-content-type-options",
+      "content-security-policy",
+      "content-disposition",
+      "cache-control",
+    ]) {
+      const v = upstream.headers.get(h);
+      if (v) headers.set(h, v);
+    }
+    return new Response(upstream.body, { status: upstream.status, headers });
+  } catch (err) {
+    return upstreamError(err);
+  }
+}
+
 /** POST a JSON body to the genesis engine and pass the body + status through
  *  (BRO-1576). `path` must start with "/". The caller's authorizePrincipal must
  *  already have run; this only adds the server→engine bearer. */
