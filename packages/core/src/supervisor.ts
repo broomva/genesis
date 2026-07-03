@@ -11,6 +11,7 @@
 import { existsSync } from "node:fs";
 import {
   type ExecutionHost,
+  type HostLease,
   type HostProvider,
   LocalHost,
   StaticHostProvider,
@@ -102,6 +103,11 @@ export interface SupervisorConfig {
   runners?: Record<string, RunnerFn>;
   controls?: Record<string, EngineControl>;
   defaultEngine?: string;
+  /** Auto-generate a semantic thread title after the first turn (BRO-1665) via a
+   *  small `haiku` print call. Default OFF — the API boot enables it in production;
+   *  keeping it off by default means tests (and any embedder) don't pay for an extra
+   *  LLM call or see the title mutate under them unless they opt in. */
+  generateTitles?: boolean;
   /** Per-event observability tap (BRO-1524): every AgentEvent of every turn,
    *  tagged with the session id. The boot wires this for ALL turns now that both
    *  engines coexist (BRO-1620) — interactive turns get both this AgentEvent trace
@@ -181,9 +187,43 @@ export function deriveTitle(text: string): string | undefined {
   return chars.length > 48 ? `${chars.slice(0, 48).join("").trimEnd()}…` : words;
 }
 
+/** The model used to GENERATE a semantic thread title (BRO-1665) — a small, fast one
+ *  (haiku) via the print engine, independent of the thread's own engine. */
+export const TITLE_MODEL = "haiku";
+
+/** Build the titling prompt (BRO-1665). SELF-CONTAINED — the conversation is inlined
+ *  (both sides truncated), so the model never needs a tool, and it's told to output
+ *  only the title. Keeps the call a single cheap completion. */
+export function buildTitlePrompt(userText: string, replyText: string): string {
+  const u = userText.trim().slice(0, 600);
+  const r = replyText.trim().slice(0, 400);
+  const instruction =
+    "Generate a concise 3-6 word title summarizing the topic of the conversation below. " +
+    "Output ONLY the title — no quotes, no trailing punctuation, no preamble — and do not use any tools.";
+  return `${instruction}\n\nUser: ${u}\n${r ? `Assistant: ${r}\n` : ""}`;
+}
+
+/** Clean a model-produced title (BRO-1665): first line only, drop a "Title:" lead +
+ *  wrapping quotes + trailing punctuation, collapse whitespace, cap ~60 code points.
+ *  Empty → undefined (the caller keeps the heuristic title). */
+export function sanitizeTitle(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let t = (raw.trim().split("\n")[0] ?? "").trim();
+  t = t.replace(/^title:\s*/i, ""); // a "Title: X" lead
+  t = t.replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, ""); // wrapping quotes/backticks
+  t = t
+    .replace(/[.。!?]+$/u, "")
+    .replace(/\s+/g, " ")
+    .trim(); // trailing punctuation + collapse
+  if (!t) return undefined;
+  const chars = [...t];
+  return chars.length > 60 ? `${chars.slice(0, 60).join("").trimEnd()}…` : t;
+}
+
 export class Supervisor {
   private readonly store: Store;
   private readonly runners: Record<string, RunnerFn>;
+  private readonly generateTitles: boolean;
   private readonly controls: Record<string, EngineControl>;
   private readonly defaultEngine: string;
   private readonly trace?: (sessionId: string, event: AgentEvent) => void;
@@ -226,6 +266,7 @@ export class Supervisor {
     // defaultEngine must resolve to a registered runner (e.g. interactive requested
     // but unavailable on a microVM host → fall back to print).
     if (!this.runners[this.defaultEngine]) this.defaultEngine = "print";
+    this.generateTitles = cfg.generateTitles ?? false;
     this.trace = cfg.trace;
     this.hostProvider =
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
@@ -482,6 +523,9 @@ export class Supervisor {
     // Derive a thread title from the first user turn (BRO-1592) — persisted with
     // the phase write below, so the drawer shows a stable label instead of a
     // running last-text preview. Never overwrites a title once set (or renamed).
+    // This is the INSTANT provisional; an LLM title upgrades it after the turn
+    // (BRO-1665), fired once — on the turn that first titles the thread.
+    const titledThisTurn = !session.title;
     if (!session.title) session.title = deriveTitle(text);
     // Bind the engine STICKY on the first turn (BRO-1620), reused for every later
     // turn — so flipping the global default never reroutes a thread with a live
@@ -595,6 +639,14 @@ export class Supervisor {
         reasoning: result.state.reasoning?.trim() ? result.state.reasoning : undefined,
       });
 
+      // Upgrade the instant heuristic title to an LLM-generated one (BRO-1665) — once,
+      // on the first turn, with a real reply to summarize. Fire-and-forget: it must
+      // never add latency to (or fail) the turn; the drawer poll surfaces the new
+      // title a moment later. A failure keeps the heuristic.
+      if (this.generateTitles && titledThisTurn && reply && result.state.lastText !== undefined) {
+        void this.generateTitleAsync(threadId, text, reply);
+      }
+
       // Keep a per-session worktree across turns (resume continuity); only
       // discard a one-shot per-run worktree.
       if (result.worktreePath && !result.worktreePersistent) {
@@ -635,6 +687,53 @@ export class Supervisor {
       throw e;
     } finally {
       await lease.release?.().catch((e) => console.error(`[genesis] host release failed: ${e}`));
+    }
+  }
+
+  /** Generate a semantic LLM title for a thread and write it back (BRO-1665).
+   *  Best-effort, fired-and-forgotten from the first turn: a fresh `haiku` one-shot
+   *  via the PRINT engine (independent of the thread's own engine), the conversation
+   *  inlined so it needs no tools + no worktree. On success it re-reads the session
+   *  and writes ONLY the title — and only while the title is still the heuristic, so a
+   *  user rename (or a re-fire) is never clobbered. Any failure keeps the heuristic. */
+  private async generateTitleAsync(
+    threadId: string,
+    userText: string,
+    replyText: string,
+  ): Promise<void> {
+    const print = this.runners.print;
+    if (!print) return;
+    let lease: HostLease | undefined;
+    try {
+      const session = await this.store.findSessionByThread(threadId);
+      if (!session) return;
+      const workspace = this.workspaceRegistry.get(session.workspaceId) ?? this.defaultWorkspace;
+      lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+      const result = await print({
+        prompt: buildTitlePrompt(userText, replyText),
+        cwd: workspace.rootPath,
+        host: lease.host,
+        model: TITLE_MODEL, // small + fast (haiku), independent of the thread's engine
+        worktree: false, // titling needs no isolation
+        remoteCwd: lease.remoteCwd ?? this.remoteCwd,
+        extraArgs: this.extraArgs,
+      });
+      const title = sanitizeTitle(result.state.lastText);
+      if (!title) return;
+      // Re-read: the session may have advanced. Only upgrade while the title is STILL
+      // the heuristic we set — never clobber a user rename that landed meanwhile, and
+      // stay idempotent if this somehow fires twice.
+      const fresh = await this.store.findSessionByThread(threadId);
+      if (!fresh || fresh.title !== deriveTitle(userText)) return;
+      fresh.title = title;
+      await this.store.upsertSession(fresh);
+      console.log(`[genesis] title ✓ thread=${threadId} "${title}"`);
+    } catch (e) {
+      console.error(
+        `[genesis] title generation failed (thread=${threadId}): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      await lease?.release?.().catch(() => {});
     }
   }
 
