@@ -1,8 +1,9 @@
 "use client";
 
-import { FolderGit2, FolderPlus, GitBranch, Plus, Trash2 } from "lucide-react";
+import { FolderGit2, FolderPlus, FolderSearch, GitBranch, Plus, Trash2 } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
+import { FolderPicker } from "@/components/folder-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,6 +54,8 @@ export function WorkspacesManager({
   const [addingUrl, setAddingUrl] = useState(false);
   const [path, setPath] = useState("");
   const [addingPath, setAddingPath] = useState(false);
+  // The filesystem navigator (BRO-1673) — browse-to-pick instead of typing a path.
+  const [browsing, setBrowsing] = useState(false);
   // Track in-flight mutations PER id/name (P20 Forge N1): a single-slot busy
   // marker would re-enable an already-clicked row the moment a second row's
   // action starts, opening a double-submit window. Sets keep each row's spinner
@@ -283,11 +286,38 @@ export function WorkspacesManager({
       </form>
 
       {/* Add-by-absolute-path (BRO-1663) — owner-only; register an EXISTING folder
-          outside the discovery allow-root (e.g. ~/broomva). The engine sandboxes the
-          path to its add-roots (default $HOME) + resolves symlinks; here we only block
+          outside the discovery allow-root (e.g. ~/broomva). Two ways in: browse to it
+          with the filesystem navigator (BRO-1673), or type the path. The engine sandboxes
+          the path to its add-roots (default $HOME) + resolves symlinks; here we only block
           an empty submit. */}
-      <form onSubmit={doAddByPath} className="space-y-1.5 pt-1">
-        <label htmlFor="ws-path" className="text-muted-foreground text-xs">
+      <div className="space-y-1.5 pt-1">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground text-xs">Add an existing folder</span>
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            className="text-muted-foreground -my-1 shrink-0 gap-1.5"
+            aria-expanded={browsing}
+            onClick={() => setBrowsing((v) => !v)}
+          >
+            <FolderSearch className="size-3.5" />
+            {browsing ? "Hide browser" : "Browse…"}
+          </Button>
+        </div>
+        {browsing ? (
+          <FolderPicker
+            onAddByPath={onAddByPath}
+            onAdded={() => {
+              setBrowsing(false);
+              void refetch();
+            }}
+          />
+        ) : null}
+      </div>
+
+      <form onSubmit={doAddByPath} className="space-y-1.5">
+        <label htmlFor="ws-path" className="sr-only">
           Add an existing folder by path
         </label>
         <div className="flex items-center gap-1.5">
@@ -300,7 +330,7 @@ export function WorkspacesManager({
               autoComplete="off"
               autoCapitalize="none"
               spellCheck={false}
-              placeholder="/home/agent/broomva"
+              placeholder="…or type an absolute path"
               value={path}
               disabled={addingPath}
               onChange={(e) => setPath(e.target.value)}

@@ -22,6 +22,7 @@ import {
   readWorkspaceFile,
   readWorkspaceFileRaw,
 } from "./workspace-fs";
+import { browseForAdd } from "./workspace-browse";
 import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
 import {
   WorkspaceValidationError,
@@ -252,6 +253,24 @@ export function build(opts: BuildOpts) {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
     const registered = new Set((await supervisor.listWorkspaces()).map((w) => w.id));
     return c.json({ available: availableWorkspaces(opts.projectsRoot, registered) });
+  });
+
+  // Filesystem navigator for the add-by-path picker (BRO-1673). Lists the immediate
+  // subdirectories of a directory under the add-roots (pathAddRoots(), default $HOME),
+  // so the owner can browse to a folder and register it instead of typing a path.
+  // OWNER-ONLY at the BFF (it surfaces absolute paths — same trust model as add-by-path
+  // BRO-1663); the bearer gate applies here. The engine enforces the HARD realpath
+  // sandbox — a path outside the roots / a symlink escape is a safe 400, never echoing
+  // an unexpected fs path.
+  app.get("/workspaces/browse", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    try {
+      return c.json(browseForAdd(c.req.query("path"), pathAddRoots()));
+    } catch (e) {
+      if (e instanceof WorkspaceValidationError) return c.json({ error: e.message }, 400);
+      console.error(`[genesis] browse failed: ${e instanceof Error ? e.stack : e}`);
+      return c.json({ error: "could not browse the filesystem" }, 500);
+    }
   });
 
   // Register a workspace at RUNTIME (BRO-1629) — no restart. Two safe add shapes,

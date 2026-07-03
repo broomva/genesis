@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { build } from "./server";
 
 // The default workspace's DISPLAY NAME is operator-configurable (BRO-1672,
@@ -41,5 +43,43 @@ describe("default workspace name (BRO-1672)", () => {
     const res = await app.fetch(new Request("http://x/workspaces"));
     const body = (await res.json()) as { defaultWorkspace: string };
     expect(body.defaultWorkspace).toBe("ws-default");
+  });
+});
+
+describe("GET /workspaces/browse route (BRO-1673)", () => {
+  const dirs: string[] = [];
+  const prevRoots = process.env.GENESIS_WORKSPACE_PATH_ROOTS;
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+    if (prevRoots === undefined) delete process.env.GENESIS_WORKSPACE_PATH_ROOTS;
+    else process.env.GENESIS_WORKSPACE_PATH_ROOTS = prevRoots;
+  });
+
+  /** A tmp add-root wired via GENESIS_WORKSPACE_PATH_ROOTS (what pathAddRoots() reads). */
+  function addRoot(): string {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "genesis-browse-route-")));
+    dirs.push(d);
+    process.env.GENESIS_WORKSPACE_PATH_ROOTS = d;
+    return d;
+  }
+
+  test("lists subdirectories under the add-root", async () => {
+    const r = addRoot();
+    mkdirSync(join(r, "proj"));
+    const { app } = build({ workspaceRoot: tmpdir() });
+    const res = await app.fetch(new Request(`http://x/workspaces/browse?path=${encodeURIComponent(r)}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { path: string; entries: { name: string }[] };
+    expect(body.path).toBe(r);
+    expect(body.entries.map((e) => e.name)).toEqual(["proj"]);
+  });
+
+  test("a path outside the add-roots → a safe 400 (never a 500)", async () => {
+    addRoot();
+    const { app } = build({ workspaceRoot: tmpdir() });
+    const res = await app.fetch(new Request("http://x/workspaces/browse?path=%2Fetc"));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("outside the allowed roots");
   });
 });
