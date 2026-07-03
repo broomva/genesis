@@ -300,6 +300,10 @@ else if (requestedDefault === "codex" && !codexAvailable) {
 
 const { app, websocket } = build({
   workspaceRoot,
+  // Display name for the built-in default workspace (BRO-1672) — label the root
+  // meaningfully ("root", a project name) instead of the "genesis" literal. Blank
+  // → "genesis" (backward compatible). Never affects the id (ws-default) or bindings.
+  workspaceName: process.env.GENESIS_WORKSPACE_NAME,
   // Selectable workspaces beyond the default (BRO-1627) — empty unless an operator
   // sets GENESIS_PROJECTS_ROOT / GENESIS_WORKSPACES (then the picker self-shows).
   // These SEED the repository below when it's empty (BRO-1629).

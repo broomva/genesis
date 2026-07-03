@@ -55,6 +55,11 @@ function reasoningNote(
 
 export interface BuildOpts {
   workspaceRoot: string;
+  /** Display name for the built-in default workspace (id `ws-default`). Env-driven
+   *  (GENESIS_WORKSPACE_NAME) so an operator can label the root something meaningful
+   *  ("root", the project name) instead of the "genesis" literal. Blank/whitespace →
+   *  falls back to "genesis" (backward compatible). Never affects the id or bindings. */
+  workspaceName?: string;
   extraArgs?: string[];
   /** When set, /message requires `Authorization: Bearer <token>` (or ?token=). */
   token?: string;
@@ -102,7 +107,12 @@ export interface BuildOpts {
 export function build(opts: BuildOpts) {
   const hub = new Hub();
   const supervisor = new Supervisor({
-    defaultWorkspace: { id: "ws-default", name: "genesis", rootPath: opts.workspaceRoot },
+    defaultWorkspace: {
+      id: "ws-default",
+      // Operator-labelled (GENESIS_WORKSPACE_NAME) — blank/whitespace → "genesis".
+      name: opts.workspaceName?.trim() || "genesis",
+      rootPath: opts.workspaceRoot,
+    },
     workspaces: opts.workspaces,
     workspaceRepository: opts.workspaceRepository,
     hostProvider: opts.hostProvider,
