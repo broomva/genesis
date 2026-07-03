@@ -734,7 +734,11 @@ export class Supervisor {
         model: TITLE_MODEL, // small + fast (haiku), independent of the thread's engine
         worktree: false, // titling needs no isolation
         remoteCwd: lease.remoteCwd ?? this.remoteCwd,
-        extraArgs: this.extraArgs,
+        // Deliberately DO NOT forward `this.extraArgs` (P20/CodeRabbit): those carry
+        // the real agent's permission flags (e.g. --dangerously-skip-permissions). The
+        // title prompt inlines UNTRUSTED user/assistant text, so a prompt injection must
+        // not be able to escalate into tool/file access here. Default permissions +
+        // the "do not use any tools" instruction keep this a pure text completion.
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
