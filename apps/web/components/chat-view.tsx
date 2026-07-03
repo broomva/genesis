@@ -694,8 +694,14 @@ export function ChatView({
   //     same blocked transcript → the old Retry was a visible no-op.
   //   • transient (dropped stream / engine unconfirmable) — reconcile() refetches the
   //     durable status + transcript; re-dispatching there could double-run a live turn.
+  // Self-contained double-run guard (P20): only re-dispatch when the UI is actually
+  // in the interrupted-error state. `runMode === "error"` implies no live stream —
+  // deriveRunMode returns "streaming" before it ever reaches the blocked→error branch
+  // — so this can't double-run a turn that's still live server-side, even in the brief
+  // window after regenerate() where `interrupted` (serverPhase "blocked") is still true
+  // but a stream has started, or if a future caller wires retryRun outside the banners.
   const retryRun = useCallback(() => {
-    if (interrupted && messages.length > 0) {
+    if (interrupted && runMode === "error" && messages.length > 0) {
       void regenerate({
         body: {
           model: modelToBody(effModel),
@@ -710,6 +716,7 @@ export function ChatView({
     reconnect();
   }, [
     interrupted,
+    runMode,
     messages.length,
     regenerate,
     reconnect,
