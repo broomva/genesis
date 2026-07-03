@@ -1,0 +1,137 @@
+<!doctype html>
+<!--
+  PR explainer — BRO-1666 Slice 3: Commit & Push (owner-only write).
+  P18 · Audience: human-read; presentation carries the read-vs-write trust model.
+  Category-C, self-contained. PR #93.
+  meta: { pr: 93, ticket: "BRO-1666", slice: 3, date: "2026-07-03" }
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR #93 — Commit &amp; Push, owner-only (BRO-1666 · Slice 3)</title>
+    <style>
+      :root {
+        --bg: #0e1016; --panel: #161a24; --panel-2: #1d2230; --ink: #e6e9f0;
+        --muted: #99a1b3; --line: #2a3040; --blue: #6ea8fe; --green: #57d38c;
+        --amber: #f0b866; --red: #f2708a; --violet: #b79bff;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: radial-gradient(1200px 700px at 70% -10%, #1a2030 0%, var(--bg) 60%);
+        color: var(--ink); font-family: var(--sans); line-height: 1.6; padding: clamp(1rem, 3vw, 3rem); }
+      .wrap { max-width: 940px; margin: 0 auto; }
+      header.hero { border: 1px solid var(--line); border-radius: 18px; padding: 1.6rem 1.8rem;
+        background: linear-gradient(160deg, var(--panel) 0%, #12151f 100%); }
+      .tag { display: inline-flex; gap: .4rem; align-items: center; font-family: var(--mono); font-size: .72rem;
+        letter-spacing: .04em; text-transform: uppercase; color: var(--blue); border: 1px solid var(--line);
+        border-radius: 999px; padding: .2rem .6rem; }
+      h1 { font-size: clamp(1.4rem, 3.5vw, 2rem); margin: .8rem 0 .3rem; letter-spacing: -.02em; }
+      h2 { font-size: 1.15rem; margin: 2.4rem 0 .8rem; letter-spacing: -.01em; display: flex; align-items: center; gap: .6rem; }
+      h2::before { content: ""; width: 8px; height: 22px; border-radius: 3px; background: linear-gradient(var(--blue), var(--violet)); display: inline-block; }
+      p.lede { color: var(--muted); font-size: 1.02rem; margin: .4rem 0 0; }
+      a { color: var(--blue); }
+      code { font-family: var(--mono); font-size: .86em; background: var(--panel-2); padding: .1rem .38rem; border-radius: 6px; border: 1px solid var(--line); }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.2rem; }
+      .card h3 { margin: 0 0 .4rem; font-size: .95rem; }
+      .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+      .chip { font-family: var(--mono); font-size: .72rem; color: var(--green); }
+      figure { margin: 1.2rem 0; }
+      figcaption { color: var(--muted); font-size: .82rem; text-align: center; margin-top: .5rem; }
+      svg { width: 100%; height: auto; display: block; }
+      table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+      td code { white-space: nowrap; }
+      .rej { color: var(--red); font-family: var(--mono); font-size: .8rem; }
+      .acc { color: var(--green); font-family: var(--mono); font-size: .8rem; }
+      ul.clean { list-style: none; padding: 0; margin: .6rem 0; }
+      ul.clean li { padding: .3rem 0 .3rem 1.5rem; position: relative; color: var(--muted); }
+      ul.clean li::before { content: "▸"; color: var(--blue); position: absolute; left: .3rem; }
+      footer { margin-top: 2.6rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="tag">● PR #93 · BRO-1666 · Slice 3</span>
+        <h1>Commit &amp; Push — the write path, owner-only</h1>
+        <p class="lede">
+          The mobile git client can now <strong>write</strong>: a composer stages all changes,
+          commits with a message, and pushes to the branch's upstream. Slices 1–2 read; this one
+          mutates the user's real repo — so the gate is stricter.
+        </p>
+      </header>
+
+      <h2>The trust boundary: read ≠ write</h2>
+      <p>
+        Every prior route allowed <em>two</em> principals — a human session <strong>or</strong> the
+        machine agent token (so the agent can dogfood by reading files/status/diff). Commit&nbsp;&amp;&nbsp;Push
+        is different: it runs <code>git</code> in the user's repo and can push to their real remote.
+        So the BFF draws a line — the same posture as BRO-1663's add-by-path:
+      </p>
+      <div class="grid">
+        <div class="card"><h3>Reads → agent OK <span class="chip">files · status · diff</span></h3>
+          <p>Human session <strong>or</strong> <code>X-Agent-Token</code>. The agent operates + dogfoods.</p></div>
+        <div class="card"><h3>Write → owner only <span class="chip">commit · push</span></h3>
+          <p>The agent principal is <strong>refused (403)</strong>. Only a human Better Auth session may commit/push.</p></div>
+      </div>
+
+      <h2>Where the write is gated + defended</h2>
+      <figure>
+        <svg viewBox="0 0 900 250" role="img" aria-label="Commit and push gating">
+          <defs>
+            <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe"/></marker>
+            <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#f2708a"/></marker>
+            <style>
+              .box{fill:#161a24;stroke:#2a3040;stroke-width:1.5}.lbl{fill:#e6e9f0;font:600 13px ui-sans-serif,system-ui}
+              .sub{fill:#99a1b3;font:11px ui-monospace,monospace}.fl{stroke:#6ea8fe;stroke-width:2;fill:none;marker-end:url(#a)}
+              .no{stroke:#f2708a;stroke-width:2;fill:none;stroke-dasharray:5 4;marker-end:url(#r)}
+            </style>
+          </defs>
+          <rect class="box" x="20" y="96" width="150" height="60" rx="12"/><text x="34" y="122" class="lbl">CommitBox</text><text x="34" y="140" class="sub">message + push</text>
+          <rect class="box" x="250" y="70" width="210" height="112" rx="12"/><text x="264" y="96" class="lbl">BFF /git/commit</text>
+          <text x="264" y="118" class="sub">authorizePrincipal</text><text x="264" y="138" class="sub" fill="#f2708a">asAgent → 403</text><text x="264" y="158" class="sub" fill="#57d38c">human → proxy</text>
+          <rect class="box" x="540" y="60" width="340" height="60" rx="12"/><text x="556" y="86" class="lbl">gitCommit (fixed argv)</text><text x="556" y="106" class="sub">isRepoRoot guard · message validated</text>
+          <rect class="box" x="540" y="134" width="340" height="60" rx="12"/><text x="556" y="160" class="lbl" fill="#f0b866">add -A → commit -m → push</text><text x="556" y="180" class="sub">runs the repo's hooks (gitleaks) · SIGKILL</text>
+          <path class="fl" d="M170 126 L246 126"/>
+          <path class="fl" d="M460 110 L536 96"/><path class="fl" d="M710 120 L710 132"/>
+          <text x="150" y="205" class="sub" fill="#f2708a">agent token</text><path class="no" d="M250 200 L200 200"/>
+        </svg>
+        <figcaption>The owner gate lives at the BFF (agent → 403). The engine keeps the blast radius tight even for the human: fixed argv, repo-root confinement, validated message, hooks as the secret-scan net.</figcaption>
+      </figure>
+
+      <h2>Commit-message injection: neutralized</h2>
+      <p>The message is the only free-text client input. It reaches git as a <strong>single <code>-m</code> argv element</strong> via <code>execFile</code> (no shell), so it can never become a flag or a command.</p>
+      <table>
+        <thead><tr><th>Message</th><th>Outcome</th></tr></thead>
+        <tbody>
+          <tr><td><code>--amend</code> · <code>--no-verify</code> · <code>-F/etc/passwd</code></td><td class="acc">✓ literal commit message (unit-tested) — not a flag</td></tr>
+          <tr><td><code>$(rm -rf ~)</code> · backticks</td><td class="acc">✓ literal text — <code>execFile</code>, no shell</td></tr>
+          <tr><td>empty / whitespace / non-string</td><td class="rej">✗ 400 "a commit message is required"</td></tr>
+          <tr><td>&gt; 4000 chars</td><td class="rej">✗ 400 "too long"</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Other guards</h2>
+      <div class="grid">
+        <div class="card"><h3>Push target</h3><p><code>git push</code> with <strong>no refspec</strong> → only the branch's <em>configured</em> upstream. A client can't name a remote or branch.</p></div>
+        <div class="card"><h3>Confinement</h3><p>Reuses the Slice-2 <code>isRepoRoot</code> guard — a subdir workspace can't commit into the enclosing repo (unit-tested).</p></div>
+        <div class="card"><h3>Hooks = safety net</h3><p><code>add -A</code> stages everything, so the owner's <strong>gitleaks pre-commit</strong> runs (no <code>--no-verify</code>) — a secret-bearing commit fails <em>safe</em>.</p></div>
+        <div class="card"><h3>Honest failures</h3><p>A commit that lands but can't push returns <code>{committed:true, pushError}</code> — the work is never silently lost.</p></div>
+      </div>
+
+      <h2>Validation</h2>
+      <ul class="clean">
+        <li>+7 git-module tests (real repo + local <strong>bare remote</strong> — commit+push, literal flag-message, reject matrix, nothing-to-commit, push-fail, subdir-refused) + 2 client tests · full suite <strong>661 pass / 0 fail</strong>.</li>
+        <li>Typecheck + Biome clean · <code>next build</code> OK (commit route present).</li>
+        <li>P20 adversarial review focused on the owner-gate (verdict on the PR).</li>
+        <li>Post-merge dogfood: commit+push against a <strong>throwaway</strong> repo (never the real <code>~/broomva</code>) + a BFF owner-gate probe (agent token → 403).</li>
+      </ul>
+
+      <footer>PR&nbsp;#93 · <code>feat/bro-1666-commit-push</code> → <code>main</code> · genesis. Follows <a href="./PR-91.html">PR-91</a> + <a href="./PR-92.html">PR-92</a>.</footer>
+    </div>
+  </body>
+</html>
