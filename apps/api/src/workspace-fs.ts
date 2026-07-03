@@ -18,15 +18,7 @@
 // deployment (repo on a remote/sandbox box) would need a host.exec-based listing +
 // host.readFile; that is a Slice-1-follow-up, not required for the current deploy.
 
-import {
-  closeSync,
-  openSync,
-  readFileSync,
-  readSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
 /** A rejected client request whose message is SAFE to echo (it never contains an
@@ -296,5 +288,21 @@ export function readWorkspaceFileRaw(rootPath: string, relPath: unknown): RawFil
   if (st.isDirectory()) throw new WorkspaceFsError("path is a directory", 400);
   if (!st.isFile()) throw new WorkspaceFsError("not a regular file", 400);
   if (st.size > MAX_RAW_BYTES) throw new WorkspaceFsError("file is too large to display", 413);
-  return { bytes: readFileSync(abs), contentType: contentTypeFor(rel), size: st.size };
+  // BOUNDED read (P20 LOW-2): allocate + read at most `size` (≤ cap) bytes via readSync
+  // rather than an unbounded `readFileSync` that trusts `st.size` — so a file that GROWS
+  // between the stat and the read can never be read past the cap (it's truncated to the
+  // capped buffer instead). `size` is the stat size, which the response reflects.
+  const bytes = Buffer.alloc(st.size);
+  const fd = openSync(abs, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = bytes.length === 0 ? 0 : readSync(fd, bytes, 0, bytes.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    bytes: bytesRead === bytes.length ? bytes : bytes.subarray(0, bytesRead),
+    contentType: contentTypeFor(rel),
+    size: st.size,
+  };
 }
