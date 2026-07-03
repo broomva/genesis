@@ -1,0 +1,164 @@
+<!doctype html>
+<!--
+  PR explainer — BRO-1666 Slice 2: workspace Changes tab (git status + diff).
+  P18 · Audience: human-read, presentation carries the security model (argument-
+  injection defense + git-exec boundaries). Category-C, self-contained. PR #92.
+  meta: { pr: 92, ticket: "BRO-1666", slice: 2, date: "2026-07-03" }
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PR #92 — Changes tab: git status + diff (BRO-1666 · Slice 2)</title>
+    <style>
+      :root {
+        --bg: #0e1016; --panel: #161a24; --panel-2: #1d2230; --ink: #e6e9f0;
+        --muted: #99a1b3; --line: #2a3040; --blue: #6ea8fe; --green: #57d38c;
+        --amber: #f0b866; --red: #f2708a; --violet: #b79bff;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: radial-gradient(1200px 700px at 70% -10%, #1a2030 0%, var(--bg) 60%);
+        color: var(--ink); font-family: var(--sans); line-height: 1.6; padding: clamp(1rem, 3vw, 3rem); }
+      .wrap { max-width: 940px; margin: 0 auto; }
+      header.hero { border: 1px solid var(--line); border-radius: 18px; padding: 1.6rem 1.8rem;
+        background: linear-gradient(160deg, var(--panel) 0%, #12151f 100%); }
+      .tag { display: inline-flex; gap: .4rem; align-items: center; font-family: var(--mono);
+        font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; color: var(--blue);
+        border: 1px solid var(--line); border-radius: 999px; padding: .2rem .6rem; }
+      h1 { font-size: clamp(1.4rem, 3.5vw, 2rem); margin: .8rem 0 .3rem; letter-spacing: -.02em; }
+      h2 { font-size: 1.15rem; margin: 2.4rem 0 .8rem; letter-spacing: -.01em; display: flex; align-items: center; gap: .6rem; }
+      h2::before { content: ""; width: 8px; height: 22px; border-radius: 3px; background: linear-gradient(var(--blue), var(--violet)); display: inline-block; }
+      p.lede { color: var(--muted); font-size: 1.02rem; margin: .4rem 0 0; }
+      a { color: var(--blue); }
+      code { font-family: var(--mono); font-size: .86em; background: var(--panel-2); padding: .1rem .38rem; border-radius: 6px; border: 1px solid var(--line); }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.2rem; }
+      .card h3 { margin: 0 0 .4rem; font-size: .95rem; }
+      .card p { margin: 0; color: var(--muted); font-size: .9rem; }
+      .chip { font-family: var(--mono); font-size: .72rem; color: var(--green); }
+      figure { margin: 1.2rem 0; }
+      figcaption { color: var(--muted); font-size: .82rem; text-align: center; margin-top: .5rem; }
+      svg { width: 100%; height: auto; display: block; }
+      table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+      th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+      td code { white-space: nowrap; }
+      .rej { color: var(--red); font-family: var(--mono); font-size: .8rem; }
+      .acc { color: var(--green); font-family: var(--mono); font-size: .8rem; }
+      ul.clean { list-style: none; padding: 0; margin: .6rem 0; }
+      ul.clean li { padding: .3rem 0 .3rem 1.5rem; position: relative; color: var(--muted); }
+      ul.clean li::before { content: "▸"; color: var(--blue); position: absolute; left: .3rem; }
+      .badge { display: inline-flex; width: 1.4rem; height: 1.4rem; align-items: center; justify-content: center;
+        border-radius: 5px; border: 1px solid; font-family: var(--mono); font-size: .72rem; font-weight: 600; }
+      footer { margin-top: 2.6rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .82rem; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="tag">● PR #92 · BRO-1666 · Slice 2</span>
+        <h1>Changes tab — git status &amp; diff</h1>
+        <p class="lede">
+          The slide-over's second tab: a read-only working-tree view — branch, ahead/behind, a
+          per-file status list with <code>+N&nbsp;−N</code> counts, and a colored unified diff per
+          file. Built on Slice 1's fs browser; Commit&nbsp;&amp;&nbsp;Push is Slice 3.
+        </p>
+      </header>
+
+      <h2>The new risk this slice introduces</h2>
+      <p>
+        Slice 1 only read files. Slice 2 <strong>runs <code>git</code></strong> with a
+        client-supplied file path. That opens a new attack surface Slice 1 didn't have:
+        <strong>argument injection</strong> — a path crafted to be read as a git <em>flag</em>
+        rather than a filename (<code>--output=…</code>, <code>-O</code>, pathspec magic). The
+        defense is three layers deep:
+      </p>
+      <div class="grid">
+        <div class="card"><h3>① No shell <span class="chip">execFile</span></h3>
+          <p><code>execFile("git", [args])</code> — never a shell string. No <code>;</code>, <code>|</code>, <code>$()</code> interpretation is possible.</p></div>
+        <div class="card"><h3>② Fixed argv <span class="chip">no option from input</span></h3>
+          <p>Every flag is a literal in code. The only client value is the diff path — and it lands <strong>after <code>--</code></strong>, so git reads it as a pathspec, never an option.</p></div>
+        <div class="card"><h3>③ Validated + confined <span class="chip">sandbox</span></h3>
+          <p><code>sanitizePathspec</code> rejects absolute / <code>..</code> / NUL; <code>cwd=rootPath</code> + git's own work-tree confinement bound the pathspec to the repo.</p></div>
+      </div>
+
+      <h2>Data flow</h2>
+      <figure>
+        <svg viewBox="0 0 900 250" role="img" aria-label="Changes tab data flow">
+          <defs>
+            <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#6ea8fe" /></marker>
+            <style>
+              .box{fill:#161a24;stroke:#2a3040;stroke-width:1.5}.lbl{fill:#e6e9f0;font:600 13px ui-sans-serif,system-ui}
+              .sub{fill:#99a1b3;font:11px ui-monospace,monospace}.fl{stroke:#6ea8fe;stroke-width:2;fill:none;marker-end:url(#a)}
+              .zone{fill:none;stroke-dasharray:5 4;stroke-width:1.5}
+            </style>
+          </defs>
+          <rect x="6" y="6" width="250" height="238" rx="14" class="zone" stroke="#57d38c"/><text x="18" y="26" class="sub" fill="#57d38c">Changes tab</text>
+          <rect x="268" y="6" width="210" height="238" rx="14" class="zone" stroke="#b79bff"/><text x="280" y="26" class="sub" fill="#b79bff">BFF (auth-gated)</text>
+          <rect x="490" y="6" width="404" height="238" rx="14" class="zone" stroke="#f0b866"/><text x="502" y="26" class="sub" fill="#f0b866">engine · localhost only</text>
+
+          <rect class="box" x="26" y="90" width="214" height="80" rx="12"/><text x="40" y="120" class="lbl">ChangesPanel</text>
+          <text x="40" y="140" class="sub">fetchGitStatus / Diff</text><text x="40" y="157" class="sub">?path= (relative)</text>
+
+          <rect class="box" x="286" y="90" width="176" height="80" rx="12"/><text x="300" y="120" class="lbl">/git/status</text><text x="300" y="140" class="sub">/git/diff</text><text x="300" y="157" class="sub">authorizePrincipal</text>
+
+          <rect class="box" x="508" y="60" width="372" height="54" rx="12"/><text x="522" y="83" class="lbl">workspace-git · gitStatus / gitDiff</text><text x="522" y="102" class="sub">resolveWorkspaceRoot(id) → rootPath</text>
+          <rect class="box" x="508" y="132" width="372" height="86" rx="12"/><text x="522" y="160" class="lbl" fill="#f0b866">execFile("git", [fixed argv, "--", path])</text>
+          <text x="522" y="180" class="sub">cwd=rootPath · read-only env · 10s · 8MB cap</text><text x="522" y="198" class="sub">→ branch + files + counts / unified diff</text>
+
+          <path class="fl" d="M240 130 L282 130"/><path class="fl" d="M462 128 L504 96"/><path class="fl" d="M694 114 L694 130"/>
+          <path class="fl" d="M508 175 Q480 175 480 130 L464 118" stroke="#57d38c"/>
+        </svg>
+        <figcaption>Same posture as Slice 1: rootPath resolved on the engine, never returned; only status + relative paths + diff text flow back (green edge).</figcaption>
+      </figure>
+
+      <h2>Argument-injection reject matrix (<code>gitDiff</code> path)</h2>
+      <table>
+        <thead><tr><th>Input <code>?path=</code></th><th>Outcome</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td><code>src/app.ts</code></td><td class="acc">✓ pathspec</td><td>Passed after <code>--</code>; git diffs that file.</td></tr>
+          <tr><td><code>--output=/tmp/x</code></td><td class="acc">✓ treated as a filename</td><td>After <code>--</code>, git can't read it as a flag; it's a (non-existent) pathspec → empty diff.</td></tr>
+          <tr><td><code>../../etc/passwd</code></td><td class="rej">✗ 400 escapes</td><td><code>sanitizePathspec</code> rejects <code>..</code> before exec; git would also refuse it.</td></tr>
+          <tr><td><code>/etc/passwd</code></td><td class="rej">✗ 400 relative</td><td>Absolute rejected up front.</td></tr>
+          <tr><td><code>a\0b</code> · empty · non-string</td><td class="rej">✗ 400</td><td>NUL / empty / type rejected.</td></tr>
+          <tr><td>not a git repo</td><td class="acc">status → <code>isGitRepo:false</code></td><td>Graceful — the UI shows "not a git repository", no leak.</td></tr>
+        </tbody>
+      </table>
+      <p style="color:var(--muted);font-size:.9rem">
+        Deleted files still diff: <code>sanitizePathspec</code> is <em>lexical</em> (no realpath), so a
+        removed file's pathspec is accepted — unlike the fs read path, which must exist.
+      </p>
+
+      <h2>What the tab shows</h2>
+      <div class="grid">
+        <div class="card"><h3>Status list</h3><p>
+          <span class="badge" style="color:#f0b866;border-color:#f0b8664d">M</span>
+          <span class="badge" style="color:#57d38c;border-color:#57d38c4d">A</span>
+          <span class="badge" style="color:#f2708a;border-color:#f2708a4d">D</span>
+          <span class="badge" style="color:#99a1b3;border-color:#2a3040">U</span>
+          per-file badge + <code>+N −N</code> counts + rename origin.</p></div>
+        <div class="card"><h3>Branch chip</h3><p><code>git status --branch</code> → branch name + <code>↑ahead ↓behind</code> + upstream.</p></div>
+        <div class="card"><h3>Colored diff</h3><p>Tap a file → unified diff with add/remove/hunk coloring; staged (<code>--cached</code>) when the file is staged-only.</p></div>
+      </div>
+
+      <h2>Bounded &amp; validated</h2>
+      <ul class="clean">
+        <li>Output caps: <code>maxBuffer</code> 8 MB (execFile hard limit) + 256 KB diff response cap (<code>truncated</code>) + <code>MAX_STATUS_FILES=2000</code>.</li>
+        <li>10 s timeout + read-only env (<code>GIT_TERMINAL_PROMPT=0</code>, <code>GIT_OPTIONAL_LOCKS=0</code>) — a hung/locked git is killed, never prompts.</li>
+        <li>Async <code>execFile</code> — git runs off the event loop; the single-threaded engine keeps serving.</li>
+      </ul>
+
+      <h2>Validation</h2>
+      <ul class="clean">
+        <li>9 git-module tests on real temp repos + 11 client tests · full suite <strong>650 pass / 0 fail</strong>.</li>
+        <li>Typecheck (api+web) + Biome clean · <code>next build</code> OK (both git routes, standalone copy).</li>
+        <li>P20 adversarial review on the git-exec surface (verdict on the PR) · post-merge VPS dogfood.</li>
+      </ul>
+
+      <footer>PR&nbsp;#92 · <code>feat/bro-1666-changes</code> → <code>main</code> · genesis. Follows Slice 1 (<a href="./PR-91.html">PR-91</a>).</footer>
+    </div>
+  </body>
+</html>
