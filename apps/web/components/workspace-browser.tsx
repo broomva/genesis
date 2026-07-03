@@ -7,6 +7,7 @@ import {
   Folder,
   FolderGit2,
   GitBranch,
+  GitCommitVertical,
   Loader2,
   X,
 } from "lucide-react";
@@ -19,10 +20,12 @@ import { type DirListing, type FileContent, fetchDir, fetchFile } from "@/lib/fi
 import {
   type GitFileEntry,
   type GitStatusData,
+  commitAndPush,
   fetchGitDiff,
   fetchGitStatus,
   fileIsStagedOnly,
   statusBadge,
+  validateCommitMessage,
 } from "@/lib/git";
 import { cn } from "@/lib/utils";
 
@@ -443,9 +446,98 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
   );
 }
 
-/** The Changes tab (BRO-1666 Slice 2): git status list + per-file diff. Read-only.
- *  Fetches status when the tab becomes active; tapping a file opens its diff (staged
- *  when the file is staged-only, else the working-tree diff). */
+/** Commit & Push composer (BRO-1666 Slice 3, owner-only) — a message field + a
+ *  Commit&Push action. Commits TRACKED edits (not untracked, P20 HIGH-1), pushes to
+ *  the upstream; owner-gated at the BFF (an agent principal gets 403, surfaced here as
+ *  an error). The success confirmation is lifted to the PARENT (`onCommitted(note)`),
+ *  because a clean tree after commit unmounts this box (CodeRabbit) — the note would
+ *  otherwise vanish before it's read. */
+function CommitBox({
+  workspaceId,
+  hasUntracked,
+  onCommitted,
+}: {
+  workspaceId: string;
+  /** True when the change set includes untracked files — they are NOT committed
+   *  (commit stages tracked edits only, P20 HIGH-1), so tell the user. */
+  hasUntracked: boolean;
+  /** Called on a successful commit with a human-readable confirmation note; the
+   *  parent owns + persists it (this box may unmount when the tree goes clean). */
+  onCommitted: (note: string) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    const invalid = validateCommitMessage(message);
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const r = await commitAndPush(workspaceId, message, true);
+      const short = r.sha.slice(0, 7);
+      setMessage("");
+      onCommitted(
+        r.pushed
+          ? `Committed + pushed (${short}).`
+          : r.pushError
+            ? `Committed (${short}) — ${r.pushError}`
+            : `Committed (${short}).`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "commit failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="border-border mt-2 border-t px-2 pt-3">
+      <textarea
+        value={message}
+        onChange={(e) => {
+          setMessage(e.target.value);
+          setError(null);
+        }}
+        placeholder="Commit message…"
+        rows={2}
+        data-testid="ws-commit-message"
+        className="border-border bg-background focus-visible:ring-ring/50 w-full resize-none rounded-md border px-2.5 py-2 text-sm outline-none focus-visible:ring-3"
+      />
+      {hasUntracked ? (
+        <p className="text-muted-foreground mt-1 px-0.5 text-xs">
+          New (U) files aren't included — only edits to tracked files are committed.
+        </p>
+      ) : null}
+      {error ? <p className="text-[var(--bv-danger)] mt-1 px-0.5 text-xs">{error}</p> : null}
+      <div className="mt-2 flex justify-end">
+        <Button
+          type="button"
+          size="sm"
+          onClick={submit}
+          disabled={busy || message.trim().length === 0}
+          data-testid="ws-commit-submit"
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <GitCommitVertical className="size-3.5" />
+          )}
+          Commit &amp; Push
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** The Changes tab (BRO-1666 Slice 2/3): git status list + per-file diff (read-only)
+ *  + a Commit&Push composer (Slice 3, owner-only). Fetches status when the tab becomes
+ *  active (and after a commit); tapping a file opens its diff (staged when the file is
+ *  staged-only, else the working-tree diff). */
 function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: boolean }) {
   const [state, setState] = useState<
     | { status: "loading" }
@@ -454,7 +546,13 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
     | null
   >(null);
   const [openDiff, setOpenDiff] = useState<{ path: string; cached: boolean } | null>(null);
+  // Bumped after a commit so the status list refetches (files should clear).
+  const [reloadKey, setReloadKey] = useState(0);
+  // Commit confirmation, owned HERE so it survives CommitBox unmounting when the tree
+  // goes clean after a commit (CodeRabbit).
+  const [commitNote, setCommitNote] = useState<string | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey is a deliberate refetch trigger
   useEffect(() => {
     if (!active || !workspaceId) return;
     const ctrl = new AbortController();
@@ -468,11 +566,12 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
         setState({ status: "error", error: e instanceof Error ? e.message : "failed to load" });
       });
     return () => ctrl.abort();
-  }, [workspaceId, active]);
-  // Close any open diff when the workspace changes.
+  }, [workspaceId, active, reloadKey]);
+  // Close any open diff + clear the commit note when the workspace changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on workspace change
   useEffect(() => {
     setOpenDiff(null);
+    setCommitNote(null);
   }, [workspaceId]);
 
   if (openDiff) {
@@ -513,6 +612,14 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
               ) : null}
             </div>
           ) : null}
+          {commitNote ? (
+            <p
+              className="mb-1 rounded-md bg-[var(--bv-canvas-soft-2)] px-2.5 py-1.5 text-xs text-[var(--bv-green-text,#2e7d32)]"
+              data-testid="ws-commit-note"
+            >
+              {commitNote}
+            </p>
+          ) : null}
           {state.data.files.length === 0 ? (
             <p className="text-muted-foreground p-4 text-sm italic">
               No changes — the working tree is clean.
@@ -530,6 +637,16 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
             <p className="text-muted-foreground px-2 py-1 text-xs italic">
               …too many changes to show all.
             </p>
+          ) : null}
+          {state.data.files.length > 0 ? (
+            <CommitBox
+              workspaceId={workspaceId}
+              hasUntracked={state.data.files.some((f) => f.untracked)}
+              onCommitted={(note) => {
+                setCommitNote(note);
+                setReloadKey((k) => k + 1);
+              }}
+            />
           ) : null}
         </>
       )}

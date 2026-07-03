@@ -23,12 +23,12 @@ import { resolve, sep } from "node:path";
 
 /** A rejected client request whose message is SAFE to echo (it never contains an
  *  absolute server path). `status` maps to the HTTP code the route returns: 400 for
- *  a bad/unsafe input, 404 for a missing path, 500 for an unavailable workspace root
- *  (the directory vanished out-of-band). */
+ *  a bad/unsafe input, 404 for a missing path, 409 for a transient conflict (e.g. a
+ *  git index lock), 500 for an unavailable workspace root (vanished out-of-band). */
 export class WorkspaceFsError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 404 | 500 = 400,
+    readonly status: 400 | 404 | 409 | 500 = 400,
   ) {
     super(message);
     this.name = "WorkspaceFsError";

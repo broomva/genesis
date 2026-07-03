@@ -116,6 +116,61 @@ export async function fetchGitStatus(
   return normalizeStatus(data);
 }
 
+export interface CommitResultData {
+  committed: boolean;
+  pushed: boolean;
+  sha: string;
+  branch?: string;
+  /** Set when the commit landed but the push didn't. */
+  pushError?: string;
+}
+
+/** Max commit-message length (mirrors the server MAX_COMMIT_MSG). */
+export const MAX_COMMIT_MSG = 4000;
+
+/** Client-side commit-message validation → an error string, or null when valid.
+ *  (The server re-validates; this is for immediate UI feedback.) */
+export function validateCommitMessage(message: string): string | null {
+  if (!message.trim()) return "Enter a commit message.";
+  if (message.length > MAX_COMMIT_MSG) return "Commit message is too long.";
+  return null;
+}
+
+/** Coerce an untrusted `/git/commit` body into a clean {@link CommitResultData}. */
+export function normalizeCommit(data: unknown): CommitResultData {
+  const d = (data ?? {}) as Record<string, unknown>;
+  return {
+    committed: d.committed === true,
+    pushed: d.pushed === true,
+    sha: typeof d.sha === "string" ? d.sha : "",
+    branch: typeof d.branch === "string" ? d.branch : undefined,
+    pushError: typeof d.pushError === "string" ? d.pushError : undefined,
+  };
+}
+
+/** Commit all changes (+ optional push). Owner-only at the BFF (an agent principal
+ *  gets 403). Rejects with the engine's SAFE message on a bad request. */
+export async function commitAndPush(
+  workspaceId: string,
+  message: string,
+  push: boolean,
+): Promise<CommitResultData> {
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/git/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message, push }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof (data as { error?: unknown })?.error === "string"
+        ? (data as { error: string }).error
+        : "commit failed",
+    );
+  }
+  return normalizeCommit(data);
+}
+
 /** Fetch one file's diff (`cached` → staged). Rejects with the engine's SAFE message. */
 export async function fetchGitDiff(
   workspaceId: string,

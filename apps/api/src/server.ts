@@ -16,7 +16,7 @@ import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
 import { WorkspaceFsError, listWorkspaceDir, readWorkspaceFile } from "./workspace-fs";
-import { gitDiff, gitStatus } from "./workspace-git";
+import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
 import {
   WorkspaceValidationError,
   availableWorkspaces,
@@ -130,6 +130,18 @@ export function build(opts: BuildOpts) {
       "[genesis] WARNING: GENESIS_PROJECTS_ROOT is set but GENESIS_TOKEN is not — " +
         "POST/DELETE /workspaces are unauthenticated on a direct connection. Set " +
         "GENESIS_TOKEN or ensure :8787 is not reachable beyond the BFF/tailnet.",
+    );
+  }
+  // BRO-1666 Slice 3 (P20 HIGH-2): the git/commit WRITE route (commit+push to the
+  // owner's real remote) is OWNER-gated only at the BFF — the engine can't tell a
+  // human from the agent. With no GENESIS_TOKEN, a direct :8787 caller (the on-box
+  // agent, or anything on the tailnet) can commit+push, bypassing that gate. Hard
+  // deployment invariant: bind :8787 to localhost + set GENESIS_TOKEN.
+  if (!opts.token) {
+    console.warn(
+      "[genesis] WARNING: POST /workspaces/:id/git/commit is a WRITE route (commit+push) " +
+        "owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct :8787 caller can " +
+        "commit+push. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
     );
   }
 
@@ -333,6 +345,22 @@ export function build(opts: BuildOpts) {
       return c.json(await gitDiff(root, c.req.query("path"), { cached }));
     } catch (e) {
       return fsErrorResponse(c, e, "compute diff");
+    }
+  });
+
+  // Commit & Push (BRO-1666 Slice 3) — the only WRITE op. OWNER-ONLY, enforced at
+  // the BFF (the agent principal is refused, like BRO-1663 add-by-path); this engine
+  // route keeps the standard bearer gate. Fixed argv in gitCommit; the message is the
+  // only client input (a single -m arg). unknown workspace → 404, bad input → safe 400.
+  app.post("/workspaces/:id/git/commit", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as { message?: unknown; push?: unknown };
+    try {
+      return c.json(await gitCommit(root, { message: body.message, push: body.push === true }));
+    } catch (e) {
+      return fsErrorResponse(c, e, "commit");
     }
   });
 
