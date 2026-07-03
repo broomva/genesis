@@ -16,6 +16,7 @@ import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
 import { WorkspaceFsError, listWorkspaceDir, readWorkspaceFile } from "./workspace-fs";
+import { gitDiff, gitStatus } from "./workspace-git";
 import {
   WorkspaceValidationError,
   availableWorkspaces,
@@ -304,6 +305,34 @@ export function build(opts: BuildOpts) {
       return c.json(readWorkspaceFile(root, c.req.query("path")));
     } catch (e) {
       return fsErrorResponse(c, e, "read file");
+    }
+  });
+
+  // Read-only workspace git browser (BRO-1666 Slice 2) — the Changes tab. Same
+  // sandbox posture as the fs routes: rootPath resolved server-side, never returned;
+  // git runs read-only via the workspace-git module; the diff `path` is validated +
+  // passed only as a pathspec. Same bearer gate; unknown workspace → 404.
+  app.get("/workspaces/:id/git/status", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(await gitStatus(root));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read git status");
+    }
+  });
+
+  app.get("/workspaces/:id/git/diff", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      const cachedQ = c.req.query("cached");
+      const cached = cachedQ === "1" || cachedQ === "true";
+      return c.json(await gitDiff(root, c.req.query("path"), { cached }));
+    } catch (e) {
+      return fsErrorResponse(c, e, "compute diff");
     }
   });
 
