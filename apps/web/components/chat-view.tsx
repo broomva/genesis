@@ -31,7 +31,7 @@ import {
 import { SkillPart, ToolPart } from "@/components/ai-elements/tool";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
-import { MessageActions, RunTimer } from "@/components/message-actions";
+import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
 import { QuestionCard } from "@/components/question-card";
 import { SessionLauncher } from "@/components/session-launcher";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -261,6 +261,25 @@ function AssistantBody({
           canRetry={!busy}
         />
       ) : null}
+    </div>
+  );
+}
+
+// A user turn — the DS cool-gray bubble (asymmetric radius, right-aligned) plus a
+// copy affordance that mirrors the assistant's (BRO-1705). The `group` reveals Copy
+// on hover; it's always shown on touch. The bubble keeps its max-width + asymmetric
+// radius; alignment moves to the wrapper's `items-end` so the copy row sits neatly
+// below-right (mirroring the assistant's below-left copy/retry row).
+function UserMessage({ message }: { message: UIMessage }) {
+  const text = messageText(message);
+  return (
+    <div className="group flex flex-col items-end">
+      <div className="bg-[var(--bv-canvas-soft-2)] text-foreground max-w-[78%] rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
+        {text}
+      </div>
+      <div className="mt-1 flex items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100">
+        <CopyButton text={text} label="Copy message" />
+      </div>
     </div>
   );
 }
@@ -855,11 +874,7 @@ export function ChatView({
                         className="message-in flex flex-col"
                       >
                         {isUser ? (
-                          // DS user bubble — soft cool-gray fill, asymmetric radius
-                          // (flat bottom-right corner), right-aligned. Never ink-filled.
-                          <div className="bg-[var(--bv-canvas-soft-2)] text-foreground ml-auto max-w-[78%] self-end rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
-                            {messageText(message)}
-                          </div>
+                          <UserMessage message={message} />
                         ) : (
                           // DS assistant — plain ink text flowing on the canvas, no
                           // bubble; reasoning · text · tool blocks render in order.
