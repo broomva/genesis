@@ -19,6 +19,7 @@ import {
 import type { AgentEvent, RunState } from "@genesis/projection";
 import {
   type EffortLevel,
+  type RunAttachment,
   type RunOptions,
   type RunResult,
   removeWorktree,
@@ -49,6 +50,9 @@ export interface TurnOptions {
    *  workspace with `noWorktree` stays root-only — worktrees break there). Mirrors
    *  `engine`/`workspaceId`. */
   worktree?: boolean;
+  /** Files attached to this turn (BRO-1706) — forwarded to the runner, which
+   *  materializes them into the run cwd so the agent can Read them (multimodal). */
+  attachments?: RunAttachment[];
 }
 
 /** Live-session control surface (BRO-1493). The interactive engine implements
@@ -607,6 +611,9 @@ export class Supervisor {
         // noWorktree → run directly in the workspace (BRO-1512: nested-repo cwd).
         sessionKey: session.id,
         worktree: noWorktree ? false : undefined,
+        // Multimodal attachments (BRO-1706) — the runner writes them into the
+        // resolved cwd and appends their paths to the prompt.
+        attachments: turnOpts?.attachments,
         onState: (state, event) => {
           session.phase = state.phase;
           // Tracing is side-channel — a throwing trace hook must NOT fail the

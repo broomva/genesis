@@ -11,6 +11,7 @@ import { ContextMeter, type ContextMeterData } from "@/components/ai-elements/co
 import {
   PromptInput,
   PromptInputActionAddAttachments,
+  PromptInputActionAddScreenshot,
   PromptInputActionMenu,
   PromptInputActionMenuContent,
   PromptInputActionMenuTrigger,
@@ -29,6 +30,7 @@ import {
   usePromptInputController,
 } from "@/components/ai-elements/prompt-input";
 import { SkillPart, ToolPart } from "@/components/ai-elements/tool";
+import { ComposerAttachments, MessageAttachments } from "@/components/attachments";
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
@@ -73,43 +75,12 @@ import { useThreadReconcile } from "@/lib/use-thread-reconcile";
 import { cn } from "@/lib/utils";
 import type { Workspace } from "@/lib/workspaces";
 
-// Inline text/code attachments into the prompt (BRO-1576). `claude -p` takes no
-// inline images, so only text-ish files are inlined as fenced blocks; anything
-// else is noted (not silently dropped). PromptInput exposes each file as a
-// FileUIPart with a blob: URL, so fetch().text() decodes it client-side. The
-// `accept`/`TEXT_FILE_RE` split is intentional: TEXT_FILE_RE is the single source
-// of truth for what gets inlined (OS MIME for code files is unreliable —
-// .ts→video/mp2t, .json→application/json — so we do NOT gate the picker on it).
-const TEXT_FILE_RE =
-  /\.(md|markdown|txt|text|json|jsonl|ya?ml|toml|ini|env|csv|tsv|tsx?|jsx?|mjs|cjs|py|rs|go|rb|java|c|h|cpp|cs|php|sh|bash|zsh|sql|css|scss|html?|xml|svg|log|diff|patch)$/i;
-
-// Cap inlined content so a large log/CSV can't blow the prompt token budget.
-const MAX_INLINE_BYTES = 100_000;
-
-async function inlineAttachments(files: readonly FileUIPart[]): Promise<string> {
-  if (files.length === 0) return "";
-  const blocks = await Promise.all(
-    files.map(async (f) => {
-      const name = f.filename ?? "attachment";
-      const isText = (f.mediaType ?? "").startsWith("text/") || TEXT_FILE_RE.test(name);
-      if (!isText) {
-        return `\n\n[attachment "${name}" (${f.mediaType || "binary"}) omitted (only text/code files are inlined on this deployment)]`;
-      }
-      try {
-        let content = await (await fetch(f.url)).text();
-        let truncated = "";
-        if (content.length > MAX_INLINE_BYTES) {
-          content = content.slice(0, MAX_INLINE_BYTES);
-          truncated = `\n… [truncated to ${MAX_INLINE_BYTES.toLocaleString()} chars]`;
-        }
-        return `\n\nAttached file \`${name}\`:\n\`\`\`\n${content}${truncated}\n\`\`\``;
-      } catch {
-        return `\n\n[attachment "${name}" could not be read]`;
-      }
-    }),
-  );
-  return blocks.join("");
-}
+// Multimodal attachments (BRO-1706): the composer sends attached files as native
+// AI-SDK file parts (data: URLs). The engine materializes them into the agent's
+// working directory and the agent Reads them (images/PDFs/text — Claude's Read is
+// natively multimodal). No more client-side text-only inlining: the byte-exact file
+// reaches the agent, so images and binaries "just work". Per-file size + count are
+// bounded on the PromptInput below (with user feedback) and re-capped server-side.
 
 // Pull the rendered text out of a UIMessage's parts[] (AI SDK v6 shape). Used for
 // the user bubble + input-history recall; assistant messages render their parts in
@@ -274,6 +245,8 @@ function UserMessage({ message }: { message: UIMessage }) {
   const text = messageText(message);
   return (
     <div className="group flex flex-col items-end">
+      {/* Attached images/files render inline above the bubble (BRO-1706). */}
+      <MessageAttachments parts={message.parts} className="mb-1" />
       <div className="bg-[var(--bv-canvas-soft-2)] text-foreground max-w-[78%] rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
         {text}
       </div>
@@ -678,28 +651,28 @@ export function ChatView({
   );
 
   // Send a turn with the current model/effort selection. Shared by the composer
-  // and the empty-state suggestion chips (BRO-1577).
-  function send(text: string) {
-    if (!text.trim()) return;
+  // and the empty-state suggestion chips (BRO-1577). Files (BRO-1706) ride as native
+  // AI-SDK file parts so useChat renders them in the bubble AND the engine receives
+  // them for materialization.
+  function send(text: string, files?: FileUIPart[]) {
+    const hasFiles = !!files && files.length > 0;
+    if (!text.trim() && !hasFiles) return;
     setNotice(null);
-    void sendMessage(
-      { text },
-      {
-        body: {
-          model: modelToBody(effModel),
-          // Only send effort for an engine that consumes it (interactive ignores
-          // it — persistent session, no per-launch knob) — BRO-1623 P20.
-          effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
-          engine: engineToBody(engine),
-          // The workspace binds at session create (BRO-1627) — sent every turn but
-          // honored only on the first; the server ignores it once bound.
-          workspaceId: workspaceToBody(workspace),
-          // Worktree posture binds sticky on turn 1 (BRO-1656) — sent every turn but
-          // frozen after the first; "auto" omits it (inherit the workspace default).
-          worktree: worktreeToBody(effWorktree),
-        },
+    void sendMessage(hasFiles ? { text, files } : { text }, {
+      body: {
+        model: modelToBody(effModel),
+        // Only send effort for an engine that consumes it (interactive ignores
+        // it — persistent session, no per-launch knob) — BRO-1623 P20.
+        effort: engineShowsEffort(engine) ? effortToBody(effEffort) : undefined,
+        engine: engineToBody(engine),
+        // The workspace binds at session create (BRO-1627) — sent every turn but
+        // honored only on the first; the server ignores it once bound.
+        workspaceId: workspaceToBody(workspace),
+        // Worktree posture binds sticky on turn 1 (BRO-1656) — sent every turn but
+        // frozen after the first; "auto" omits it (inherit the workspace default).
+        worktree: worktreeToBody(effWorktree),
       },
-    );
+    });
   }
 
   // Retry affordance for a run-signal error (BRO-1674). Two causes hide behind
@@ -786,7 +759,10 @@ export function ChatView({
       return;
     }
 
-    send(raw + (await inlineAttachments(files)));
+    // Attach-only turn (BRO-1706): default a prompt so the bubble + engine both have
+    // text (the engine requires non-empty user text). Files ride as native parts.
+    const text = raw || (files.length > 0 ? "Take a look at the attached file(s)." : "");
+    send(text, files);
   }
 
   return (
@@ -999,9 +975,17 @@ export function ChatView({
                   controller. Without it PromptInput stays self-managed and recall
                   can't reach the value. */}
                 <PromptInputProvider>
+                  {/* Staged attachments row (BRO-1706) — visible feedback that files
+                      are attached, with per-file remove; renders nothing when empty. */}
+                  <ComposerAttachments className="mb-2" />
                   <PromptInput
                     onSubmit={handleSubmit}
                     multiple
+                    // Broad by design (BRO-1706): images/PDFs/text/code all work; the
+                    // agent Reads whatever lands. Bound count + per-file size (with
+                    // onError feedback) instead of narrowing the type.
+                    maxFiles={10}
+                    maxFileSize={15 * 1024 * 1024}
                     onError={(e) => setNotice(e.message)}
                     className="bv-composer w-full"
                   >
@@ -1015,7 +999,10 @@ export function ChatView({
                             <Paperclip className="size-4" />
                           </PromptInputActionMenuTrigger>
                           <PromptInputActionMenuContent>
-                            <PromptInputActionAddAttachments label="Attach text files" />
+                            <PromptInputActionAddAttachments label="Add photos & files" />
+                            {/* Desktop screen-capture (BRO-1706) — no-ops where the
+                                getDisplayMedia API is unavailable (e.g. mobile). */}
+                            <PromptInputActionAddScreenshot label="Take screenshot" />
                           </PromptInputActionMenuContent>
                         </PromptInputActionMenu>
                         {/* Workspace picker removed from the composer (BRO-1662): the

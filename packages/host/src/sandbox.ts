@@ -120,8 +120,11 @@ export class VercelSandboxHost implements ExecutionHost {
     return buf.toString("utf8");
   }
 
-  async writeFile(path: string, content: string): Promise<void> {
-    await this.sandbox.writeFiles([{ path, content: Buffer.from(content, "utf8") }]);
+  async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+    // Binary-safe (BRO-1706): a string is UTF-8-encoded; a Uint8Array (image/PDF
+    // attachment bytes) is copied verbatim into the Buffer.
+    const buf = typeof content === "string" ? Buffer.from(content, "utf8") : Buffer.from(content);
+    await this.sandbox.writeFiles([{ path, content: buf }]);
   }
 
   /** Optional ExecutionHost capability — lit up because Vercel Sandbox snapshots.

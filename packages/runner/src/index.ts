@@ -52,6 +52,19 @@ export function isCodexModel(model: string): boolean {
   return /^(gpt|o\d|codex)/i.test(model);
 }
 
+/** A file the user attached to a turn (BRO-1706). Materialized into the agent's
+ *  working directory before the run so the CLI's native multimodal `Read` tool can
+ *  operate on it (images, PDFs, notebooks, any text). Carries the bytes as a
+ *  `data:` URL (base64) — the same shape the AI SDK `FileUIPart` rides on the wire. */
+export interface RunAttachment {
+  /** Original client file name (sanitized to a safe basename on disk). */
+  filename: string;
+  /** MIME type (advisory — surfaced in the prompt manifest). */
+  mediaType?: string;
+  /** A `data:<mediaType>;base64,<bytes>` URL carrying the file content. */
+  url: string;
+}
+
 export interface RunOptions {
   prompt: string;
   /** A git repository root; a worktree is cut from here unless worktree=false. */
@@ -85,6 +98,10 @@ export interface RunOptions {
   remoteCwd?: string;
   /** Extra CLI flags appended verbatim (e.g. --dangerously-skip-permissions). */
   extraArgs?: string[];
+  /** Files the user attached to this turn (BRO-1706) — written into the run cwd
+   *  under `.genesis/attachments/` before spawn; their absolute paths are appended
+   *  to the prompt so the agent can Read them (images/PDFs supported natively). */
+  attachments?: RunAttachment[];
   /** Called on every projected state transition. */
   onState?: (state: RunState, event: AgentEvent) => void;
 }
@@ -232,6 +249,89 @@ export async function ensureSessionWorktree(
   return { worktreePath, branch };
 }
 
+/** Sanitize a client-supplied filename to a safe basename (BRO-1706, P20):
+ *  strip any directory components (path-traversal guard — a `../../etc/x` name can
+ *  never escape the attachments dir) and reduce to a conservative charset. */
+export function safeAttachmentName(name: string, index: number): string {
+  const base = (name.split(/[\\/]/).pop() ?? "").trim();
+  const cleaned = base
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^\.+/, "") // no leading dots → never a dotfile / "." / ".."
+    .slice(0, 128);
+  return cleaned || `file-${index + 1}`;
+}
+
+/** Decode a `data:<mime>[;params];base64,<data>` URL to its raw bytes, or null if
+ *  it isn't a base64 data URL (blob:/http: never survive the wire hop — only data:
+ *  does). Tolerates RFC-2397 mediatype parameters (e.g.
+ *  `data:image/png;charset=utf-8;base64,…`) — matches up to the LAST `;base64,`
+ *  delimiter, not just a param-less type (BRO-1706, P20 cross-review). */
+export function decodeDataUrl(url: string): Uint8Array | null {
+  const m = /^data:[^,]*;base64,(.*)$/s.exec(url);
+  if (!m) return null; // require ;base64 — we never wrote a non-base64 URL
+  try {
+    return new Uint8Array(Buffer.from(m[1] ?? "", "base64"));
+  } catch {
+    return null;
+  }
+}
+
+/** Materialize attachments into `<cwd>/.genesis/attachments/` and return a prompt
+ *  manifest block listing their ABSOLUTE paths (the CLI `Read` tool requires
+ *  absolute paths). Writes go through the host seam so this works on local/vps/
+ *  microVM alike. Best-effort per file — a single bad attachment is skipped, not
+ *  fatal to the turn. Returns "" when nothing was written. */
+export async function materializeAttachments(
+  host: ExecutionHost,
+  cwd: string,
+  attachments: RunAttachment[],
+): Promise<string> {
+  const dir = `${cwd.replace(/\/$/, "")}/.genesis/attachments`;
+  await host.exec(["mkdir", "-p", dir]);
+  const used = new Set<string>();
+  const written: { path: string; mediaType?: string }[] = [];
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i];
+    if (!att) continue;
+    const bytes = decodeDataUrl(att.url);
+    if (!bytes || bytes.length === 0) continue;
+    // De-collide names while preserving the extension (foo.png → foo-1.png).
+    let name = safeAttachmentName(att.filename, i);
+    if (used.has(name)) {
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot) : "";
+      let n = 1;
+      while (used.has(`${stem}-${n}${ext}`)) n++;
+      name = `${stem}-${n}${ext}`;
+    }
+    used.add(name);
+    const abs = `${dir}/${name}`;
+    try {
+      await host.writeFile(abs, bytes);
+      written.push({ path: abs, mediaType: att.mediaType });
+    } catch {
+      // Skip a file that failed to write; the turn proceeds with the rest.
+    }
+  }
+  // Feedback when some (or all) attachments couldn't be materialized (P20
+  // cross-review): tell the agent so it can tell the user, instead of silently
+  // dropping a file the user watched themselves attach.
+  const skipped = attachments.length - written.length;
+  if (written.length === 0) {
+    return `\n\n(Note: ${attachments.length} attached file${
+      attachments.length > 1 ? "s" : ""
+    } could not be processed and ${attachments.length > 1 ? "were" : "was"} skipped — tell the user.)`;
+  }
+  const lines = written.map((w) => `- ${w.path}${w.mediaType ? ` (${w.mediaType})` : ""}`);
+  const plural = written.length > 1 ? "s" : "";
+  const skippedNote =
+    skipped > 0
+      ? `\n(Note: ${skipped} other attached file${skipped > 1 ? "s" : ""} could not be processed and ${skipped > 1 ? "were" : "was"} skipped — tell the user.)`
+      : "";
+  return `\n\n---\nAttached file${plural} (saved to this workspace — read with your file tools as needed; images and PDFs are supported natively):\n${lines.join("\n")}${skippedNote}`;
+}
+
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const host = opts.host ?? new LocalHost();
   const id = runId();
@@ -277,13 +377,31 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     host.kind === "local"
       ? resolveClaudeBinary(opts.pin ?? process.env.GENESIS_CLAUDE_PIN, opts.agentBin)
       : (opts.agentBin ?? "claude");
+
+  // Multimodal input (BRO-1706): write attached files into the resolved run cwd and
+  // append their absolute paths to the prompt so the agent's native `Read` can
+  // operate on them. Done after cwd resolution (a worktree path only exists now) and
+  // before spawn. Best-effort — a materialization failure never blocks the turn.
+  let prompt = opts.prompt;
+  // On a microVM with no explicit remoteCwd, the sandbox spawns at its own default
+  // (/vercel/sandbox) — materialize there too so files land in the agent's cwd
+  // instead of being silently dropped (P20 cross-review). Local/VPS always have cwd.
+  const attachCwd = runCwd ?? (isMicroVM ? "/vercel/sandbox" : undefined);
+  if (opts.attachments && opts.attachments.length > 0 && attachCwd) {
+    try {
+      prompt += await materializeAttachments(host, attachCwd, opts.attachments);
+    } catch {
+      // Non-fatal: run the turn with the original prompt (attachments just absent).
+    }
+  }
+
   const handle = host.spawnStream(agentArgs(opts, bin), {
     cwd: runCwd,
     env: scrubAgentEnv(),
     replaceEnv: true,
     // The prompt rides stdin, not argv (BRO-1642) — keeps a large attachment-laden
     // prompt under the OS argv cap. The host closes stdin after writing (EOF).
-    input: opts.prompt,
+    input: prompt,
   });
   const events: AgentEvent[] = [];
   let state = initialState;

@@ -44,7 +44,9 @@ export interface ExecutionHost {
   exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult>;
   spawnStream(cmd: string[], opts?: ExecOpts): SpawnHandle;
   readFile(path: string): Promise<string>;
-  writeFile(path: string, content: string): Promise<void>;
+  /** Write a file. `content` may be binary (Uint8Array) so image/PDF attachments
+   *  materialize byte-exact — a string would UTF-8-mangle binary (BRO-1706). */
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
   /** Phase 4 (microVM) only — memory-snapshot suspend. Optional in the seam. */
   snapshot?(): Promise<string>;
 }
@@ -139,7 +141,8 @@ export class LocalHost implements ExecutionHost {
     return Bun.file(path).text();
   }
 
-  async writeFile(path: string, content: string): Promise<void> {
+  async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+    // Bun.write accepts string | TypedArray and creates parent dirs as needed.
     await Bun.write(path, content);
   }
 }
@@ -188,12 +191,18 @@ export class VpsHost implements ExecutionHost {
     if (r.code !== 0) throw new Error(`vps readFile ${path} failed (${r.code}): ${r.stderr}`);
     return r.stdout;
   }
-  async writeFile(path: string, content: string): Promise<void> {
+  async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+    // Ensure the parent dir exists (remote `cat >` won't create it — unlike
+    // Bun.write locally), so attachment writes into a fresh dir succeed (BRO-1706).
+    const dir = path.replace(/\/[^/]*$/, "");
+    if (dir && dir !== path) await this.exec(["mkdir", "-p", dir]);
     const cd = this.remoteCwd ? `cd ${shQuote(this.remoteCwd)} && ` : "";
     const proc = Bun.spawn(["ssh", this.target, "--", `${cd}cat > ${shQuote(path)}`], {
       stdin: "pipe",
       stderr: "pipe",
     });
+    // Bun's FileSink.write takes string | ArrayBufferView — Uint8Array rides raw
+    // over ssh stdin to remote `cat`, preserving binary (BRO-1706).
     proc.stdin.write(content);
     await proc.stdin.end();
     const code = await proc.exited;

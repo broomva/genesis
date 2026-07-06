@@ -9,7 +9,7 @@
 
 import type { TokenUsage } from "@genesis/projection";
 import { CODEX_EFFORT_LEVELS, EFFORT_LEVELS, ENGINE_IDS, type EffortLevel } from "./types";
-import type { ChannelConnector, IncomingMessage, OutgoingEvent } from "./types";
+import type { ChannelConnector, IncomingMessage, OutgoingEvent, RunAttachment } from "./types";
 
 /** Per-message metadata (BRO-1597) surfaced to `useChat` as `message.metadata`
  *  via the AI SDK v6 `message-metadata` stream part. */
@@ -22,8 +22,24 @@ export interface MessageMetadata {
 
 // ───────────────────────────── parsing ─────────────────────────────
 
-type UIPart = { type?: string; text?: string };
+// A UI part is text OR a file (AI SDK FileUIPart: {type:'file', url, mediaType,
+// filename}). Attachments ride as `data:` URLs — the client converts blob: URLs to
+// base64 before sending, since only inline bytes survive the network hop (BRO-1706).
+type UIPart = {
+  type?: string;
+  text?: string;
+  url?: string;
+  mediaType?: string;
+  filename?: string;
+};
 type UIMessage = { role?: string; content?: unknown; parts?: UIPart[] };
+
+/** Defensive caps on inbound attachments (BRO-1706, P20): the browser caps count +
+ *  per-file size client-side, but the engine is a standalone channel ("any useChat
+ *  client or curl"), so a raw request could otherwise stream an unbounded body. */
+const MAX_ATTACHMENTS = 10;
+/** ~25 MB after base64 (base64 inflates ~4/3). Skips an over-cap file, not the turn. */
+const MAX_ATTACHMENT_URL_LEN = 35_000_000;
 
 /** Pull the text out of an AI SDK UIMessage (parts[] form) or a plain
  *  {role, content:string} message. */
@@ -35,6 +51,26 @@ function messageText(m: UIMessage): string {
       .join("");
   }
   return typeof m.content === "string" ? m.content : "";
+}
+
+/** Extract `file` parts as canonical attachments (BRO-1706). Only base64 `data:`
+ *  URLs are kept (blob:/http: can't be read server-side); count + size are capped. */
+function messageAttachments(m: UIMessage): RunAttachment[] {
+  if (!Array.isArray(m.parts)) return [];
+  const out: RunAttachment[] = [];
+  for (const p of m.parts) {
+    if (p.type !== "file" || typeof p.url !== "string") continue;
+    if (!p.url.startsWith("data:")) continue;
+    if (p.url.length > MAX_ATTACHMENT_URL_LEN) continue;
+    out.push({
+      filename:
+        typeof p.filename === "string" && p.filename ? p.filename : `attachment-${out.length + 1}`,
+      mediaType: typeof p.mediaType === "string" ? p.mediaType : undefined,
+      url: p.url,
+    });
+    if (out.length >= MAX_ATTACHMENTS) break;
+  }
+  return out;
 }
 
 /** Parse an AI SDK chat request body → canonical IncomingMessage.
@@ -55,11 +91,17 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
 
   let text = "";
+  let attachments: RunAttachment[] = [];
   if (Array.isArray(b.messages)) {
     const lastUser = [...(b.messages as UIMessage[])].reverse().find((m) => m.role === "user");
-    if (lastUser) text = messageText(lastUser);
+    if (lastUser) {
+      text = messageText(lastUser);
+      attachments = messageAttachments(lastUser);
+    }
   } else if (b.message && typeof b.message === "object") {
-    text = messageText(b.message as UIMessage);
+    const msg = b.message as UIMessage;
+    text = messageText(msg);
+    attachments = messageAttachments(msg);
   }
   if (!text.trim()) throw new Error("chat request has no user text");
 
@@ -100,7 +142,16 @@ export function parseChatRequest(body: unknown): IncomingMessage {
   // and only when the workspace allows a worktree (the Supervisor enforces that).
   const worktree = typeof b.worktree === "boolean" ? b.worktree : undefined;
 
-  return { threadId, text, model, effort, engine, workspaceId, worktree };
+  return {
+    threadId,
+    text,
+    model,
+    effort,
+    engine,
+    workspaceId,
+    worktree,
+    attachments: attachments.length > 0 ? attachments : undefined,
+  };
 }
 
 // ───────────────────────────── encoding ─────────────────────────────
