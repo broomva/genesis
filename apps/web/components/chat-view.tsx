@@ -34,6 +34,7 @@ import { ComposerAttachments, MessageAttachments } from "@/components/attachment
 import { FilesChanged, filesChangedFromParts } from "@/components/files-changed";
 import { LinkSafetyDialog, type LinkSafetyDialogProps } from "@/components/link-safety-dialog";
 import { CopyButton, MessageActions, RunTimer } from "@/components/message-actions";
+import { MicButton } from "@/components/mic-button";
 import { QuestionCard } from "@/components/question-card";
 import { SessionLauncher } from "@/components/session-launcher";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -390,6 +391,22 @@ function RecallTextarea({ history }: { history: readonly string[] }) {
       <output className="sr-only">{announce}</output>
     </>
   );
+}
+
+// Composer mic (BRO-1713) — dictation appends the cleaned text to the current draft
+// through the PromptInput controller (so it composes with typing + history recall).
+// Lives inside PromptInputProvider so it can write to the shared textarea state.
+function ComposerMic() {
+  const { textInput } = usePromptInputController();
+  const appendDictation = useCallback(
+    (text: string) => {
+      const cur = textInput.value;
+      const sep = cur && !/\s$/.test(cur) ? " " : "";
+      textInput.setInput(`${cur}${sep}${text}`);
+    },
+    [textInput],
+  );
+  return <MicButton onText={appendDictation} />;
 }
 
 /** One chat thread. Remounted by the parent with a `key={threadId}`, so `useChat`
@@ -1006,6 +1023,9 @@ export function ChatView({
                             <PromptInputActionAddScreenshot label="Take screenshot" />
                           </PromptInputActionMenuContent>
                         </PromptInputActionMenu>
+                        {/* Voice dictation (BRO-1713) — Whisper ASR + Claude
+                            articulation → cleaned text appended to the draft. */}
+                        <ComposerMic />
                         {/* Workspace picker removed from the composer (BRO-1662): the
                           launcher card owns pre-session workspace selection and the
                           header carries the bound workspace, so the toolbar no longer
