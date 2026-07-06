@@ -94,19 +94,20 @@ export function isKnownEffort(value: string | null): value is string {
   );
 }
 
-/** Agent engine picker (BRO-1620/1621). `interactive` = a persistent Claude Code
- *  session per thread (richer, the exempt subscription class — the default);
- *  `print` = one-shot `claude -p` (metered); `codex` = OpenAI's codex CLI driven
- *  by ChatGPT subscription (BRO-1621), available only when the box has codex
- *  installed + logged in. Sent per turn but the server honors it only on a
- *  thread's FIRST turn (per-thread sticky). Keep these values in sync with the
- *  server's ENGINE_IDS (apps/api channel/types.ts). */
+/** Agent engine picker (BRO-1620/1621). `print` = one-shot `claude -p` (metered)
+ *  — the DEFAULT: it supports multimodal attachments (BRO-1706) + the model/effort
+ *  selectors. `interactive` = a persistent Claude Code session per thread (the
+ *  exempt subscription class); `codex` = OpenAI's codex CLI driven by ChatGPT
+ *  subscription (BRO-1621), available only when the box has codex installed +
+ *  logged in. Sent per turn but the server honors it only on a thread's FIRST turn
+ *  (per-thread sticky). Keep these values in sync with the server's ENGINE_IDS
+ *  (apps/api channel/types.ts). */
 export const ENGINE_OPTIONS: readonly SelectOption[] = [
-  { value: "interactive", label: "Interactive" },
   { value: "print", label: "Print" },
+  { value: "interactive", label: "Interactive" },
   { value: "codex", label: "Codex" },
 ];
-export const DEFAULT_ENGINE = "interactive";
+export const DEFAULT_ENGINE = "print";
 
 export function isKnownEngine(value: string | null): value is string {
   return value != null && ENGINE_OPTIONS.some((o) => o.value === value);
