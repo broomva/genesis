@@ -533,6 +533,8 @@ export function build(opts: BuildOpts) {
           engine: incoming.engine,
           workspaceId: incoming.workspaceId,
           worktree: incoming.worktree,
+          // Multimodal attachments (BRO-1706) → runner materializes into the cwd.
+          attachments: incoming.attachments,
         },
       );
       emit({

@@ -313,3 +313,88 @@ describe("runAgent — per-session worktree (BRO-1473)", () => {
     expect(r.worktreePath).toContain("/repo/.genesis-runs/run-");
   });
 });
+
+// ── Multimodal attachments (BRO-1706) ──────────────────────────────────────
+import { decodeDataUrl, materializeAttachments, safeAttachmentName } from "./index";
+
+/** A host that records writeFile + exec so attachment materialization is testable
+ *  without touching the real filesystem. */
+class RecordingHost implements ExecutionHost {
+  readonly kind = "local" as const;
+  readonly credentialTier = "subscription" as const;
+  writes: { path: string; content: string | Uint8Array }[] = [];
+  execCalls: string[][] = [];
+  async exec(cmd: string[]): Promise<ExecResult> {
+    this.execCalls.push(cmd);
+    return { code: 0, stdout: "", stderr: "" };
+  }
+  spawnStream(): SpawnHandle {
+    return streamOf([]);
+  }
+  async readFile() {
+    return "";
+  }
+  async writeFile(path: string, content: string | Uint8Array) {
+    this.writes.push({ path, content });
+  }
+}
+
+describe("safeAttachmentName", () => {
+  test("strips directory components (path-traversal guard)", () => {
+    expect(safeAttachmentName("../../etc/passwd", 0)).toBe("passwd");
+    expect(safeAttachmentName("/abs/evil.png", 0)).toBe("evil.png");
+    expect(safeAttachmentName("a\\b\\c.png", 0)).toBe("c.png");
+  });
+  test("reduces to a safe charset and falls back on empties", () => {
+    expect(safeAttachmentName("my file (1).png", 0)).toBe("my_file__1_.png");
+    expect(safeAttachmentName("", 0)).toBe("file-1");
+    expect(safeAttachmentName("....", 2)).toBe("file-3");
+  });
+});
+
+describe("decodeDataUrl", () => {
+  test("decodes a base64 data URL to its bytes", () => {
+    const bytes = decodeDataUrl("data:text/plain;base64,aGk="); // "hi"
+    expect(bytes).not.toBeNull();
+    expect(new TextDecoder().decode(bytes as Uint8Array)).toBe("hi");
+  });
+  test("rejects non-data and non-base64 URLs", () => {
+    expect(decodeDataUrl("blob:whatever")).toBeNull();
+    expect(decodeDataUrl("https://example.com/x.png")).toBeNull();
+    expect(decodeDataUrl("data:text/plain,hi")).toBeNull(); // no ;base64
+  });
+});
+
+describe("materializeAttachments", () => {
+  test("writes files under <cwd>/.genesis/attachments and returns an absolute-path manifest", async () => {
+    const host = new RecordingHost();
+    const note = await materializeAttachments(host, "/ws", [
+      { filename: "shot.png", mediaType: "image/png", url: "data:image/png;base64,aGk=" },
+    ]);
+    expect(
+      host.execCalls.some((c) => c[0] === "mkdir" && c.includes("/ws/.genesis/attachments")),
+    ).toBe(true);
+    expect(host.writes[0]?.path).toBe("/ws/.genesis/attachments/shot.png");
+    expect(host.writes[0]?.content).toBeInstanceOf(Uint8Array);
+    expect(note).toContain("/ws/.genesis/attachments/shot.png");
+    expect(note).toContain("image/png");
+  });
+  test("sanitizes traversal names and de-collides duplicates", async () => {
+    const host = new RecordingHost();
+    await materializeAttachments(host, "/ws", [
+      { filename: "../../evil.png", url: "data:image/png;base64,aGk=" },
+      { filename: "evil.png", url: "data:image/png;base64,aGk=" },
+    ]);
+    const paths = host.writes.map((w) => w.path);
+    expect(paths).toContain("/ws/.genesis/attachments/evil.png");
+    expect(paths).toContain("/ws/.genesis/attachments/evil-1.png");
+  });
+  test("skips undecodable attachments and returns '' when none are written", async () => {
+    const host = new RecordingHost();
+    const note = await materializeAttachments(host, "/ws", [
+      { filename: "x.png", url: "blob:not-inline" },
+    ]);
+    expect(host.writes.length).toBe(0);
+    expect(note).toBe("");
+  });
+});

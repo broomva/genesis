@@ -12,7 +12,10 @@ import type { RunPhase, TokenUsage, ToolPart } from "@genesis/projection";
 // EffortLevel lives in @genesis/runner (it owns the claude argv); re-export so
 // channel consumers keep importing it from "./types" (single source of truth).
 export { EFFORT_LEVELS, CODEX_EFFORT_LEVELS, type EffortLevel } from "@genesis/runner";
-import type { EffortLevel } from "@genesis/runner";
+// RunAttachment is owned by @genesis/runner (it materializes them); re-export so
+// channel consumers import the attachment shape from "./types" (single source).
+export type { RunAttachment } from "@genesis/runner";
+import type { EffortLevel, RunAttachment } from "@genesis/runner";
 
 /** Canonical inbound message — what every connector normalizes a request into. */
 export interface IncomingMessage {
@@ -37,6 +40,10 @@ export interface IncomingMessage {
    *  = run at the workspace root. Honored only on turn 1 (sticky), and only when the
    *  workspace allows a worktree (a nested-repo workspace stays root-only). */
   worktree?: boolean;
+  /** Files attached to this turn (BRO-1706) — extracted from the request's `file`
+   *  parts (data: URLs). The runner materializes them into the run cwd so the agent
+   *  can Read them (images/PDFs/text — multimodal input). */
+  attachments?: RunAttachment[];
 }
 
 /** Agent engines a client may request (BRO-1620). Validated in parseChatRequest;

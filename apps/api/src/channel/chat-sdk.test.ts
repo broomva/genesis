@@ -144,6 +144,63 @@ describe("parseChatRequest", () => {
     });
     expect(r.model).toBe("gpt-5.5");
   });
+
+  // Multimodal attachments (BRO-1706) — file parts → IncomingMessage.attachments
+  test("extracts file (data: URL) attachments from the last user message", () => {
+    const r = parseChatRequest({
+      id: "c",
+      messages: [
+        {
+          role: "user",
+          parts: [
+            { type: "text", text: "what is this?" },
+            {
+              type: "file",
+              filename: "shot.png",
+              mediaType: "image/png",
+              url: "data:image/png;base64,aGk=",
+            },
+          ],
+        },
+      ],
+    });
+    expect(r.text).toBe("what is this?");
+    expect(r.attachments).toHaveLength(1);
+    expect(r.attachments?.[0]).toMatchObject({
+      filename: "shot.png",
+      mediaType: "image/png",
+      url: "data:image/png;base64,aGk=",
+    });
+  });
+
+  test("ignores non-data URLs and leaves attachments undefined when there are none", () => {
+    const r = parseChatRequest({
+      id: "c",
+      messages: [
+        {
+          role: "user",
+          parts: [
+            { type: "text", text: "hi" },
+            { type: "file", filename: "x.png", url: "blob:only-client-side" },
+          ],
+        },
+      ],
+    });
+    expect(r.attachments).toBeUndefined();
+  });
+
+  test("caps the number of attachments at 10", () => {
+    const parts: Record<string, string>[] = [{ type: "text", text: "hi" }];
+    for (let i = 0; i < 25; i++) {
+      parts.push({
+        type: "file",
+        filename: `f${i}.png`,
+        url: "data:image/png;base64,aGk=",
+      });
+    }
+    const r = parseChatRequest({ id: "c", messages: [{ role: "user", parts }] });
+    expect(r.attachments).toHaveLength(10);
+  });
 });
 
 describe("encodePart / SSE format", () => {
