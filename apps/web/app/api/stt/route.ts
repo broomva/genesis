@@ -21,6 +21,12 @@ export const dynamic = "force-dynamic";
 // (/usr/bin/claude). Haiku: reformatting is light, so fast + cheap vs opus.
 const CLAUDE_BIN = process.env.GENESIS_CLAUDE_BIN ?? "claude";
 const ARTICULATE_MODEL = process.env.STT_ARTICULATE_MODEL ?? "haiku";
+// Deny ALL tools (P20 F1): articulation is a pure text transform, so the subprocess
+// needs zero tools. Deny-precedence means a dictated prompt-injection can't read
+// files / exec / exfiltrate even though the real HOME is mounted for subscription
+// auth. (Live-verified: an injection to read ~/.claude/.credentials.json is refused.)
+const DENY_TOOLS =
+  "Bash BashOutput KillShell Read Edit Write NotebookEdit Glob Grep WebFetch WebSearch Task TodoWrite";
 
 function envNumber(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
@@ -58,11 +64,21 @@ function articulate(raw: string, signal: AbortSignal): Promise<string> {
     // an options-only call); the default stdio is "pipe", so the streams are present.
     const child = spawn(
       CLAUDE_BIN,
-      ["-p", "--model", ARTICULATE_MODEL, "--output-format", "text"],
-      {
-        env,
-      },
+      [
+        "-p",
+        "--model",
+        ARTICULATE_MODEL,
+        "--output-format",
+        "text",
+        "--disallowedTools",
+        DENY_TOOLS,
+      ],
+      { env },
     ) as ChildProcessWithoutNullStreams;
+    // Decode as UTF-8 so a multibyte char split across chunk boundaries isn't
+    // corrupted to a replacement char (P20 F4).
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let out = "";
     let err = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), ARTICULATE_TIMEOUT_MS);
@@ -117,8 +133,9 @@ export async function POST(req: Request): Promise<Response> {
       const refined = await articulate(raw, req.signal);
       if (refined) text = refined;
     } catch (err) {
-      if (err instanceof Error && err.name === "AbortError")
-        return new Response(null, { status: 499 });
+      // The child is SIGKILLed on client disconnect (→ non-AbortError rejection),
+      // so detect the disconnect via the request signal, not the error name (P20 F2).
+      if (req.signal.aborted) return new Response(null, { status: 499 });
       console.warn(
         `[stt] articulation failed, using raw: ${err instanceof Error ? err.message : err}`,
       );
