@@ -2,7 +2,7 @@
 
 import { formatClock, formatDuration } from "@/lib/duration";
 import { cn } from "@/lib/utils";
-import { Check, Copy, RotateCcw } from "lucide-react";
+import { Check, Copy, Loader2, RotateCcw, Square, Volume2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Run-time counter + message actions (BRO-1610). DS-calm: run time is a quiet
@@ -93,8 +93,127 @@ export function CopyButton({
   );
 }
 
+/** On-demand text-to-speech (BRO-1711) — POSTs the text to /api/tts (OmniVoice),
+ *  plays the returned WAV, and toggles play/stop. One <audio> element per hook
+ *  instance; the blob URL is revoked on replace + unmount. Errors fail quiet (the
+ *  button just returns to idle) so a voice-engine hiccup never breaks the chat. */
+export function useSpeak(): {
+  speaking: boolean;
+  loading: boolean;
+  toggle: (text: string) => void;
+} {
+  const [speaking, setSpeaking] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+  // A generation token so a stale fetch (user pressed stop, or started another)
+  // can't resurrect playback after it was cancelled.
+  const genRef = useRef(0);
+
+  const cleanupAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    if (urlRef.current) {
+      URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    }
+  }, []);
+
+  const stop = useCallback(() => {
+    genRef.current++; // invalidate any in-flight fetch
+    cleanupAudio();
+    setSpeaking(false);
+    setLoading(false);
+  }, [cleanupAudio]);
+
+  // Stop + release on unmount.
+  useEffect(() => stop, [stop]);
+
+  const toggle = useCallback(
+    (text: string) => {
+      if (speaking || loading) {
+        stop();
+        return;
+      }
+      if (!text.trim()) return;
+      const gen = ++genRef.current;
+      setLoading(true);
+      void (async () => {
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          if (!res.ok) throw new Error(`tts ${res.status}`);
+          const blob = await res.blob();
+          if (gen !== genRef.current) return; // cancelled while synthesizing
+          cleanupAudio();
+          const url = URL.createObjectURL(blob);
+          urlRef.current = url;
+          const audio = new Audio(url);
+          audioRef.current = audio;
+          audio.onended = () => {
+            if (gen === genRef.current) setSpeaking(false);
+          };
+          audio.onerror = () => {
+            if (gen === genRef.current) setSpeaking(false);
+          };
+          await audio.play();
+          if (gen !== genRef.current) {
+            cleanupAudio();
+            return;
+          }
+          setSpeaking(true);
+        } catch {
+          if (gen === genRef.current) setSpeaking(false);
+        } finally {
+          if (gen === genRef.current) setLoading(false);
+        }
+      })();
+    },
+    [speaking, loading, stop, cleanupAudio],
+  );
+
+  return { speaking, loading, toggle };
+}
+
+/** A speaker button that reads `text` aloud on demand via {@link useSpeak}. */
+export function SpeakButton({
+  text,
+  label = "Read aloud",
+  className,
+}: {
+  text: string;
+  label?: string;
+  className?: string;
+}) {
+  const { speaking, loading, toggle } = useSpeak();
+  return (
+    <button
+      type="button"
+      onClick={() => toggle(text)}
+      disabled={!text}
+      aria-label={speaking || loading ? "Stop" : label}
+      aria-pressed={speaking}
+      className={cn(ICON_BTN, className)}
+    >
+      {loading ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : speaking ? (
+        <Square className="size-3.5 text-[var(--bv-blue)]" />
+      ) : (
+        <Volume2 className="size-3.5" />
+      )}
+    </button>
+  );
+}
+
 /** The footer under an assistant message: run time (persistent, quiet) + copy +
- *  retry (revealed on hover / always on touch). */
+ *  speak + retry (revealed on hover / always on touch). */
 export function MessageActions({
   text,
   durationMs,
@@ -121,6 +240,8 @@ export function MessageActions({
       ) : null}
       <span className="flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100">
         <CopyButton text={text} label="Copy response" />
+        {/* Read the response aloud on demand (BRO-1711) — OmniVoice TTS. */}
+        <SpeakButton text={text} label="Read response aloud" />
         {canRetry && onRetry ? (
           <button type="button" onClick={onRetry} aria-label="Retry" className={ICON_BTN}>
             <RotateCcw className="size-3.5" />
