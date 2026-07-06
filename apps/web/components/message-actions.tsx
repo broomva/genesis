@@ -93,10 +93,17 @@ export function CopyButton({
   );
 }
 
+// Module-level singleton (P20 C4): only ONE message speaks at a time. Starting a
+// new playback stops whichever was playing — standard read-aloud UX on a page of
+// many messages, each with its own button/hook.
+let currentStop: (() => void) | null = null;
+
 /** On-demand text-to-speech (BRO-1711) — POSTs the text to /api/tts (OmniVoice),
- *  plays the returned WAV, and toggles play/stop. One <audio> element per hook
- *  instance; the blob URL is revoked on replace + unmount. Errors fail quiet (the
- *  button just returns to idle) so a voice-engine hiccup never breaks the chat. */
+ *  plays the returned audio, and toggles play/stop. One <audio> per hook; the blob
+ *  URL is revoked on replace / natural-end / unmount. A pressed "stop" aborts the
+ *  in-flight synthesis (frees server CPU, P20 R1). A generation token + synchronous
+ *  in-flight ref stop stale fetches from resurrecting playback or double-firing an
+ *  expensive synthesis (P20 C2). Errors fail quiet → the button returns to idle. */
 export function useSpeak(): {
   speaking: boolean;
   loading: boolean;
@@ -106,9 +113,14 @@ export function useSpeak(): {
   const [loading, setLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
-  // A generation token so a stale fetch (user pressed stop, or started another)
-  // can't resurrect playback after it was cancelled.
+  const abortRef = useRef<AbortController | null>(null);
+  // Synchronous guard so a sub-frame double-click can't fire two syntheses before
+  // React commits `loading` (P20 C2).
+  const inFlightRef = useRef(false);
+  // Invalidates a stale fetch/playback after stop / restart.
   const genRef = useRef(0);
+  // Stable handle to THIS hook's stop, for the module singleton bookkeeping.
+  const stopRef = useRef<() => void>(() => {});
 
   const cleanupAudio = useCallback(() => {
     if (audioRef.current) {
@@ -123,23 +135,34 @@ export function useSpeak(): {
   }, []);
 
   const stop = useCallback(() => {
-    genRef.current++; // invalidate any in-flight fetch
+    genRef.current++;
+    inFlightRef.current = false;
+    abortRef.current?.abort(); // cancel in-flight synthesis → frees server CPU
+    abortRef.current = null;
     cleanupAudio();
+    if (currentStop === stopRef.current) currentStop = null;
     setSpeaking(false);
     setLoading(false);
   }, [cleanupAudio]);
+  stopRef.current = stop;
 
   // Stop + release on unmount.
   useEffect(() => stop, [stop]);
 
   const toggle = useCallback(
     (text: string) => {
-      if (speaking || loading) {
+      if (inFlightRef.current || speaking || loading) {
         stop();
         return;
       }
       if (!text.trim()) return;
+      inFlightRef.current = true;
+      // Stop any OTHER message currently speaking before we start (C4).
+      if (currentStop && currentStop !== stopRef.current) currentStop();
+      currentStop = stopRef.current;
       const gen = ++genRef.current;
+      const ac = new AbortController();
+      abortRef.current = ac;
       setLoading(true);
       void (async () => {
         try {
@@ -147,6 +170,7 @@ export function useSpeak(): {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ text }),
+            signal: ac.signal,
           });
           if (!res.ok) throw new Error(`tts ${res.status}`);
           const blob = await res.blob();
@@ -156,12 +180,14 @@ export function useSpeak(): {
           urlRef.current = url;
           const audio = new Audio(url);
           audioRef.current = audio;
-          audio.onended = () => {
-            if (gen === genRef.current) setSpeaking(false);
+          const finish = () => {
+            if (gen !== genRef.current) return;
+            cleanupAudio();
+            if (currentStop === stopRef.current) currentStop = null;
+            setSpeaking(false);
           };
-          audio.onerror = () => {
-            if (gen === genRef.current) setSpeaking(false);
-          };
+          audio.onended = finish;
+          audio.onerror = finish;
           await audio.play();
           if (gen !== genRef.current) {
             cleanupAudio();
@@ -169,9 +195,16 @@ export function useSpeak(): {
           }
           setSpeaking(true);
         } catch {
-          if (gen === genRef.current) setSpeaking(false);
+          // Includes an aborted fetch (stop) and iOS autoplay rejection.
+          if (gen === genRef.current) {
+            cleanupAudio();
+            setSpeaking(false);
+          }
         } finally {
-          if (gen === genRef.current) setLoading(false);
+          if (gen === genRef.current) {
+            inFlightRef.current = false;
+            setLoading(false);
+          }
         }
       })();
     },
@@ -219,11 +252,15 @@ export function MessageActions({
   durationMs,
   onRetry,
   canRetry,
+  busy,
 }: {
   text: string;
   durationMs?: number;
   onRetry?: () => void;
   canRetry?: boolean;
+  /** True while the turn is still streaming (BRO-1712 P20 C5) — hides Speak so it
+   *  can't synthesize a partial, about-to-change reply. */
+  busy?: boolean;
 }) {
   const runtime = formatDuration(durationMs);
   if (!runtime && !text) return null;
@@ -240,8 +277,9 @@ export function MessageActions({
       ) : null}
       <span className="flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100">
         <CopyButton text={text} label="Copy response" />
-        {/* Read the response aloud on demand (BRO-1711) — OmniVoice TTS. */}
-        <SpeakButton text={text} label="Read response aloud" />
+        {/* Read the response aloud on demand (BRO-1711) — OmniVoice TTS. Hidden
+            while streaming so it never speaks a partial reply (P20 C5). */}
+        {busy ? null : <SpeakButton text={text} label="Read response aloud" />}
         {canRetry && onRetry ? (
           <button type="button" onClick={onRetry} aria-label="Retry" className={ICON_BTN}>
             <RotateCcw className="size-3.5" />
