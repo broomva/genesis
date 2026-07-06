@@ -819,7 +819,7 @@ export function ChatView({
         <MessageScrollerProvider autoScroll defaultScrollPosition="last-anchor">
           <MessageScroller className="min-h-0">
             <MessageScrollerViewport className="px-4">
-              <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[var(--composer-h,4.5rem)]">
+              <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-5 pt-6 pb-[calc(var(--composer-h,4.5rem)+1.25rem)]">
                 {messages.length === 0 ? (
                   // The Session Launcher (BRO-1657) — the pre-session configurator
                   // card. Surfaces every sticky binding (workspace/engine/model/
@@ -950,8 +950,10 @@ export function ChatView({
             "bg-background absolute inset-x-0 bottom-0 px-4 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]",
             // A soft top edge so messages fade INTO the bar instead of a hard cut.
             // Fade to a zero-alpha SAME-HUE background (not `transparent` = black-0)
-            // so the 20px strip doesn't pick up a gray fringe (BRO-1628 P20).
-            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-5 before:h-5 before:bg-gradient-to-t before:from-background before:to-[color-mix(in_oklab,var(--background),transparent)]",
+            // so the 16px strip doesn't pick up a gray fringe (BRO-1628 P20). Kept
+            // short (16px, was 20px) so it doesn't wash out the last turn's action
+            // row (run-time/copy/retry) that sits just above the bar (BRO-1704).
+            "before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-gradient-to-t before:from-background before:to-[color-mix(in_oklab,var(--background),transparent)]",
             "transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.2,0,0,1)] will-change-transform motion-reduce:transition-none",
             composerHidden
               ? "pointer-events-none translate-y-[110%] opacity-0"

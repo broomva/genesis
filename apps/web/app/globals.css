@@ -146,8 +146,8 @@
   --bv-shadow-edge: 0 1px 0 oklch(0.25 0.05 265 / 0.06);
   --bv-shadow-card-hover: 0 6px 16px oklch(0.45 0.09 260 / 0.09), 0 1px 0
     oklch(0.25 0.05 265 / 0.06);
-  --bv-shadow-composer: 0 4px 4px oklch(0.45 0.09 260 / 0.05), 0 4px 80px 8px
-    oklch(0.55 0.12 260 / 0.08), 0 0 1px oklch(0.2 0.04 265 / 0.65);
+  --bv-shadow-composer: 0 4px 4px oklch(0.45 0.09 260 / 0.04), 0 4px 56px 4px
+    oklch(0.55 0.12 260 / 0.06), 0 0 1px oklch(0.2 0.04 265 / 0.65);
   --bv-shadow-glow: 0 0 24px oklch(0.6 0.12 260 / 0.16);
 
   /* Radii ladder (Houston verbatim) + signature radii */
@@ -278,7 +278,7 @@
 
   --bv-shadow-edge: 0 1px 0 oklch(0 0 0 / 0.25);
   --bv-shadow-card-hover: 0 6px 16px oklch(0 0 0 / 0.35), 0 0 20px oklch(0.6 0.12 260 / 0.1);
-  --bv-shadow-composer: 0 4px 8px oklch(0 0 0 / 0.3), 0 4px 64px 8px oklch(0.6 0.12 260 / 0.13), 0 0
+  --bv-shadow-composer: 0 4px 8px oklch(0 0 0 / 0.24), 0 4px 48px 2px oklch(0.6 0.12 260 / 0.1), 0 0
     1px oklch(0.7 0.08 262 / 0.55);
   --bv-shadow-glow: 0 0 28px oklch(0.6 0.12 260 / 0.22);
 
