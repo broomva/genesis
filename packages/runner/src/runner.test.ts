@@ -358,6 +358,12 @@ describe("decodeDataUrl", () => {
     expect(bytes).not.toBeNull();
     expect(new TextDecoder().decode(bytes as Uint8Array)).toBe("hi");
   });
+  test("tolerates RFC-2397 mediatype parameters and an empty mediatype", () => {
+    const bytes = decodeDataUrl("data:image/png;charset=utf-8;base64,aGk=");
+    expect(bytes).not.toBeNull();
+    expect(new TextDecoder().decode(bytes as Uint8Array)).toBe("hi");
+    expect(decodeDataUrl("data:;base64,aGk=")).not.toBeNull();
+  });
   test("rejects non-data and non-base64 URLs", () => {
     expect(decodeDataUrl("blob:whatever")).toBeNull();
     expect(decodeDataUrl("https://example.com/x.png")).toBeNull();
@@ -389,12 +395,23 @@ describe("materializeAttachments", () => {
     expect(paths).toContain("/ws/.genesis/attachments/evil.png");
     expect(paths).toContain("/ws/.genesis/attachments/evil-1.png");
   });
-  test("skips undecodable attachments and returns '' when none are written", async () => {
+  test("skips undecodable attachments and reports them (no silent drop)", async () => {
     const host = new RecordingHost();
     const note = await materializeAttachments(host, "/ws", [
       { filename: "x.png", url: "blob:not-inline" },
     ]);
     expect(host.writes.length).toBe(0);
-    expect(note).toBe("");
+    // Feedback instead of "" (P20): the agent is told the file couldn't be processed.
+    expect(note).toContain("could not be processed");
+  });
+  test("reports partially-skipped attachments alongside the manifest", async () => {
+    const host = new RecordingHost();
+    const note = await materializeAttachments(host, "/ws", [
+      { filename: "ok.png", url: "data:image/png;base64,aGk=" },
+      { filename: "bad.png", url: "blob:not-inline" },
+    ]);
+    expect(host.writes.map((w) => w.path)).toEqual(["/ws/.genesis/attachments/ok.png"]);
+    expect(note).toContain("/ws/.genesis/attachments/ok.png");
+    expect(note).toContain("1 other attached file");
   });
 });

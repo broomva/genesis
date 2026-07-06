@@ -261,13 +261,16 @@ export function safeAttachmentName(name: string, index: number): string {
   return cleaned || `file-${index + 1}`;
 }
 
-/** Decode a `data:<mime>;base64,<data>` URL to its raw bytes, or null if it isn't
- *  a base64 data URL (blob:/http: never survive the wire hop — only data: does). */
+/** Decode a `data:<mime>[;params];base64,<data>` URL to its raw bytes, or null if
+ *  it isn't a base64 data URL (blob:/http: never survive the wire hop — only data:
+ *  does). Tolerates RFC-2397 mediatype parameters (e.g.
+ *  `data:image/png;charset=utf-8;base64,…`) — matches up to the LAST `;base64,`
+ *  delimiter, not just a param-less type (BRO-1706, P20 cross-review). */
 export function decodeDataUrl(url: string): Uint8Array | null {
-  const m = /^data:([^;,]*)?(;base64)?,(.*)$/s.exec(url);
-  if (!m || !m[2]) return null; // require ;base64 — we never wrote a non-base64 URL
+  const m = /^data:[^,]*;base64,(.*)$/s.exec(url);
+  if (!m) return null; // require ;base64 — we never wrote a non-base64 URL
   try {
-    return new Uint8Array(Buffer.from(m[3] ?? "", "base64"));
+    return new Uint8Array(Buffer.from(m[1] ?? "", "base64"));
   } catch {
     return null;
   }
@@ -311,10 +314,22 @@ export async function materializeAttachments(
       // Skip a file that failed to write; the turn proceeds with the rest.
     }
   }
-  if (written.length === 0) return "";
+  // Feedback when some (or all) attachments couldn't be materialized (P20
+  // cross-review): tell the agent so it can tell the user, instead of silently
+  // dropping a file the user watched themselves attach.
+  const skipped = attachments.length - written.length;
+  if (written.length === 0) {
+    return `\n\n(Note: ${attachments.length} attached file${
+      attachments.length > 1 ? "s" : ""
+    } could not be processed and ${attachments.length > 1 ? "were" : "was"} skipped — tell the user.)`;
+  }
   const lines = written.map((w) => `- ${w.path}${w.mediaType ? ` (${w.mediaType})` : ""}`);
   const plural = written.length > 1 ? "s" : "";
-  return `\n\n---\nAttached file${plural} (saved to this workspace — read with your file tools as needed; images and PDFs are supported natively):\n${lines.join("\n")}`;
+  const skippedNote =
+    skipped > 0
+      ? `\n(Note: ${skipped} other attached file${skipped > 1 ? "s" : ""} could not be processed and ${skipped > 1 ? "were" : "was"} skipped — tell the user.)`
+      : "";
+  return `\n\n---\nAttached file${plural} (saved to this workspace — read with your file tools as needed; images and PDFs are supported natively):\n${lines.join("\n")}${skippedNote}`;
 }
 
 export async function runAgent(opts: RunOptions): Promise<RunResult> {
@@ -368,9 +383,13 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // operate on them. Done after cwd resolution (a worktree path only exists now) and
   // before spawn. Best-effort — a materialization failure never blocks the turn.
   let prompt = opts.prompt;
-  if (opts.attachments && opts.attachments.length > 0 && runCwd) {
+  // On a microVM with no explicit remoteCwd, the sandbox spawns at its own default
+  // (/vercel/sandbox) — materialize there too so files land in the agent's cwd
+  // instead of being silently dropped (P20 cross-review). Local/VPS always have cwd.
+  const attachCwd = runCwd ?? (isMicroVM ? "/vercel/sandbox" : undefined);
+  if (opts.attachments && opts.attachments.length > 0 && attachCwd) {
     try {
-      prompt += await materializeAttachments(host, runCwd, opts.attachments);
+      prompt += await materializeAttachments(host, attachCwd, opts.attachments);
     } catch {
       // Non-fatal: run the turn with the original prompt (attachments just absent).
     }

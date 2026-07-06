@@ -490,8 +490,19 @@ export function build(opts: BuildOpts) {
     newTextId: () => crypto.randomUUID(),
     newReasoningId: () => crypto.randomUUID(),
   }));
+  // Reject an oversized body before buffering/parsing it (BRO-1706, P20
+  // cross-review): the per-attachment caps run POST-parse, so an unbounded JSON body
+  // (10 attachments × ~26 MB base64 + overhead) would OOM before they apply. ~256 MB
+  // comfortably covers a full attachment set; Content-Length rides normal fetch/undici
+  // JSON POSTs (and the BFF forwards it). Absent → we still parse, but the attachment
+  // caps then bound what is retained.
+  const MAX_CHAT_BODY_BYTES = 256 * 1024 * 1024;
   app.post("/api/chat", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    const contentLength = Number(c.req.header("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > MAX_CHAT_BODY_BYTES) {
+      return c.json({ error: "request body too large" }, 413);
+    }
     let incoming: IncomingMessage;
     try {
       incoming = chat.parseIncoming(await c.req.json().catch(() => null));
