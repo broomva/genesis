@@ -230,7 +230,6 @@ function AssistantBody({
           durationMs={meta?.durationMs}
           onRetry={onRetry}
           canRetry={!busy}
-          busy={busy}
         />
       ) : null}
     </div>
