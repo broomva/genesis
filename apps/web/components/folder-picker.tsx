@@ -127,7 +127,7 @@ export function FolderPicker({
 
       {level?.truncated ? (
         <p className="text-muted-foreground px-2 text-[0.65rem]">
-          Showing the first {level.entries.length} folders — some are hidden.
+          Showing the first {level.entries.length} folders. Some are hidden.
         </p>
       ) : null}
 

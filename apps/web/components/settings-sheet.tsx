@@ -211,7 +211,7 @@ export function SettingsSheet({
             <Section icon={Cpu} title="Models & engine">
               <Row
                 label="Engine"
-                hint="Interactive keeps a live session per chat; print runs one-shot. Applies to new chats — an existing chat keeps the engine it started with."
+                hint="Interactive keeps a live session per chat; print runs one-shot. Applies to new chats; an existing chat keeps the engine it started with."
               >
                 <SegmentedControl
                   type="single"
@@ -242,7 +242,7 @@ export function SettingsSheet({
               {!isEngineAvailable(prefs.engine, availableEngines) ? (
                 <p className="text-muted-foreground -mt-1 px-0.5 text-xs leading-snug">
                   <span className="text-foreground font-medium">{prefs.engine}</span> isn't
-                  available on this server — new chats will start on an available engine.
+                  available on this server. New chats will start on an available engine.
                 </p>
               ) : null}
               {/* Default workspace (BRO-1627) — the repo new chats run in. Hidden

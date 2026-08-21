@@ -247,7 +247,7 @@ function UserMessage({ message }: { message: UIMessage }) {
     <div className="group flex flex-col items-end">
       {/* Attached images/files render inline above the bubble (BRO-1706). */}
       <MessageAttachments parts={message.parts} className="mb-1" />
-      <div className="bg-[var(--bv-canvas-soft-2)] text-foreground max-w-[78%] rounded-[1.5rem_1.5rem_0.375rem_1.5rem] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
+      <div className="bg-[var(--bv-canvas-soft-2)] text-foreground max-w-[78%] [border-radius:var(--bv-radius-bubble)] px-[18px] py-2.5 text-[0.95rem] leading-relaxed whitespace-pre-wrap">
         {text}
       </div>
       <div className="mt-1 flex items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100">
@@ -1022,7 +1022,7 @@ export function ChatView({
                           >
                             <PromptInputSelectTrigger
                               aria-label={
-                                modelLocked ? "Model (locked — session running)" : "Model"
+                                modelLocked ? "Model (locked while the session runs)" : "Model"
                               }
                             >
                               <PromptInputSelectValue />
