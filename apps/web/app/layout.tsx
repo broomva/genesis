@@ -5,7 +5,7 @@ import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 export const metadata: Metadata = {
   title: "Genesis",
-  description: "Genesis agent chat — a local-first PWA channel.",
+  description: "Genesis agent chat: a local-first PWA channel.",
   applicationName: "Genesis",
   appleWebApp: {
     capable: true,

@@ -328,7 +328,7 @@ function FrontmatterPanel({ raw }: { raw: string }) {
 function TruncNote({ size }: { size: number }) {
   return (
     <p className="text-muted-foreground border-border border-t px-4 py-2 text-xs italic">
-      Truncated — showing the first {formatSize(256 * 1024)} of {formatSize(size)}.
+      Truncated: showing the first {formatSize(256 * 1024)} of {formatSize(size)}.
     </p>
   );
 }
@@ -358,7 +358,7 @@ function TextContent({
     return <p className="text-[var(--bv-danger)] p-4 text-sm">{text.error}</p>;
   const file = text.file;
   if (file.binary)
-    return <OpenRaw src={rawUrl} label={`Binary file (${formatSize(file.size)}) — not shown.`} />;
+    return <OpenRaw src={rawUrl} label={`Binary file (${formatSize(file.size)}), not shown.`} />;
   if (file.content.length === 0)
     return <p className="text-muted-foreground p-4 text-sm italic">Empty file.</p>;
 
@@ -478,9 +478,9 @@ function FileViewer({
 function badgeClass(badge: string): string {
   switch (badge) {
     case "M":
-      return "text-[var(--bv-amber-text,#b8860b)] border-[var(--bv-amber-text,#b8860b)]/40";
+      return "text-[var(--bv-amber-text)] border-[var(--bv-amber-text)]/40";
     case "A":
-      return "text-[var(--bv-green-text,#2e7d32)] border-[var(--bv-green-text,#2e7d32)]/40";
+      return "text-[var(--bv-green-text)] border-[var(--bv-green-text)]/40";
     case "D":
       return "text-[var(--bv-danger)] border-[var(--bv-danger)]/40";
     case "U":
@@ -495,7 +495,7 @@ function diffLineClass(line: string): string {
   if (line.startsWith("+++") || line.startsWith("---")) return "text-muted-foreground";
   if (line.startsWith("@@")) return "text-[var(--bv-blue-text)] bg-[var(--bv-blue-text)]/8";
   if (line.startsWith("+"))
-    return "text-[var(--bv-green-text,#2e7d32)] bg-[var(--bv-green-text,#2e7d32)]/8";
+    return "text-[var(--bv-green-text)] bg-[var(--bv-green-text)]/8";
   if (line.startsWith("-")) return "text-[var(--bv-danger)] bg-[var(--bv-danger)]/8";
   if (line.startsWith("diff ") || line.startsWith("index ")) return "text-muted-foreground";
   return "text-foreground";
@@ -543,7 +543,7 @@ function DiffViewer({
           {path}
         </span>
         {cached ? (
-          <span className="text-muted-foreground border-border shrink-0 rounded border px-1.5 py-0.5 text-[0.65rem]">
+          <span className="text-muted-foreground border-border shrink-0 rounded-sm border px-1.5 py-0.5 text-[0.65rem]">
             staged
           </span>
         ) : null}
@@ -560,11 +560,11 @@ function DiffViewer({
         {state.status === "ready" ? (
           state.binary ? (
             <p className="text-muted-foreground p-4 text-sm italic">
-              Binary file — diff not shown.
+              Binary file; diff not shown.
             </p>
           ) : state.diff.length === 0 ? (
             <p className="text-muted-foreground p-4 text-sm italic">
-              No diff to show — the file may be untracked (open it in Repo Files) or unchanged.
+              No diff to show. The file may be untracked (open it in Repo Files) or unchanged.
             </p>
           ) : (
             <>
@@ -600,7 +600,7 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
     >
       <span
         className={cn(
-          "inline-flex size-5 shrink-0 items-center justify-center rounded border font-mono text-[0.7rem] font-medium",
+          "inline-flex size-5 shrink-0 items-center justify-center rounded-sm border font-mono text-[0.7rem] font-medium",
           badgeClass(badge),
         )}
       >
@@ -613,7 +613,7 @@ function FileStatusRow({ file, onOpen }: { file: GitFileEntry; onOpen: () => voi
       {file.added !== null || file.deleted !== null ? (
         <span className="shrink-0 pl-2 font-mono text-[0.7rem] tabular-nums">
           {file.added !== null ? (
-            <span className="text-[var(--bv-green-text,#2e7d32)]">+{file.added}</span>
+            <span className="text-[var(--bv-green-text)]">+{file.added}</span>
           ) : null}{" "}
           {file.deleted !== null ? (
             <span className="text-[var(--bv-danger)]">-{file.deleted}</span>
@@ -663,7 +663,7 @@ function CommitBox({
         r.pushed
           ? `Committed + pushed (${short}).`
           : r.pushError
-            ? `Committed (${short}) — ${r.pushError}`
+            ? `Committed (${short}): ${r.pushError}`
             : `Committed (${short}).`,
       );
     } catch (e) {
@@ -688,7 +688,7 @@ function CommitBox({
       />
       {hasUntracked ? (
         <p className="text-muted-foreground mt-1 px-0.5 text-xs">
-          New (U) files aren't included — only edits to tracked files are committed.
+          New (U) files aren't included; only edits to tracked files are committed.
         </p>
       ) : null}
       {error ? <p className="text-[var(--bv-danger)] mt-1 px-0.5 text-xs">{error}</p> : null}
@@ -792,7 +792,7 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
           ) : null}
           {commitNote ? (
             <p
-              className="mb-1 rounded-md bg-[var(--bv-canvas-soft-2)] px-2.5 py-1.5 text-xs text-[var(--bv-green-text,#2e7d32)]"
+              className="mb-1 rounded-md bg-[var(--bv-canvas-soft-2)] px-2.5 py-1.5 text-xs text-[var(--bv-green-text)]"
               data-testid="ws-commit-note"
             >
               {commitNote}
@@ -800,7 +800,7 @@ function ChangesPanel({ workspaceId, active }: { workspaceId: string; active: bo
           ) : null}
           {state.data.files.length === 0 ? (
             <p className="text-muted-foreground p-4 text-sm italic">
-              No changes — the working tree is clean.
+              No changes. The working tree is clean.
             </p>
           ) : (
             state.data.files.map((f) => (
@@ -848,7 +848,7 @@ function relTime(iso: string, nowMs: number): string {
 /** A CI run's status icon. */
 function RunBadge({ state }: { state: RunState }) {
   if (state === "success")
-    return <CircleCheck className="size-4 shrink-0 text-[var(--bv-green-text,#2e7d32)]" />;
+    return <CircleCheck className="size-4 shrink-0 text-[var(--bv-green-text)]" />;
   if (state === "failure") return <CircleX className="text-[var(--bv-danger)] size-4 shrink-0" />;
   if (state === "running")
     return <Loader2 className="size-4 shrink-0 animate-spin text-[var(--bv-blue-text)]" />;
@@ -905,7 +905,7 @@ function ChecksTab({ workspaceId, active }: { workspaceId: string; active: boole
               type="button"
               onClick={() => setReloadKey((k) => k + 1)}
               aria-label="Refresh checks"
-              className="hover:text-foreground ml-auto shrink-0 rounded p-1 [@media(pointer:coarse)]:size-8"
+              className="hover:text-foreground ml-auto shrink-0 rounded-sm p-1 [@media(pointer:coarse)]:size-8"
             >
               <RefreshCw className="size-3.5" />
             </button>

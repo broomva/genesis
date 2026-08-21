@@ -80,7 +80,7 @@ export function ContextMeter({ data, className }: { data: ContextMeterData; clas
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label={`Session usage — context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, cost ${formatUsd(costUsd)}. Open breakdown.`}
+          aria-label={`Session usage: context ${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens${status ? `, ${status}` : ""}, cost ${formatUsd(costUsd)}. Open breakdown.`}
           className={cn(
             "flex items-center justify-center rounded-md p-1.5 text-muted-foreground transition-colors",
             "hover:bg-[var(--bv-frost-8)] hover:text-foreground",

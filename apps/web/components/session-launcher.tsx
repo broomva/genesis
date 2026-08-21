@@ -279,7 +279,7 @@ export function SessionLauncher({
           </SegmentedControl>
           <p className="text-muted-foreground text-xs leading-snug">
             {!worktreeCapable
-              ? "This workspace runs at its root — worktrees aren't available here."
+              ? "This workspace runs at its root, so worktrees aren't available here."
               : effWorktree === "worktree"
                 ? "Cuts an isolated git worktree for this session."
                 : effWorktree === "root"

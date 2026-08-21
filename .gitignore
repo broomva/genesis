@@ -15,3 +15,6 @@ dist/
 **/src/**/*.js.map
 .vercel
 .railway
+apps/web/.unslop/evidence/
+apps/web/.unslop/survey.json
+apps/web/.unslop/survey.md
