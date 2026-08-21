@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Genesis",
     short_name: "Genesis",
-    description: "Genesis agent chat — a local-first PWA channel.",
+    description: "Genesis agent chat: a local-first PWA channel.",
     start_url: "/",
     display: "standalone",
     // Light is the default canvas (the DS signature). The splash/background and
