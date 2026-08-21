@@ -494,8 +494,7 @@ function badgeClass(badge: string): string {
 function diffLineClass(line: string): string {
   if (line.startsWith("+++") || line.startsWith("---")) return "text-muted-foreground";
   if (line.startsWith("@@")) return "text-[var(--bv-blue-text)] bg-[var(--bv-blue-text)]/8";
-  if (line.startsWith("+"))
-    return "text-[var(--bv-green-text)] bg-[var(--bv-green-text)]/8";
+  if (line.startsWith("+")) return "text-[var(--bv-green-text)] bg-[var(--bv-green-text)]/8";
   if (line.startsWith("-")) return "text-[var(--bv-danger)] bg-[var(--bv-danger)]/8";
   if (line.startsWith("diff ") || line.startsWith("index ")) return "text-muted-foreground";
   return "text-foreground";
@@ -559,9 +558,7 @@ function DiffViewer({
         ) : null}
         {state.status === "ready" ? (
           state.binary ? (
-            <p className="text-muted-foreground p-4 text-sm italic">
-              Binary file; diff not shown.
-            </p>
+            <p className="text-muted-foreground p-4 text-sm italic">Binary file; diff not shown.</p>
           ) : state.diff.length === 0 ? (
             <p className="text-muted-foreground p-4 text-sm italic">
               No diff to show. The file may be untracked (open it in Repo Files) or unchanged.

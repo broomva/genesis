@@ -1,6 +1,12 @@
 {
   "waivers": [
-    {"check": "tokens.color", "reason": "The two remaining hex literals are the themeColor meta values in app/layout.tsx; <meta> cannot read CSS custom properties. Stated in DESIGN.md §Color."},
-    {"check": "tokens.radius", "reason": "Distinct values are the shadcn ladder derived from one --radius plus vendored components/ui calc-forms; app-level usage is restricted to ladder steps and the two declared signatures (--bv-radius-composer, --bv-radius-bubble). Stated in DESIGN.md §Radius."}
+    {
+      "check": "tokens.color",
+      "reason": "The two remaining hex literals are the themeColor meta values in app/layout.tsx; <meta> cannot read CSS custom properties. Stated in DESIGN.md §Color."
+    },
+    {
+      "check": "tokens.radius",
+      "reason": "Distinct values are the shadcn ladder derived from one --radius plus vendored components/ui calc-forms; app-level usage is restricted to ladder steps and the two declared signatures (--bv-radius-composer, --bv-radius-bubble). Stated in DESIGN.md §Radius."
+    }
   ]
 }
