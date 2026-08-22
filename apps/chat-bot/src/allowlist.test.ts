@@ -118,8 +118,16 @@ describe("principalOf — Kapso thread ids are base64url, not plain", () => {
   });
 
   test("a non-canonical base64url encoding is rejected", () => {
-    // Node's decoder is lenient; the round-trip re-encode is what catches this.
+    // "=" is caught by the charset test, so it does NOT exercise the round-trip
+    // check — a mutation sweep found this fixture proved nothing.
     expect(principalOf("kapso:MTIzNDU2:NTczMDAxMjM0NTY3=", "kapso")).toBeUndefined();
+
+    // This one does. It passes the charset, and Node's lenient decoder yields
+    // the SAME "573001234567" as the canonical NTczMDAxMjM0NTY3 (the trailing
+    // bits are simply dropped). Only re-encoding catches it. Without that,
+    // several distinct thread-id strings alias to one authorized principal —
+    // permissive, not restrictive, so it is worth denying.
+    expect(principalOf("kapso:MTIzNDU2:NTczMDAxMjM0NTY3A", "kapso")).toBeUndefined();
   });
 });
 
