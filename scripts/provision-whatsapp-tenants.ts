@@ -21,6 +21,7 @@
 // depend on getting a config path right; the denyWrite and Edit-deny below are
 // defense in depth, not the boundary.
 
+import { execFileSync } from "node:child_process";
 import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
