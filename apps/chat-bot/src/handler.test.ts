@@ -4,6 +4,8 @@ import {
   chunkForWhatsapp,
   drainStream,
   handleAgentMessage,
+  tenantWorkspaceId,
+  unregisteredTenants,
   workspaceDecisionFor,
   workspaceIdFor,
   workspaceIsRegistered,
@@ -306,5 +308,43 @@ describe("drainStream", () => {
   });
   test("empty stream yields empty string", async () => {
     expect(await drainStream(gen([]))).toBe("");
+  });
+});
+
+describe("unregisteredTenants — every tenant, not just one (BRO-2224)", () => {
+  const payload = {
+    workspaces: [
+      { id: "ws-wa-573001234567", available: true },
+      { id: "ws-wa-573009999999", available: false },
+    ],
+  };
+
+  test("names each missing tenant so a half-run provisioning is diagnosable", () => {
+    expect(unregisteredTenants(payload, ["ws-wa-573001234567"])).toEqual([]);
+    expect(unregisteredTenants(payload, ["ws-wa-573000000000"])).toEqual(["ws-wa-573000000000"]);
+  });
+
+  test("ONE registered tenant does not vouch for the others", () => {
+    // The half-provisioned case. An any-of check passes here, and every
+    // unprovisioned sender then shares the engine default workspace — both the
+    // collision this change removes AND maximum reach.
+    expect(unregisteredTenants(payload, ["ws-wa-573001234567", "ws-wa-573000000000"])).toEqual([
+      "ws-wa-573000000000",
+    ]);
+  });
+
+  test("registered-but-unavailable counts as missing", () => {
+    expect(unregisteredTenants(payload, ["ws-wa-573009999999"])).toEqual(["ws-wa-573009999999"]);
+  });
+
+  test("the id the check verifies is the id dispatch will use", () => {
+    // The drift guard: both sides go through tenantWorkspaceId.
+    const principal = { channel: "kapso" as const, id: "573001234567" };
+    const viaCheck = tenantWorkspaceId(principal, "ws-wa-");
+    const viaDispatch = workspaceDecisionFor(
+      `kapso:${Buffer.from("111", "utf8").toString("base64url")}:${Buffer.from("573001234567", "utf8").toString("base64url")}`,
+      "ws-wa-",
+    );
+    expect(viaDispatch).toEqual({ kind: "pin", workspaceId: viaCheck });
   });
 });

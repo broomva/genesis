@@ -41,8 +41,9 @@ import {
   type HandlerOptions,
   handleAgentMessage,
   nativeCommandMenu,
+  tenantWorkspaceId,
+  unregisteredTenants,
   workspaceDecisionFor,
-  workspaceIsRegistered,
 } from "./handler";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -345,7 +346,7 @@ async function assertTenantWorkspacesRegistered(): Promise<void> {
 
   const tenants = allowlist.principals
     .filter((p) => p.channel === "kapso")
-    .map((p) => ({ principal: p, workspaceId: `${whatsappWorkspacePrefix}${p.id}` }));
+    .map((p) => ({ principal: p, workspaceId: tenantWorkspaceId(p, whatsappWorkspacePrefix) }));
 
   if (tenants.length === 0) {
     console.error(
@@ -367,7 +368,11 @@ async function assertTenantWorkspacesRegistered(): Promise<void> {
         lastErr = `HTTP ${res.status}`;
       } else {
         const payload = await res.json();
-        const missing = tenants.filter((t) => !workspaceIsRegistered(payload, t.workspaceId));
+        const missingIds = unregisteredTenants(
+          payload,
+          tenants.map((t) => t.workspaceId),
+        );
+        const missing = tenants.filter((t) => missingIds.includes(t.workspaceId));
         if (missing.length === 0) {
           console.log(
             `[genesis-bot] verified ${tenants.length} WhatsApp tenant workspace(s): ${tenants.map((t) => t.workspaceId).join(", ")}`,
