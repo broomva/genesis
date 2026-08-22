@@ -35,8 +35,7 @@ const WORKSPACES_DIR =
   process.env.GENESIS_WORKSPACES_DIR ?? join(HOME, ".config/genesis-bot/workspaces");
 const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
 
-// The uid/gid the agent runs as — everything except .claude is handed to it.
-const AGENT_UID = Number(process.env.GENESIS_TENANT_UID ?? 1000);
+// The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
 const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
 
 const allowlist = parseAllowlist(RAW_ALLOWLIST, "kapso");
@@ -141,8 +140,16 @@ for (const t of tenants) {
 
   mkdirSync(t.dir, { recursive: true });
   mkdirSync(WORKSPACES_DIR, { recursive: true });
-  // The tenant owns its workspace...
-  chownSync(t.dir, AGENT_UID, AGENT_GID);
+  // The tenant can WRITE its workspace but does not OWN it, and the sticky bit
+  // is what makes that distinction bite. Unlinking a file needs write on the
+  // PARENT directory, not on the file — so an agent-owned tenant dir lets the
+  // agent `rm -rf .claude` and install its own settings no matter how the
+  // settings file itself is owned. Measured: it renamed .claude on the first
+  // attempt. The sticky bit alone does not fix it either, because a directory's
+  // OWNER is exempt from it. root:agent 1775 is the combination that holds:
+  // group-write to work in, not the owner, so sticky actually applies.
+  chownSync(t.dir, 0, AGENT_GID);
+  chmodSync(t.dir, 0o1775);
 
   // ...but NOT the settings that confine it.
   mkdirSync(claudeDir, { recursive: true });
@@ -167,6 +174,17 @@ for (const t of tenants) {
   const settingsPath = join(t.dir, ".claude/settings.json");
   if (!existsSync(settingsPath)) {
     console.error(`  MISSING ${settingsPath}`);
+    bad++;
+    continue;
+  }
+  // The directory guard comes first: a tenant dir the agent owns makes every
+  // property of the settings file below irrelevant.
+  const dst = statSync(t.dir);
+  const dmode = dst.mode & 0o7777;
+  if (dst.uid !== 0 || (dmode & 0o1000) === 0) {
+    console.error(
+      `  UNPROTECTED-DIR ${t.dir} (uid=${dst.uid}, mode=${dmode.toString(8)}) — the tenant could unlink .claude and install its own settings. Expected root-owned with the sticky bit (1775).`,
+    );
     bad++;
     continue;
   }
