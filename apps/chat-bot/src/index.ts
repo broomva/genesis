@@ -42,6 +42,7 @@ import {
   handleAgentMessage,
   nativeCommandMenu,
   workspaceIdFor,
+  workspaceIsRegistered,
 } from "./handler";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -271,6 +272,53 @@ if (kapsoConfigured && process.env.GENESIS_WHATSAPP_WORKSPACE_ID) {
       "engine default workspace. A public number should be pinned to a dedicated one.",
   );
 }
+
+/** Refuse to serve WhatsApp unless its workspace really exists in the engine.
+ *
+ *  The engine binds an unknown workspaceId to the DEFAULT workspace instead of
+ *  refusing, so without this a typo silently hands a PUBLIC channel the
+ *  broadest workspace on the box while the startup log still says "pinned".
+ *  Verified on the VPS: "ws-doesnotexist" ran the agent in /home/agent.
+ *
+ *  Retries briefly because genesis-api may still be coming up (systemd orders
+ *  us After= it, but ordering is not readiness). Exhausted → exit(1); the unit
+ *  is Restart=on-failure, so this recovers on its own once the API answers.
+ *  Never degrades to "assume it is fine". */
+async function assertWhatsappWorkspaceRegistered(): Promise<void> {
+  const want = process.env.GENESIS_WHATSAPP_WORKSPACE_ID?.trim();
+  if (!want) return; // nothing claimed, nothing to verify
+
+  const url = `${baseUrl.replace(/\/$/, "")}/workspaces`;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        lastErr = `HTTP ${res.status}`;
+      } else if (workspaceIsRegistered(await res.json(), want)) {
+        console.log(`[genesis-bot] verified WhatsApp workspace ${want} is registered`);
+        return;
+      } else {
+        console.error(
+          `[genesis-bot] GENESIS_WHATSAPP_WORKSPACE_ID="${want}" is NOT a registered, available workspace. Refusing to serve WhatsApp: the engine would silently bind the DEFAULT workspace instead, giving a public channel far more reach than intended. Register it (a JSON file in GENESIS_WORKSPACES_DIR) and restart.`,
+        );
+        process.exit(1);
+      }
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+    if (attempt < 5) await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.error(
+    `[genesis-bot] could not verify GENESIS_WHATSAPP_WORKSPACE_ID="${want}" against ${url} (${lastErr}). Refusing to serve WhatsApp rather than assume the confinement holds.`,
+  );
+  process.exit(1);
+}
+
+if (kapsoConfigured) await assertWhatsappWorkspaceRegistered();
 
 await chat.initialize();
 await registerTelegramCommands();

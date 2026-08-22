@@ -60,6 +60,36 @@ export function workspaceIdFor(
   return pinned ? pinned : undefined;
 }
 
+/** Is `wantId` present in a Genesis `GET /workspaces` payload?
+ *
+ *  Exists because the engine binds an UNKNOWN workspaceId to the DEFAULT
+ *  workspace rather than refusing (`Supervisor.resolve`: "unknown → default").
+ *  Measured on the VPS 2026-08-22: `workspaceId: "ws-doesnotexist"` ran the
+ *  agent in `/home/agent` — the broadest workspace on the box.
+ *
+ *  For most callers that fallback is a convenience. For a PUBLIC channel it is
+ *  a silent widening: one typo in GENESIS_WHATSAPP_WORKSPACE_ID and WhatsApp
+ *  gets the home directory while the bot still logs "pinned". We do not change
+ *  the engine's semantics (other consumers depend on them) — the channel
+ *  verifies its own confinement before serving.
+ *
+ *  Unrecognizable payload → false. Unverifiable is not "fine". */
+export function workspaceIsRegistered(payload: unknown, wantId: string): boolean {
+  const want = wantId.trim();
+  if (!want) return false;
+  if (typeof payload !== "object" || payload === null) return false;
+  const list = (payload as { workspaces?: unknown }).workspaces;
+  if (!Array.isArray(list)) return false;
+  return list.some((w) => {
+    if (typeof w !== "object" || w === null) return false;
+    const entry = w as { id?: unknown; available?: unknown };
+    if (entry.id !== want) return false;
+    // `available: false` means the path is missing/unreadable — registered but
+    // unusable, which the engine would also fall back from.
+    return entry.available !== false;
+  });
+}
+
 /** Parse a leading-slash command token + args, stripping a `@botname` suffix. */
 export function parseCommand(text: string): { token: string; args: string } | undefined {
   const m = text.trim().match(/^\/([a-z0-9_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);

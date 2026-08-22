@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { type PostableThread, handleAgentMessage, workspaceIdFor } from "./handler";
+import {
+  type PostableThread,
+  handleAgentMessage,
+  workspaceIdFor,
+  workspaceIsRegistered,
+} from "./handler";
 
 function sseBody(frames: string[]): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -129,5 +134,57 @@ describe("workspaceIdFor — WhatsApp confinement (BRO-2216)", () => {
   test("a lookalike prefix does not count as WhatsApp", () => {
     expect(workspaceIdFor("kapsoX:abc:def", WS)).toBeUndefined();
     expect(workspaceIdFor("notkapso:abc:def", WS)).toBeUndefined();
+  });
+});
+
+describe("workspaceIsRegistered — confinement precheck (BRO-2216)", () => {
+  // Shape of a real GET /workspaces response from the VPS.
+  const payload = {
+    workspaces: [
+      { id: "ws-default", name: "root", available: true, worktreeCapable: false },
+      { id: "ws-broomva", name: "broomva", available: true, worktreeCapable: false },
+      { id: "ws-orchestrator", name: "orchestrator", available: true, worktreeCapable: false },
+    ],
+    defaultWorkspace: "ws-default",
+  };
+
+  test("a registered, available workspace passes", () => {
+    expect(workspaceIsRegistered(payload, "ws-orchestrator")).toBe(true);
+  });
+
+  test("an unregistered id fails — the whole point", () => {
+    // The engine would bind this to ws-default (/home/agent) and say nothing.
+    expect(workspaceIsRegistered(payload, "ws-doesnotexist")).toBe(false);
+    expect(workspaceIsRegistered(payload, "ws-orchestrato")).toBe(false); // typo
+    expect(workspaceIsRegistered(payload, "orchestrator")).toBe(false); // name, not id
+  });
+
+  test("registered but UNAVAILABLE fails", () => {
+    const p = { workspaces: [{ id: "ws-gone", available: false }] };
+    expect(workspaceIsRegistered(p, "ws-gone")).toBe(false);
+  });
+
+  test("available omitted is treated as usable", () => {
+    // Only an explicit `false` means unavailable; absent is the common shape.
+    expect(workspaceIsRegistered({ workspaces: [{ id: "ws-x" }] }, "ws-x")).toBe(true);
+  });
+
+  test("unrecognizable payloads fail — unverifiable is not fine", () => {
+    for (const bad of [
+      null,
+      undefined,
+      {},
+      [],
+      "nope",
+      42,
+      { workspaces: "no" },
+      { workspaces: [null] },
+    ]) {
+      expect(workspaceIsRegistered(bad, "ws-orchestrator")).toBe(false);
+    }
+  });
+
+  test("a blank wanted id never passes", () => {
+    for (const w of ["", "   "]) expect(workspaceIsRegistered(payload, w)).toBe(false);
   });
 });
