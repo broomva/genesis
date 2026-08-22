@@ -289,3 +289,56 @@ describe("startupGateFor — every REGISTERED channel is gated (BRO-2216)", () =
     if (d.action === "serve") expect(d.open).toBe(true);
   });
 });
+
+describe("Allowlist.principals — per-tenant provisioning input (BRO-2224)", () => {
+  test("an OPEN list enumerates NOTHING, even though it authorizes everyone", () => {
+    // The contract the startup check depends on. If an open list instead
+    // returned some plausible set, the caller would provision those tenants,
+    // report success, and then serve every OTHER sender from the engine
+    // default — confinement reported but not held.
+    const open = parseAllowlist(undefined, "kapso");
+    expect(open.open).toBe(true);
+    expect(open.principals).toEqual([]);
+    expect(open.allows("kapso:MTIzNDU2:NTczMDAxMjM0NTY3")).toBe(true);
+  });
+
+  test("enumerates each configured principal, channel-qualified", () => {
+    const list = parseAllowlist("+57 300 123 4567, 573009999999", "kapso");
+    expect(list.principals).toEqual([
+      { channel: "kapso", id: "573001234567" },
+      { channel: "kapso", id: "573009999999" },
+    ]);
+  });
+
+  test("the same principal written twice is provisioned ONCE", () => {
+    // Two spellings of one number must not yield two tenant directories — the
+    // second would be created, verified, and then never used.
+    const list = parseAllowlist("+57 300 123 4567, 573001234567", "kapso");
+    expect(list.principals).toEqual([{ channel: "kapso", id: "573001234567" }]);
+  });
+
+  test("an unparseable entry contributes no principal", () => {
+    expect(parseAllowlist("kapso:, ,573001234567", "kapso").principals).toEqual([
+      { channel: "kapso", id: "573001234567" },
+    ]);
+  });
+
+  test("startupGateFor unions channels without collapsing digit collisions", () => {
+    // Same digits on two channels are two principals and must stay two
+    // tenants; collapsing them would put a Telegram user and a WhatsApp sender
+    // in one directory.
+    const d = startupGateFor(
+      [
+        { channel: "telegram", raw: "573001234567", envVar: "T" },
+        { channel: "kapso", raw: "573001234567", envVar: "W" },
+      ],
+      false,
+    );
+    expect(d.action).toBe("serve");
+    if (d.action !== "serve") return;
+    expect(d.allowlist.principals).toEqual([
+      { channel: "telegram", id: "573001234567" },
+      { channel: "kapso", id: "573001234567" },
+    ]);
+  });
+});

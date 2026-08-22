@@ -9,6 +9,7 @@
 // one handler every message flows through. Skill commands (/autonomous, …) are
 // NOT control commands, so they fall through and run in the session as a turn.
 
+import { principalOf } from "./allowlist";
 import {
   CONTROL_COMMANDS,
   controlAction,
@@ -101,13 +102,54 @@ export async function drainStream(stream: AsyncIterable<string>): Promise<string
  *
  *  Returns undefined to mean "inherit the engine default" — never a fallback
  *  workspace, because guessing here would be guessing about confinement. */
-export function workspaceIdFor(
+export type WorkspaceDecision =
+  /** Not a confined channel — use whatever workspace the engine defaults to. */
+  | { kind: "inherit" }
+  /** Confine this turn to `workspaceId`. */
+  | { kind: "pin"; workspaceId: string }
+  /** A confined channel we could NOT resolve a workspace for. Do not dispatch. */
+  | { kind: "refuse"; reason: string };
+
+export function workspaceDecisionFor(
   threadId: string,
-  whatsappWorkspaceId: string | undefined,
-): string | undefined {
-  if (!threadId.startsWith("kapso:")) return undefined;
-  const pinned = whatsappWorkspaceId?.trim();
-  return pinned ? pinned : undefined;
+  prefix: string | undefined,
+): WorkspaceDecision {
+  if (!threadId.startsWith("kapso:")) return { kind: "inherit" };
+
+  const p = prefix?.trim();
+  if (!p) {
+    return {
+      kind: "refuse",
+      reason:
+        "GENESIS_WHATSAPP_WORKSPACE_PREFIX is unset, so this turn has no tenant workspace to run in",
+    };
+  }
+
+  // The SENDER, not our own number: principalOf takes waId (part 2) and
+  // normalizes it to digits, so "+57 300..." and "57300..." are one tenant and
+  // one directory. Reusing the allowlist decoder is deliberate — a second
+  // parser here could disagree with the one that authorized the thread, and
+  // the disagreement would be a sender served in another sender's workspace.
+  const principal = principalOf(threadId, "kapso");
+  if (principal === undefined || principal.channel !== "kapso") {
+    return {
+      kind: "refuse",
+      reason: `cannot resolve a WhatsApp principal from thread id ${JSON.stringify(threadId)}`,
+    };
+  }
+
+  return { kind: "pin", workspaceId: `${p}${principal.id}` };
+}
+
+/** Back-compat shim for callers that only need the id.
+ *
+ *  DELIBERATELY collapses "refuse" to undefined and is therefore NOT safe on
+ *  the dispatch path — undefined there means "inherit the engine default",
+ *  i.e. the widest workspace on the box. Call `workspaceDecisionFor` and
+ *  handle `refuse` explicitly wherever a turn is actually dispatched. */
+export function workspaceIdFor(threadId: string, prefix: string | undefined): string | undefined {
+  const d = workspaceDecisionFor(threadId, prefix);
+  return d.kind === "pin" ? d.workspaceId : undefined;
 }
 
 /** Is `wantId` present in a Genesis `GET /workspaces` payload?

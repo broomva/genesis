@@ -146,6 +146,15 @@ export interface Allowlist {
   allows(threadId: string): boolean;
   /** As `allows`, but says why on refusal. */
   decide(threadId: string): Decision;
+  /** Every principal this list authorizes, deduped, in config order.
+   *
+   *  ALWAYS EMPTY when `open` — an open list authorizes everyone, so its
+   *  principal set is not enumerable. A caller that provisions a resource per
+   *  principal (BRO-2224: one sandboxed workspace per phone number) must read
+   *  empty-and-open as "cannot enumerate", NEVER as "nothing to provision":
+   *  the second reading provisions zero tenants and then serves everyone from
+   *  the engine default, which is the widest workspace on the box. */
+  readonly principals: readonly Principal[];
 }
 
 /** Build an allowlist from raw env values (comma-separated ids).
@@ -163,19 +172,30 @@ export function parseAllowlist(
     .filter((s) => s.length > 0);
 
   if (entries.length === 0) {
-    return { open: true, allows: () => true, decide: () => ({ allowed: true }) };
+    return {
+      open: true,
+      allows: () => true,
+      decide: () => ({ allowed: true }),
+      principals: [],
+    };
   }
 
   // Key on "<channel> <id>" so a Telegram id can never satisfy a Kapso
   // principal (or vice versa) even when the digits coincide.
   const set = new Set<string>();
+  const principals: Principal[] = [];
   for (const entry of entries) {
     const p = entryPrincipal(entry, channel);
-    if (p !== undefined) set.add(`${p.channel} ${p.id}`);
+    if (p === undefined) continue;
+    const key = `${p.channel} ${p.id}`;
+    if (set.has(key)) continue; // same principal written twice -> provision once
+    set.add(key);
+    principals.push(p);
   }
 
   return {
     open: false,
+    principals,
     decide(threadId: string): Decision {
       const p = principalOf(threadId, channel);
       if (p === undefined) return { allowed: false, reason: "unresolvable" };
@@ -241,10 +261,29 @@ export function startupGateFor(
     });
     return { allowed: false, reason: parsedSomewhere ? "not-listed" : "unresolvable" };
   };
+  // Union of every channel's principals. Deduped on the channel-qualified key,
+  // so a Telegram id and a WhatsApp number that happen to share digits stay two
+  // principals (and get two workspaces), matching how `decide` compares them.
+  const seen = new Set<string>();
+  const principals: Principal[] = [];
+  for (const l of lists) {
+    for (const p of l.allowlist.principals) {
+      const key = `${p.channel} ${p.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      principals.push(p);
+    }
+  }
+
   return {
     action: "serve",
     open,
-    allowlist: { open, decide, allows: (threadId: string) => decide(threadId).allowed },
+    allowlist: {
+      open,
+      decide,
+      allows: (threadId: string) => decide(threadId).allowed,
+      principals,
+    },
   };
 }
 

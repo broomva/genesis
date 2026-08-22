@@ -20,7 +20,7 @@
 //   KAPSO_PHONE_NUMBER_ID         the sending number
 //   KAPSO_WEBHOOK_SECRET          verifies Kapso's X-Webhook-Signature
 //   GENESIS_WHATSAPP_ALLOWED_USERS (required unless GENESIS_ALLOW_OPEN=1)
-//   GENESIS_WHATSAPP_WORKSPACE_ID (recommended) — pin WhatsApp sessions to a
+//   GENESIS_WHATSAPP_WORKSPACE_PREFIX (required) — one workspace PER SENDER:
 //                                 dedicated workspace. A phone number is
 //                                 publicly messageable, so confining it to its
 //                                 own workspace bounds what a mistaken
@@ -41,7 +41,7 @@ import {
   type HandlerOptions,
   handleAgentMessage,
   nativeCommandMenu,
-  workspaceIdFor,
+  workspaceDecisionFor,
   workspaceIsRegistered,
 } from "./handler";
 
@@ -72,6 +72,13 @@ const kapsoApiKey = process.env.KAPSO_API_KEY;
 const kapsoPhoneNumberId = process.env.KAPSO_PHONE_NUMBER_ID;
 const kapsoWebhookSecret = process.env.KAPSO_WEBHOOK_SECRET;
 const kapsoConfigured = Boolean(kapsoApiKey && kapsoPhoneNumberId && kapsoWebhookSecret);
+
+// One Genesis workspace per WhatsApp SENDER (BRO-2224): `<prefix><waId>`, e.g.
+// ws-wa-573017758620 -> /home/agent/orchestrator-workspaces/573017758620. The
+// prefix value carries no security weight (the startup check verifies each
+// derived id is really registered), so a default is safe; what matters is that
+// ONE value feeds the banner, the dispatch path and the check.
+const whatsappWorkspacePrefix = process.env.GENESIS_WHATSAPP_WORKSPACE_PREFIX?.trim() || "ws-wa-";
 
 const kapsoPartial =
   !kapsoConfigured && Boolean(kapsoApiKey || kapsoPhoneNumberId || kapsoWebhookSecret);
@@ -171,13 +178,27 @@ function gate(threadId: string): boolean {
 
 /** Per-channel handler options. WhatsApp is pinned to its own workspace when
  *  configured; Telegram keeps the engine default (unchanged behavior).
- *  The routing decision itself lives in `workspaceIdFor` so it can be tested. */
-function optionsFor(threadId: string): HandlerOptions {
-  const workspaceId = workspaceIdFor(threadId, process.env.GENESIS_WHATSAPP_WORKSPACE_ID);
+ *  The routing decision itself lives in `workspaceDecisionFor` so it can be tested.
+ *
+ *  Returns undefined when the turn MUST NOT run: a WhatsApp thread whose tenant
+ *  workspace could not be resolved. Dropping the turn is the only safe move —
+ *  dispatching without a workspaceId inherits the engine default, which is the
+ *  broadest workspace on the box, so "confinement unavailable" would silently
+ *  become "maximum reach" for a public channel. */
+function dispatchOptions(threadId: string): HandlerOptions | undefined {
+  const decision = workspaceDecisionFor(threadId, whatsappWorkspacePrefix);
+  if (decision.kind === "refuse") {
+    console.error(
+      `[genesis-bot] refusing to serve ${threadId}: ${decision.reason}. Not dispatching — an unconfined turn on a public channel would run in the engine default workspace.`,
+    );
+    return undefined;
+  }
   // WhatsApp cannot edit sent messages, so it cannot render a streamed reply
   // (Chat SDK streams via post-then-edit). Buffer it instead.
   const streaming = !threadId.startsWith("kapso:");
-  return workspaceId ? { baseUrl, token, workspaceId, streaming } : { baseUrl, token, streaming };
+  return decision.kind === "pin"
+    ? { baseUrl, token, workspaceId: decision.workspaceId, streaming }
+    : { baseUrl, token, streaming };
 }
 
 // DMs: `onDirectMessage` fires for EVERY direct message regardless of
@@ -190,7 +211,9 @@ function optionsFor(threadId: string): HandlerOptions {
 // this is the only path WhatsApp traffic takes.
 chat.onDirectMessage(async (thread, message) => {
   if (!gate(thread.id)) return;
-  await handleAgentMessage(thread, message.text, optionsFor(thread.id));
+  const opts = dispatchOptions(thread.id);
+  if (!opts) return;
+  await handleAgentMessage(thread, message.text, opts);
 });
 
 // Groups: subscribe on first @-mention, then handle every follow-up. Group
@@ -198,11 +221,15 @@ chat.onDirectMessage(async (thread, message) => {
 chat.onNewMention(async (thread, message) => {
   if (!gate(thread.id)) return;
   await thread.subscribe();
-  await handleAgentMessage(thread, message.text, optionsFor(thread.id));
+  const opts = dispatchOptions(thread.id);
+  if (!opts) return;
+  await handleAgentMessage(thread, message.text, opts);
 });
 chat.onSubscribedMessage(async (thread, message) => {
   if (!gate(thread.id)) return;
-  await handleAgentMessage(thread, message.text, optionsFor(thread.id));
+  const opts = dispatchOptions(thread.id);
+  if (!opts) return;
+  await handleAgentMessage(thread, message.text, opts);
 });
 
 // Register the native Telegram `/` menu (control commands only — the full
@@ -265,31 +292,68 @@ function startWebhookServer(): void {
 
 const active = kapsoConfigured ? "Telegram (polling) + WhatsApp (webhook)" : "Telegram (polling)";
 console.log(`[genesis-bot] ${active} as @${userName} → Genesis at ${baseUrl}`);
-if (kapsoConfigured && process.env.GENESIS_WHATSAPP_WORKSPACE_ID) {
-  console.log(
-    `[genesis-bot] WhatsApp sessions pinned to workspace ${process.env.GENESIS_WHATSAPP_WORKSPACE_ID}`,
+// The single-workspace var is GONE (BRO-2224). Refuse rather than ignore it: a
+// stale env would otherwise keep the old NAME while the code gives it a new
+// MEANING, and the operator would read "pinned" in the log while every sender
+// shared one directory — exactly the collision this change removes.
+if (process.env.GENESIS_WHATSAPP_WORKSPACE_ID) {
+  console.error(
+    "[genesis-bot] GENESIS_WHATSAPP_WORKSPACE_ID is no longer supported — it pinned EVERY " +
+      "sender to one shared workspace. Replace it with GENESIS_WHATSAPP_WORKSPACE_PREFIX " +
+      '(e.g. "ws-wa-"), which derives one workspace per sender, and provision a tenant ' +
+      "directory for each allowlisted principal.",
   );
-} else if (kapsoConfigured) {
-  console.warn(
-    "[genesis-bot] GENESIS_WHATSAPP_WORKSPACE_ID unset — WhatsApp sessions will use the " +
-      "engine default workspace. A public number should be pinned to a dedicated one.",
+  process.exit(1);
+}
+if (kapsoConfigured) {
+  console.log(
+    `[genesis-bot] WhatsApp sessions confined per sender: ${whatsappWorkspacePrefix}<waId>`,
   );
 }
 
-/** Refuse to serve WhatsApp unless its workspace really exists in the engine.
+/** Refuse to serve WhatsApp unless EVERY allowlisted sender's tenant workspace
+ *  really exists in the engine (BRO-2224).
  *
  *  The engine binds an unknown workspaceId to the DEFAULT workspace instead of
- *  refusing, so without this a typo silently hands a PUBLIC channel the
- *  broadest workspace on the box while the startup log still says "pinned".
+ *  refusing, so an unprovisioned tenant does not fail — it silently runs in the
+ *  broadest workspace on the box while the startup log still says "confined".
  *  Verified on the VPS: "ws-doesnotexist" ran the agent in /home/agent.
+ *
+ *  Checked per principal, not just "at least one exists": with N senders and a
+ *  provisioning script that half-ran, an any-of check passes while the
+ *  unprovisioned senders all land in the default workspace TOGETHER — the
+ *  collision this change exists to remove, plus maximum reach.
  *
  *  Retries briefly because genesis-api may still be coming up (systemd orders
  *  us After= it, but ordering is not readiness). Exhausted → exit(1); the unit
  *  is Restart=on-failure, so this recovers on its own once the API answers.
  *  Never degrades to "assume it is fine". */
-async function assertWhatsappWorkspaceRegistered(): Promise<void> {
-  const want = process.env.GENESIS_WHATSAPP_WORKSPACE_ID?.trim();
-  if (!want) return; // nothing claimed, nothing to verify
+async function assertTenantWorkspacesRegistered(): Promise<void> {
+  // An OPEN allowlist authorizes senders we cannot name, so we cannot
+  // pre-provision their workspaces, so every unknown sender would fall to the
+  // engine default. Per-tenant confinement and an open channel are mutually
+  // exclusive by construction — say so rather than serving unconfined.
+  if (allowlist.open) {
+    console.error(
+      "[genesis-bot] GENESIS_ALLOW_OPEN=1 cannot be combined with per-sender WhatsApp " +
+        "workspaces: an open channel serves senders that have no provisioned tenant " +
+        "directory, and each would run in the engine default workspace. Set " +
+        "GENESIS_WHATSAPP_ALLOWED_USERS instead.",
+    );
+    process.exit(1);
+  }
+
+  const tenants = allowlist.principals
+    .filter((p) => p.channel === "kapso")
+    .map((p) => ({ principal: p, workspaceId: `${whatsappWorkspacePrefix}${p.id}` }));
+
+  if (tenants.length === 0) {
+    console.error(
+      "[genesis-bot] WhatsApp is registered but the allowlist names no WhatsApp principal. " +
+        "Refusing to serve: there is no tenant workspace for any sender to run in.",
+    );
+    process.exit(1);
+  }
 
   const url = `${baseUrl.replace(/\/$/, "")}/workspaces`;
   let lastErr = "";
@@ -301,12 +365,17 @@ async function assertWhatsappWorkspaceRegistered(): Promise<void> {
       });
       if (!res.ok) {
         lastErr = `HTTP ${res.status}`;
-      } else if (workspaceIsRegistered(await res.json(), want)) {
-        console.log(`[genesis-bot] verified WhatsApp workspace ${want} is registered`);
-        return;
       } else {
+        const payload = await res.json();
+        const missing = tenants.filter((t) => !workspaceIsRegistered(payload, t.workspaceId));
+        if (missing.length === 0) {
+          console.log(
+            `[genesis-bot] verified ${tenants.length} WhatsApp tenant workspace(s): ${tenants.map((t) => t.workspaceId).join(", ")}`,
+          );
+          return;
+        }
         console.error(
-          `[genesis-bot] GENESIS_WHATSAPP_WORKSPACE_ID="${want}" is NOT a registered, available workspace. Refusing to serve WhatsApp: the engine would silently bind the DEFAULT workspace instead, giving a public channel far more reach than intended. Register it (a JSON file in GENESIS_WORKSPACES_DIR) and restart.`,
+          `[genesis-bot] ${missing.length} of ${tenants.length} WhatsApp tenant workspace(s) are NOT registered/available: ${missing.map((t) => `${t.workspaceId} (sender ${t.principal.id})`).join(", ")}. Refusing to serve WhatsApp: the engine would silently bind the DEFAULT workspace for those senders, giving a public channel far more reach than intended. Run the tenant provisioning script and restart.`,
         );
         process.exit(1);
       }
@@ -316,12 +385,12 @@ async function assertWhatsappWorkspaceRegistered(): Promise<void> {
     if (attempt < 5) await new Promise((r) => setTimeout(r, 2000));
   }
   console.error(
-    `[genesis-bot] could not verify GENESIS_WHATSAPP_WORKSPACE_ID="${want}" against ${url} (${lastErr}). Refusing to serve WhatsApp rather than assume the confinement holds.`,
+    `[genesis-bot] could not verify WhatsApp tenant workspaces against ${url} (${lastErr}). Refusing to serve WhatsApp rather than assume the confinement holds.`,
   );
   process.exit(1);
 }
 
-if (kapsoConfigured) await assertWhatsappWorkspaceRegistered();
+if (kapsoConfigured) await assertTenantWorkspacesRegistered();
 
 await chat.initialize();
 await registerTelegramCommands();

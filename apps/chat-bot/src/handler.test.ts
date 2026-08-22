@@ -4,6 +4,7 @@ import {
   chunkForWhatsapp,
   drainStream,
   handleAgentMessage,
+  workspaceDecisionFor,
   workspaceIdFor,
   workspaceIsRegistered,
 } from "./handler";
@@ -106,36 +107,105 @@ describe("handleAgentMessage", () => {
   });
 });
 
-describe("workspaceIdFor — WhatsApp confinement (BRO-2216)", () => {
-  const WS = "ws-orchestrator";
-  // A real Kapso thread id: kapso:<b64url(phoneNumberId)>:<b64url(waId)>
-  const KAPSO = "kapso:MTIzNDU2:NTczMDAxMjM0NTY3";
+describe("workspaceDecisionFor — per-sender WhatsApp confinement (BRO-2224)", () => {
+  const PREFIX = "ws-wa-";
+  // Real Kapso thread ids: kapso:<b64url(phoneNumberId)>:<b64url(waId)>
+  const b64 = (v: string) => Buffer.from(v, "utf8").toString("base64url");
+  const thread = (pnid: string, waId: string, convId?: string) =>
+    `kapso:${b64(pnid)}:${b64(waId)}${convId ? `:${b64(convId)}` : ""}`;
 
-  test("a WhatsApp thread is pinned to the dedicated workspace", () => {
-    expect(workspaceIdFor(KAPSO, WS)).toBe(WS);
+  const ALICE = thread("1314014011788509", "573001234567");
+  const BOB = thread("1314014011788509", "573009999999");
+
+  test("a sender is pinned to ITS OWN workspace, derived from the waId", () => {
+    expect(workspaceDecisionFor(ALICE, PREFIX)).toEqual({
+      kind: "pin",
+      workspaceId: "ws-wa-573001234567",
+    });
   });
 
-  test("the WhatsApp workspace NEVER leaks to another channel", () => {
-    // The direction that actually matters: pinning is confinement for WhatsApp,
-    // not a global default for everyone.
-    expect(workspaceIdFor("telegram:547052379", WS)).toBeUndefined();
-    expect(workspaceIdFor("547052379", WS)).toBeUndefined();
-    expect(workspaceIdFor("slack:C123", WS)).toBeUndefined();
+  test("TWO SENDERS GET TWO WORKSPACES — the whole point of BRO-2224", () => {
+    const a = workspaceDecisionFor(ALICE, PREFIX);
+    const b = workspaceDecisionFor(BOB, PREFIX);
+    expect(a.kind).toBe("pin");
+    expect(b.kind).toBe("pin");
+    expect(a).not.toEqual(b);
   });
 
-  test("unset/blank config → inherit the engine default, never a guess", () => {
-    for (const cfg of [undefined, "", "   "]) {
-      expect(workspaceIdFor(KAPSO, cfg)).toBeUndefined();
+  test("the same sender KEEPS its workspace across conversations", () => {
+    // Persistence per phone number: a new Kapso conversation id appends a 4th
+    // part. If that leaked into the key, every new conversation would strand
+    // the tenant's files in a fresh directory.
+    const withConv = thread("1314014011788509", "573001234567", "conv-abc");
+    expect(workspaceDecisionFor(withConv, PREFIX)).toEqual(workspaceDecisionFor(ALICE, PREFIX));
+  });
+
+  test("OUR number is not the tenant key — same sender via a different number", () => {
+    // phoneNumberId is part 1 and is identical on every inbound message. Keying
+    // on it would give every sender in the world one shared workspace.
+    const viaOtherNumber = thread("597907523413541", "573001234567");
+    expect(workspaceDecisionFor(viaOtherNumber, PREFIX)).toEqual(
+      workspaceDecisionFor(ALICE, PREFIX),
+    );
+  });
+
+  test("a phone number is normalized to digits, so one sender is one directory", () => {
+    expect(workspaceDecisionFor(thread("111", "+57 300 123-4567"), PREFIX)).toEqual({
+      kind: "pin",
+      workspaceId: "ws-wa-573001234567",
+    });
+  });
+
+  test("confinement NEVER leaks to another channel", () => {
+    for (const id of ["telegram:547052379", "547052379", "slack:C123"]) {
+      expect(workspaceDecisionFor(id, PREFIX)).toEqual({ kind: "inherit" });
     }
   });
 
-  test("surrounding whitespace in the configured id is tolerated", () => {
-    expect(workspaceIdFor(KAPSO, `  ${WS}  `)).toBe(WS);
+  test("a lookalike prefix is not WhatsApp", () => {
+    expect(workspaceDecisionFor("kapsoX:abc:def", PREFIX)).toEqual({ kind: "inherit" });
+    expect(workspaceDecisionFor("notkapso:abc:def", PREFIX)).toEqual({ kind: "inherit" });
   });
 
-  test("a lookalike prefix does not count as WhatsApp", () => {
-    expect(workspaceIdFor("kapsoX:abc:def", WS)).toBeUndefined();
-    expect(workspaceIdFor("notkapso:abc:def", WS)).toBeUndefined();
+  // --- the fail direction, which is where the old signature was wrong -------
+
+  test("an UNRESOLVABLE WhatsApp thread REFUSES — it does not inherit", () => {
+    // Regression guard for the shape this replaced. Returning undefined here
+    // would mean "inherit the engine default" = /home/agent, so a thread we
+    // cannot attribute would get the BROADEST workspace on the box. The only
+    // safe answer for a channel we confine is: do not run.
+    for (const bad of [
+      "kapso:MTIzNDU2:!!!notbase64!!!", // undecodable waId
+      "kapso:MTIzNDU2:", // empty waId
+      "kapso:MTIzNDU2", // too few parts
+      "kapso:a:b:c:d:e", // too many parts
+    ]) {
+      const d = workspaceDecisionFor(bad, PREFIX);
+      expect(d.kind).toBe("refuse");
+    }
+  });
+
+  test("a waId with no digits REFUSES rather than making an empty-suffix id", () => {
+    // Otherwise the id collapses to the bare prefix — one shared workspace that
+    // every unparseable sender lands in together.
+    const d = workspaceDecisionFor(thread("111", "no-digits-here"), PREFIX);
+    expect(d.kind).toBe("refuse");
+  });
+
+  test("unset/blank prefix REFUSES for WhatsApp, inherits for everyone else", () => {
+    for (const cfg of [undefined, "", "   "]) {
+      expect(workspaceDecisionFor(ALICE, cfg).kind).toBe("refuse");
+      expect(workspaceDecisionFor("telegram:1", cfg)).toEqual({ kind: "inherit" });
+    }
+  });
+
+  test("workspaceIdFor shim collapses refuse to undefined (why it is off-path)", () => {
+    // Documents the hazard rather than hiding it: this shim cannot distinguish
+    // "inherit the default" from "must not run", so the dispatch path uses
+    // workspaceDecisionFor instead.
+    expect(workspaceIdFor(ALICE, PREFIX)).toBe("ws-wa-573001234567");
+    expect(workspaceIdFor("kapso:MTIzNDU2:", PREFIX)).toBeUndefined();
+    expect(workspaceIdFor("telegram:1", PREFIX)).toBeUndefined();
   });
 });
 
