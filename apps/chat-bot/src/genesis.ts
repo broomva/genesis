@@ -19,13 +19,22 @@ export interface GenesisStreamOptions {
   fetchImpl?: typeof fetch;
   /** AbortSignal to cancel the request. */
   signal?: AbortSignal;
+  /** Pin the session to a Genesis workspace (BRO-1627 `workspaceId`).
+   *  Sticky: the engine binds it at session create and ignores it after, so
+   *  every turn sends it and only turn 1 decides. Used to keep a public channel
+   *  (WhatsApp) in a dedicated workspace instead of the engine default. */
+  workspaceId?: string;
 }
 
 /** The AI SDK chat request body Genesis `/api/chat` expects. */
-export function buildRequestBody(threadId: string, text: string) {
+export function buildRequestBody(threadId: string, text: string, workspaceId?: string) {
   return {
     id: threadId,
     messages: [{ role: "user", parts: [{ type: "text", text }] }],
+    // Omitted entirely when unset — sending `workspaceId: undefined` would
+    // serialize the key away anyway, but an explicit conditional keeps the
+    // "no opinion, inherit the engine default" case obvious at the call site.
+    ...(workspaceId ? { workspaceId } : {}),
   };
 }
 
@@ -94,7 +103,7 @@ export async function* genesisStream(opts: GenesisStreamOptions): AsyncGenerator
       "content-type": "application/json",
       ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
     },
-    body: JSON.stringify(buildRequestBody(opts.threadId, opts.text)),
+    body: JSON.stringify(buildRequestBody(opts.threadId, opts.text, opts.workspaceId)),
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {

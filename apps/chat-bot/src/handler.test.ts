@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { type PostableThread, handleAgentMessage } from "./handler";
+import {
+  type PostableThread,
+  chunkForWhatsapp,
+  drainStream,
+  handleAgentMessage,
+  workspaceIdFor,
+  workspaceIsRegistered,
+} from "./handler";
 
 function sseBody(frames: string[]): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -96,5 +103,138 @@ describe("handleAgentMessage", () => {
     }) as unknown as typeof fetch;
     await handleAgentMessage(thread, "hello", { baseUrl: "https://x", fetchImpl });
     expect(sentId).toBe("tg-conversation-9");
+  });
+});
+
+describe("workspaceIdFor — WhatsApp confinement (BRO-2216)", () => {
+  const WS = "ws-orchestrator";
+  // A real Kapso thread id: kapso:<b64url(phoneNumberId)>:<b64url(waId)>
+  const KAPSO = "kapso:MTIzNDU2:NTczMDAxMjM0NTY3";
+
+  test("a WhatsApp thread is pinned to the dedicated workspace", () => {
+    expect(workspaceIdFor(KAPSO, WS)).toBe(WS);
+  });
+
+  test("the WhatsApp workspace NEVER leaks to another channel", () => {
+    // The direction that actually matters: pinning is confinement for WhatsApp,
+    // not a global default for everyone.
+    expect(workspaceIdFor("telegram:547052379", WS)).toBeUndefined();
+    expect(workspaceIdFor("547052379", WS)).toBeUndefined();
+    expect(workspaceIdFor("slack:C123", WS)).toBeUndefined();
+  });
+
+  test("unset/blank config → inherit the engine default, never a guess", () => {
+    for (const cfg of [undefined, "", "   "]) {
+      expect(workspaceIdFor(KAPSO, cfg)).toBeUndefined();
+    }
+  });
+
+  test("surrounding whitespace in the configured id is tolerated", () => {
+    expect(workspaceIdFor(KAPSO, `  ${WS}  `)).toBe(WS);
+  });
+
+  test("a lookalike prefix does not count as WhatsApp", () => {
+    expect(workspaceIdFor("kapsoX:abc:def", WS)).toBeUndefined();
+    expect(workspaceIdFor("notkapso:abc:def", WS)).toBeUndefined();
+  });
+});
+
+describe("workspaceIsRegistered — confinement precheck (BRO-2216)", () => {
+  // Shape of a real GET /workspaces response from the VPS.
+  const payload = {
+    workspaces: [
+      { id: "ws-default", name: "root", available: true, worktreeCapable: false },
+      { id: "ws-broomva", name: "broomva", available: true, worktreeCapable: false },
+      { id: "ws-orchestrator", name: "orchestrator", available: true, worktreeCapable: false },
+    ],
+    defaultWorkspace: "ws-default",
+  };
+
+  test("a registered, available workspace passes", () => {
+    expect(workspaceIsRegistered(payload, "ws-orchestrator")).toBe(true);
+  });
+
+  test("an unregistered id fails — the whole point", () => {
+    // The engine would bind this to ws-default (/home/agent) and say nothing.
+    expect(workspaceIsRegistered(payload, "ws-doesnotexist")).toBe(false);
+    expect(workspaceIsRegistered(payload, "ws-orchestrato")).toBe(false); // typo
+    expect(workspaceIsRegistered(payload, "orchestrator")).toBe(false); // name, not id
+  });
+
+  test("registered but UNAVAILABLE fails", () => {
+    const p = { workspaces: [{ id: "ws-gone", available: false }] };
+    expect(workspaceIsRegistered(p, "ws-gone")).toBe(false);
+  });
+
+  test("available omitted is treated as usable", () => {
+    // Only an explicit `false` means unavailable; absent is the common shape.
+    expect(workspaceIsRegistered({ workspaces: [{ id: "ws-x" }] }, "ws-x")).toBe(true);
+  });
+
+  test("unrecognizable payloads fail — unverifiable is not fine", () => {
+    for (const bad of [
+      null,
+      undefined,
+      {},
+      [],
+      "nope",
+      42,
+      { workspaces: "no" },
+      { workspaces: [null] },
+    ]) {
+      expect(workspaceIsRegistered(bad, "ws-orchestrator")).toBe(false);
+    }
+  });
+
+  test("a blank wanted id never passes", () => {
+    for (const w of ["", "   "]) expect(workspaceIsRegistered(payload, w)).toBe(false);
+  });
+});
+
+describe("chunkForWhatsapp — buffered delivery (BRO-2216)", () => {
+  test("short text stays one chunk", () => {
+    expect(chunkForWhatsapp("hello")).toEqual(["hello"]);
+  });
+
+  test("empty/whitespace yields NO chunks (never post an empty message)", () => {
+    for (const t of ["", "   ", "\n\n"]) expect(chunkForWhatsapp(t)).toEqual([]);
+  });
+
+  test("long text splits and every chunk is within the limit", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `line ${i} of some text`).join("\n");
+    const chunks = chunkForWhatsapp(long, 500);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(500);
+  });
+
+  test("no content is lost across chunks", () => {
+    const long = Array.from({ length: 200 }, (_, i) => `word${i}`).join(" ");
+    const joined = chunkForWhatsapp(long, 300).join(" ");
+    expect(joined.replace(/\s+/g, " ")).toBe(long.replace(/\s+/g, " "));
+  });
+
+  test("a single unbreakable run still splits rather than exceeding the limit", () => {
+    const blob = "x".repeat(1200);
+    const chunks = chunkForWhatsapp(blob, 400);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(400);
+    expect(chunks.join("")).toBe(blob);
+  });
+
+  test("prefers paragraph boundaries when available", () => {
+    const text = `${"a".repeat(200)}\n\n${"b".repeat(200)}`;
+    const chunks = chunkForWhatsapp(text, 250);
+    expect(chunks[0]).toBe("a".repeat(200));
+  });
+});
+
+describe("drainStream", () => {
+  async function* gen(parts: string[]) {
+    for (const p of parts) yield p;
+  }
+  test("concatenates every piece in order", async () => {
+    expect(await drainStream(gen(["a", "b", "c"]))).toBe("abc");
+  });
+  test("empty stream yields empty string", async () => {
+    expect(await drainStream(gen([]))).toBe("");
   });
 });

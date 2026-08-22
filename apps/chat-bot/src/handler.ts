@@ -34,6 +34,110 @@ export interface HandlerOptions {
   fetchImpl?: typeof fetch;
   /** Skills dirs for /commands enumeration (default: the user skills dir). */
   skillsDirs?: string[];
+  /** Pin this channel's sessions to a Genesis workspace (sticky at create).
+   *  Set per channel, so a public channel can be confined to a dedicated
+   *  workspace while another keeps the engine default. */
+  workspaceId?: string;
+  /** Whether this channel can render a streamed reply.
+   *
+   *  Chat SDK streams by posting a message and then EDITING it as tokens
+   *  arrive. Telegram supports edits; WhatsApp does not — the Kapso adapter
+   *  throws `NotImplementedError: WhatsApp Cloud API does not support editing
+   *  sent messages` from `editMessage`, which aborts the whole turn AFTER the
+   *  agent has already done the work. So a channel without edits gets the reply
+   *  buffered and posted once (chunked to the text cap).
+   *
+   *  Defaults to true — Telegram's behavior is unchanged. */
+  streaming?: boolean;
+}
+
+/** WhatsApp's text body cap. Chunk below it so a long reply is delivered rather
+ *  than rejected; 3900 leaves room for the continuation marker. */
+export const WHATSAPP_TEXT_LIMIT = 4096;
+const CHUNK_TARGET = 3900;
+
+/** Split a reply into WhatsApp-sized pieces, preferring paragraph then line
+ *  breaks so chunks land on natural boundaries instead of mid-word.
+ *
+ *  Returns [] for empty input — the caller must not post an empty message
+ *  (WhatsApp rejects it, and it would read as the agent replying with nothing). */
+export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): string[] {
+  const body = text.trim();
+  if (!body) return [];
+  if (body.length <= limit) return [body];
+
+  const out: string[] = [];
+  let rest = body;
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    // Prefer a paragraph break, then a line break, then a space. `+ 1` keeps
+    // the break character with the chunk being emitted.
+    let cut = window.lastIndexOf("\n\n");
+    if (cut < limit * 0.5) cut = window.lastIndexOf("\n");
+    if (cut < limit * 0.5) cut = window.lastIndexOf(" ");
+    if (cut < limit * 0.5) cut = limit; // no good boundary — hard split
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) out.push(rest);
+  return out.filter((c) => c.length > 0);
+}
+
+/** Drain an async text stream into one string. */
+export async function drainStream(stream: AsyncIterable<string>): Promise<string> {
+  let acc = "";
+  for await (const piece of stream) acc += piece;
+  return acc;
+}
+
+/** Which Genesis workspace a thread's sessions are pinned to (BRO-2216).
+ *
+ *  Pure so the confinement is testable — it is a security boundary, not a
+ *  convenience. A WhatsApp number is publicly messageable, so its sessions are
+ *  pinned to a dedicated workspace; every other channel keeps the engine
+ *  default. The direction that matters is the negative one: the WhatsApp
+ *  workspace must never be applied to a non-WhatsApp thread, and the absence of
+ *  config must never silently widen a channel's reach.
+ *
+ *  Returns undefined to mean "inherit the engine default" — never a fallback
+ *  workspace, because guessing here would be guessing about confinement. */
+export function workspaceIdFor(
+  threadId: string,
+  whatsappWorkspaceId: string | undefined,
+): string | undefined {
+  if (!threadId.startsWith("kapso:")) return undefined;
+  const pinned = whatsappWorkspaceId?.trim();
+  return pinned ? pinned : undefined;
+}
+
+/** Is `wantId` present in a Genesis `GET /workspaces` payload?
+ *
+ *  Exists because the engine binds an UNKNOWN workspaceId to the DEFAULT
+ *  workspace rather than refusing (`Supervisor.resolve`: "unknown → default").
+ *  Measured on the VPS 2026-08-22: `workspaceId: "ws-doesnotexist"` ran the
+ *  agent in `/home/agent` — the broadest workspace on the box.
+ *
+ *  For most callers that fallback is a convenience. For a PUBLIC channel it is
+ *  a silent widening: one typo in GENESIS_WHATSAPP_WORKSPACE_ID and WhatsApp
+ *  gets the home directory while the bot still logs "pinned". We do not change
+ *  the engine's semantics (other consumers depend on them) — the channel
+ *  verifies its own confinement before serving.
+ *
+ *  Unrecognizable payload → false. Unverifiable is not "fine". */
+export function workspaceIsRegistered(payload: unknown, wantId: string): boolean {
+  const want = wantId.trim();
+  if (!want) return false;
+  if (typeof payload !== "object" || payload === null) return false;
+  const list = (payload as { workspaces?: unknown }).workspaces;
+  if (!Array.isArray(list)) return false;
+  return list.some((w) => {
+    if (typeof w !== "object" || w === null) return false;
+    const entry = w as { id?: unknown; available?: unknown };
+    if (entry.id !== want) return false;
+    // `available: false` means the path is missing/unreadable — registered but
+    // unusable, which the engine would also fall back from.
+    return entry.available !== false;
+  });
 }
 
 /** Parse a leading-slash command token + args, stripping a `@botname` suffix. */
@@ -137,15 +241,30 @@ export async function handleAgentMessage(
 
   await thread.startTyping?.().catch(() => {});
   try {
-    await thread.post(
-      genesisStream({
-        baseUrl: opts.baseUrl,
-        threadId: thread.id,
-        text: trimmed,
-        token: opts.token,
-        fetchImpl: opts.fetchImpl,
-      }),
-    );
+    const stream = genesisStream({
+      baseUrl: opts.baseUrl,
+      threadId: thread.id,
+      text: trimmed,
+      token: opts.token,
+      fetchImpl: opts.fetchImpl,
+      workspaceId: opts.workspaceId,
+    });
+    if (opts.streaming === false) {
+      // Buffered path: drain first, then post whole. Streaming here would post
+      // a message and try to edit it, which this channel cannot do.
+      const reply = await drainStream(stream);
+      const chunks = chunkForWhatsapp(reply);
+      if (chunks.length === 0) {
+        // An empty reply must still say something — silence is indistinguishable
+        // from the bot being down, which is the failure mode this whole channel
+        // has to avoid.
+        await thread.post("(the agent finished without producing any text)");
+      } else {
+        for (const chunk of chunks) await thread.post(chunk);
+      }
+    } else {
+      await thread.post(stream);
+    }
   } catch (e) {
     console.error("[genesis-bot] dispatch failed", e);
     await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
