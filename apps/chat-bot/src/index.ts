@@ -35,7 +35,7 @@ import { createMemoryState } from "@chat-adapter/state-memory";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { createKapsoAdapter } from "@kapso/chat-adapter";
 import { Chat, type Logger, type StateAdapter } from "chat";
-import { type ChannelConfig, startupGateFor } from "./allowlist";
+import { type ChannelConfig, principalOf, startupGateFor } from "./allowlist";
 import { botStateFile, createFileState } from "./file-state";
 import {
   type HandlerOptions,
@@ -155,7 +155,15 @@ function gate(threadId: string): boolean {
       `[genesis-bot] REFUSED ${threadId} — could not resolve a principal from this thread id. This is a CONFIG problem, not an unauthorized user. Do NOT set GENESIS_ALLOW_OPEN=1 to work around it.`,
     );
   } else {
-    console.warn(`[genesis-bot] refused ${threadId} — principal not in the allowlist`);
+    // Name the principal, not just the thread id. A Kapso thread id carries the
+    // sender base64-encoded, so without this the operator must hand-decode it to
+    // learn what to allowlist — friction that pushes toward GENESIS_ALLOW_OPEN=1.
+    // Printing the exact string to add makes the safe path the easy one.
+    const p = principalOf(threadId, "telegram");
+    const hint = p ? `${p.channel}:${p.id}` : threadId;
+    console.warn(
+      `[genesis-bot] refused ${threadId} — principal not in the allowlist. To authorize this sender, add "${hint}".`,
+    );
   }
   return false;
 }
