@@ -34,6 +34,30 @@ export interface HandlerOptions {
   fetchImpl?: typeof fetch;
   /** Skills dirs for /commands enumeration (default: the user skills dir). */
   skillsDirs?: string[];
+  /** Pin this channel's sessions to a Genesis workspace (sticky at create).
+   *  Set per channel, so a public channel can be confined to a dedicated
+   *  workspace while another keeps the engine default. */
+  workspaceId?: string;
+}
+
+/** Which Genesis workspace a thread's sessions are pinned to (BRO-2216).
+ *
+ *  Pure so the confinement is testable — it is a security boundary, not a
+ *  convenience. A WhatsApp number is publicly messageable, so its sessions are
+ *  pinned to a dedicated workspace; every other channel keeps the engine
+ *  default. The direction that matters is the negative one: the WhatsApp
+ *  workspace must never be applied to a non-WhatsApp thread, and the absence of
+ *  config must never silently widen a channel's reach.
+ *
+ *  Returns undefined to mean "inherit the engine default" — never a fallback
+ *  workspace, because guessing here would be guessing about confinement. */
+export function workspaceIdFor(
+  threadId: string,
+  whatsappWorkspaceId: string | undefined,
+): string | undefined {
+  if (!threadId.startsWith("kapso:")) return undefined;
+  const pinned = whatsappWorkspaceId?.trim();
+  return pinned ? pinned : undefined;
 }
 
 /** Parse a leading-slash command token + args, stripping a `@botname` suffix. */
@@ -144,6 +168,7 @@ export async function handleAgentMessage(
         text: trimmed,
         token: opts.token,
         fetchImpl: opts.fetchImpl,
+        workspaceId: opts.workspaceId,
       }),
     );
   } catch (e) {

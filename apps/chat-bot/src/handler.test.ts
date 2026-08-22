@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type PostableThread, handleAgentMessage } from "./handler";
+import { type PostableThread, handleAgentMessage, workspaceIdFor } from "./handler";
 
 function sseBody(frames: string[]): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -96,5 +96,38 @@ describe("handleAgentMessage", () => {
     }) as unknown as typeof fetch;
     await handleAgentMessage(thread, "hello", { baseUrl: "https://x", fetchImpl });
     expect(sentId).toBe("tg-conversation-9");
+  });
+});
+
+describe("workspaceIdFor — WhatsApp confinement (BRO-2216)", () => {
+  const WS = "ws-orchestrator";
+  // A real Kapso thread id: kapso:<b64url(phoneNumberId)>:<b64url(waId)>
+  const KAPSO = "kapso:MTIzNDU2:NTczMDAxMjM0NTY3";
+
+  test("a WhatsApp thread is pinned to the dedicated workspace", () => {
+    expect(workspaceIdFor(KAPSO, WS)).toBe(WS);
+  });
+
+  test("the WhatsApp workspace NEVER leaks to another channel", () => {
+    // The direction that actually matters: pinning is confinement for WhatsApp,
+    // not a global default for everyone.
+    expect(workspaceIdFor("telegram:547052379", WS)).toBeUndefined();
+    expect(workspaceIdFor("547052379", WS)).toBeUndefined();
+    expect(workspaceIdFor("slack:C123", WS)).toBeUndefined();
+  });
+
+  test("unset/blank config → inherit the engine default, never a guess", () => {
+    for (const cfg of [undefined, "", "   "]) {
+      expect(workspaceIdFor(KAPSO, cfg)).toBeUndefined();
+    }
+  });
+
+  test("surrounding whitespace in the configured id is tolerated", () => {
+    expect(workspaceIdFor(KAPSO, `  ${WS}  `)).toBe(WS);
+  });
+
+  test("a lookalike prefix does not count as WhatsApp", () => {
+    expect(workspaceIdFor("kapsoX:abc:def", WS)).toBeUndefined();
+    expect(workspaceIdFor("notkapso:abc:def", WS)).toBeUndefined();
   });
 });
