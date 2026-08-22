@@ -173,6 +173,64 @@ describe("cross-channel confusion is impossible", () => {
   });
 });
 
+describe("decide — a refusal says why (the anti-corridor control)", () => {
+  test("a listed principal is allowed", () => {
+    expect(parseAllowlist("+573001234567", "kapso").decide(KAPSO_OWNER)).toEqual({
+      allowed: true,
+    });
+  });
+
+  test("understood but not listed → not-listed (the control working)", () => {
+    expect(parseAllowlist("+573001234567", "kapso").decide(KAPSO_STRANGER)).toEqual({
+      allowed: false,
+      reason: "not-listed",
+    });
+  });
+
+  test("could not be parsed → unresolvable (the control unable to evaluate)", () => {
+    // This is the case that used to be indistinguishable from "not-listed",
+    // making a misconfigured gate look like a dead bot.
+    expect(parseAllowlist("+573001234567", "kapso").decide("kapso:broken")).toEqual({
+      allowed: false,
+      reason: "unresolvable",
+    });
+  });
+
+  test("an open allowlist allows without a reason", () => {
+    expect(parseAllowlist(undefined).decide("anything")).toEqual({ allowed: true });
+  });
+
+  test("across channels: one channel understanding it means not-listed, not unresolvable", () => {
+    const d = startupGateFor(
+      [
+        { channel: "telegram", envVar: "TG", raw: "547052379" },
+        { channel: "kapso", envVar: "WA", raw: "+573001234567" },
+      ],
+      false,
+    );
+    expect(d.action).toBe("serve");
+    if (d.action !== "serve") return;
+    // Kapso understands it and declines; Telegram cannot parse it. The union
+    // must report the control working, not a malfunction.
+    expect(d.allowlist.decide(KAPSO_STRANGER)).toEqual({
+      allowed: false,
+      reason: "not-listed",
+    });
+    // Nothing can parse this one.
+    expect(d.allowlist.decide("slack:whoever")).toEqual({
+      allowed: false,
+      reason: "unresolvable",
+    });
+  });
+
+  test("allows() stays consistent with decide()", () => {
+    const a = parseAllowlist("+573001234567", "kapso");
+    for (const t of [KAPSO_OWNER, KAPSO_STRANGER, "kapso:broken", "telegram:1"]) {
+      expect(a.allows(t)).toBe(a.decide(t).allowed);
+    }
+  });
+});
+
 describe("startupGateFor — every REGISTERED channel is gated (BRO-2216)", () => {
   const TG = { channel: "telegram", envVar: "GENESIS_TELEGRAM_ALLOWED_USERS" } as const;
   const WA = { channel: "kapso", envVar: "GENESIS_WHATSAPP_ALLOWED_USERS" } as const;

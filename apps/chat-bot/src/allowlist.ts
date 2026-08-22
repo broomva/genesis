@@ -129,11 +129,23 @@ export function entryPrincipal(entry: string, channel: ChannelId): Principal | u
   return id.length === 0 ? undefined : { channel: named, id };
 }
 
+/** Why a thread was refused. The distinction is the point: "not-listed" is the
+ *  control working, "unresolvable" is the control unable to evaluate — and
+ *  collapsing them into one silent denial is what makes a misconfigured gate
+ *  look like a dead bot, which is what sends an operator to GENESIS_ALLOW_OPEN=1.
+ *  Callers log the reason so a false denial is diagnosable without disabling
+ *  anything. Both still DENY. */
+export type Decision =
+  | { allowed: true }
+  | { allowed: false; reason: "not-listed" | "unresolvable" };
+
 export interface Allowlist {
   /** True when no allowlist is configured (allow-all, sandbox posture). */
   readonly open: boolean;
   /** Whether a given thread id is permitted. */
   allows(threadId: string): boolean;
+  /** As `allows`, but says why on refusal. */
+  decide(threadId: string): Decision;
 }
 
 /** Build an allowlist from raw env values (comma-separated ids).
@@ -151,7 +163,7 @@ export function parseAllowlist(
     .filter((s) => s.length > 0);
 
   if (entries.length === 0) {
-    return { open: true, allows: () => true };
+    return { open: true, allows: () => true, decide: () => ({ allowed: true }) };
   }
 
   // Key on "<channel> <id>" so a Telegram id can never satisfy a Kapso
@@ -164,10 +176,14 @@ export function parseAllowlist(
 
   return {
     open: false,
-    allows(threadId: string): boolean {
+    decide(threadId: string): Decision {
       const p = principalOf(threadId, channel);
-      if (p === undefined) return false; // unresolvable -> denied
-      return set.has(`${p.channel} ${p.id}`);
+      if (p === undefined) return { allowed: false, reason: "unresolvable" };
+      if (set.has(`${p.channel} ${p.id}`)) return { allowed: true };
+      return { allowed: false, reason: "not-listed" };
+    },
+    allows(threadId: string): boolean {
+      return this.decide(threadId).allowed;
     },
   };
 }
@@ -214,13 +230,21 @@ export function startupGateFor(
   // Union across channels: each principal is already channel-qualified, so a
   // thread only matches an entry configured for ITS channel.
   const open = unguarded.length > 0;
+  const decide = (threadId: string): Decision => {
+    if (lists.some((l) => l.allowlist.allows(threadId))) return { allowed: true };
+    // Refused by every channel. Report "unresolvable" only when NO channel
+    // could even parse the id — if one understood it and simply did not list
+    // it, that is the control working and must not read as a malfunction.
+    const parsedSomewhere = lists.some((l) => {
+      const d = l.allowlist.decide(threadId);
+      return d.allowed || d.reason !== "unresolvable";
+    });
+    return { allowed: false, reason: parsedSomewhere ? "not-listed" : "unresolvable" };
+  };
   return {
     action: "serve",
     open,
-    allowlist: {
-      open,
-      allows: (threadId: string) => lists.some((l) => l.allowlist.allows(threadId)),
-    },
+    allowlist: { open, decide, allows: (threadId: string) => decide(threadId).allowed },
   };
 }
 
