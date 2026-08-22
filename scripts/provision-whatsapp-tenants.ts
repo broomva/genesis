@@ -149,7 +149,12 @@ for (const t of tenants) {
   // OWNER is exempt from it. root:agent 1775 is the combination that holds:
   // group-write to work in, not the owner, so sticky actually applies.
   chownSync(t.dir, 0, AGENT_GID);
-  chmodSync(t.dir, 0o1775);
+  // NOT chmodSync: bun's fs.chmodSync masks the mode to 0o777 and SILENTLY
+  // drops the sticky bit (measured on bun 1.3.14: chmodSync(dir, 0o1775) then
+  // stat -> 775, while coreutils chmod 1775 -> 1775). The call reports success
+  // either way, so without the stat assertion below this would have shipped as
+  // a tenant directory the agent could empty. Shell out for this one bit.
+  execFileSync("/bin/chmod", ["1775", t.dir]);
 
   // ...but NOT the settings that confine it.
   mkdirSync(claudeDir, { recursive: true });
