@@ -295,3 +295,16 @@ export function startupGate(raw: string | undefined, allowOpen: boolean): Startu
     allowOpen,
   );
 }
+
+/** The workspace id a principal's tenant directory is registered under
+ *  (BRO-2224).
+ *
+ *  Lives beside the decoder on purpose. THREE callers derive this id — the
+ *  dispatch path, the boot-time verification, and the provisioning script — and
+ *  if any two disagree the system is silently wrong in a way nothing reports:
+ *  provision directory A, verify workspace A, run every turn in workspace B.
+ *  One function, importable without pulling the handler's dependencies, so a
+ *  provisioning script has no excuse to re-implement phone normalization. */
+export function tenantWorkspaceId(principal: Principal, prefix: string): string {
+  return `${prefix}${principal.id}`;
+}

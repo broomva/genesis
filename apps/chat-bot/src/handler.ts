@@ -9,7 +9,7 @@
 // one handler every message flows through. Skill commands (/autonomous, …) are
 // NOT control commands, so they fall through and run in the session as a turn.
 
-import { type Principal, principalOf } from "./allowlist";
+import { principalOf, tenantWorkspaceId } from "./allowlist";
 import {
   CONTROL_COMMANDS,
   controlAction,
@@ -102,6 +102,8 @@ export async function drainStream(stream: AsyncIterable<string>): Promise<string
  *
  *  Returns undefined to mean "inherit the engine default" — never a fallback
  *  workspace, because guessing here would be guessing about confinement. */
+export { tenantWorkspaceId };
+
 export type WorkspaceDecision =
   /** Not a confined channel — use whatever workspace the engine defaults to. */
   | { kind: "inherit" }
@@ -139,17 +141,6 @@ export function workspaceDecisionFor(
   }
 
   return { kind: "pin", workspaceId: tenantWorkspaceId(principal, p) };
-}
-
-/** The workspace id a principal's tenant directory is registered under.
- *
- *  THE dispatch path and THE startup check must both call this. When they each
- *  built the id themselves, a divergence between them would verify workspace A
- *  at boot and then run every turn in workspace B — the check reporting a
- *  confinement that is not the one in force. One function, so drift is not
- *  expressible. */
-export function tenantWorkspaceId(principal: Principal, prefix: string): string {
-  return `${prefix}${principal.id}`;
 }
 
 /** Which of `workspaceIds` are NOT registered+available in a GET /workspaces
