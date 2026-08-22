@@ -107,7 +107,6 @@ function settingsFor(dir: string): string {
             join(HOME, ".claude"),
           ],
           allowRead: [dir],
-          denyWrite: [join(dir, ".claude")],
         },
       },
     },
@@ -157,13 +156,36 @@ for (const t of tenants) {
   // a tenant directory the agent could empty. Shell out for this one bit.
   execFileSync("/bin/chmod", ["1775", t.dir]);
 
-  // ...but NOT the settings that confine it.
+  // ...but NOT the two settings files that confine it.
+  //
+  // .claude is sticky-writable (root:agent 1775), NOT read-only. A 0555 .claude
+  // breaks every turn: the sandbox bind-mounts read-only placeholders over its
+  // protected paths and must CREATE them if absent, which fails inside its own
+  // mount namespace ("bwrap: Can't create file at .../.claude/commands:
+  // Read-only file system"). Pre-creating them is what makes strict mode usable
+  // here. Sticky still denies the tenant any root-owned entry.
   mkdirSync(claudeDir, { recursive: true });
+  for (const protectedPath of ["commands", "agents", "skills"]) {
+    mkdirSync(join(claudeDir, protectedPath), { recursive: true });
+    chownSync(join(claudeDir, protectedPath), 0, AGENT_GID);
+    execFileSync("/bin/chmod", ["1775", join(claudeDir, protectedPath)]);
+  }
   writeFileSync(settingsPath, settingsFor(t.dir));
-  chownSync(settingsPath, 0, 0);
-  chmodSync(settingsPath, 0o444);
-  chownSync(claudeDir, 0, 0);
-  chmodSync(claudeDir, 0o555); // r-x: the agent cannot add or replace files here
+
+  // settings.local.json is PROJECT-LOCAL settings — precedence level 3, ABOVE
+  // the level-4 settings.json beside it. A tenant that can create this file can
+  // override the sandbox switches in the file we just wrote. Pre-create it
+  // root-owned and empty so the slot is taken and the sandbox has its
+  // placeholder; sticky on .claude keeps the tenant from replacing it.
+  const localPath = join(claudeDir, "settings.local.json");
+  writeFileSync(localPath, "{}\n");
+
+  for (const f of [settingsPath, localPath]) {
+    chownSync(f, 0, 0);
+    chmodSync(f, 0o444);
+  }
+  chownSync(claudeDir, 0, AGENT_GID);
+  execFileSync("/bin/chmod", ["1775", claudeDir]);
 
   writeFileSync(manifestPath, manifestFor(t));
 }
@@ -190,6 +212,14 @@ for (const t of tenants) {
   if (dst.uid !== 0 || (dmode & 0o1000) === 0) {
     console.error(
       `  UNPROTECTED-DIR ${t.dir} (uid=${dst.uid}, mode=${dmode.toString(8)}) — the tenant could unlink .claude and install its own settings. Expected root-owned with the sticky bit (1775).`,
+    );
+    bad++;
+    continue;
+  }
+  const localPath = join(t.dir, ".claude/settings.local.json");
+  if (!existsSync(localPath)) {
+    console.error(
+      `  MISSING ${localPath} — the tenant could create it and override the sandbox switches from a higher precedence level.`,
     );
     bad++;
     continue;
