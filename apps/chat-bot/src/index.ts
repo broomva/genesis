@@ -174,7 +174,10 @@ function gate(threadId: string): boolean {
  *  The routing decision itself lives in `workspaceIdFor` so it can be tested. */
 function optionsFor(threadId: string): HandlerOptions {
   const workspaceId = workspaceIdFor(threadId, process.env.GENESIS_WHATSAPP_WORKSPACE_ID);
-  return workspaceId ? { baseUrl, token, workspaceId } : { baseUrl, token };
+  // WhatsApp cannot edit sent messages, so it cannot render a streamed reply
+  // (Chat SDK streams via post-then-edit). Buffer it instead.
+  const streaming = !threadId.startsWith("kapso:");
+  return workspaceId ? { baseUrl, token, workspaceId, streaming } : { baseUrl, token, streaming };
 }
 
 // DMs: `onDirectMessage` fires for EVERY direct message regardless of

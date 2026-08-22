@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   type PostableThread,
+  chunkForWhatsapp,
+  drainStream,
   handleAgentMessage,
   workspaceIdFor,
   workspaceIsRegistered,
@@ -186,5 +188,53 @@ describe("workspaceIsRegistered — confinement precheck (BRO-2216)", () => {
 
   test("a blank wanted id never passes", () => {
     for (const w of ["", "   "]) expect(workspaceIsRegistered(payload, w)).toBe(false);
+  });
+});
+
+describe("chunkForWhatsapp — buffered delivery (BRO-2216)", () => {
+  test("short text stays one chunk", () => {
+    expect(chunkForWhatsapp("hello")).toEqual(["hello"]);
+  });
+
+  test("empty/whitespace yields NO chunks (never post an empty message)", () => {
+    for (const t of ["", "   ", "\n\n"]) expect(chunkForWhatsapp(t)).toEqual([]);
+  });
+
+  test("long text splits and every chunk is within the limit", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `line ${i} of some text`).join("\n");
+    const chunks = chunkForWhatsapp(long, 500);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(500);
+  });
+
+  test("no content is lost across chunks", () => {
+    const long = Array.from({ length: 200 }, (_, i) => `word${i}`).join(" ");
+    const joined = chunkForWhatsapp(long, 300).join(" ");
+    expect(joined.replace(/\s+/g, " ")).toBe(long.replace(/\s+/g, " "));
+  });
+
+  test("a single unbreakable run still splits rather than exceeding the limit", () => {
+    const blob = "x".repeat(1200);
+    const chunks = chunkForWhatsapp(blob, 400);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(400);
+    expect(chunks.join("")).toBe(blob);
+  });
+
+  test("prefers paragraph boundaries when available", () => {
+    const text = `${"a".repeat(200)}\n\n${"b".repeat(200)}`;
+    const chunks = chunkForWhatsapp(text, 250);
+    expect(chunks[0]).toBe("a".repeat(200));
+  });
+});
+
+describe("drainStream", () => {
+  async function* gen(parts: string[]) {
+    for (const p of parts) yield p;
+  }
+  test("concatenates every piece in order", async () => {
+    expect(await drainStream(gen(["a", "b", "c"]))).toBe("abc");
+  });
+  test("empty stream yields empty string", async () => {
+    expect(await drainStream(gen([]))).toBe("");
   });
 });

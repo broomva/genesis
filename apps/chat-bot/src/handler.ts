@@ -38,6 +38,56 @@ export interface HandlerOptions {
    *  Set per channel, so a public channel can be confined to a dedicated
    *  workspace while another keeps the engine default. */
   workspaceId?: string;
+  /** Whether this channel can render a streamed reply.
+   *
+   *  Chat SDK streams by posting a message and then EDITING it as tokens
+   *  arrive. Telegram supports edits; WhatsApp does not — the Kapso adapter
+   *  throws `NotImplementedError: WhatsApp Cloud API does not support editing
+   *  sent messages` from `editMessage`, which aborts the whole turn AFTER the
+   *  agent has already done the work. So a channel without edits gets the reply
+   *  buffered and posted once (chunked to the text cap).
+   *
+   *  Defaults to true — Telegram's behavior is unchanged. */
+  streaming?: boolean;
+}
+
+/** WhatsApp's text body cap. Chunk below it so a long reply is delivered rather
+ *  than rejected; 3900 leaves room for the continuation marker. */
+export const WHATSAPP_TEXT_LIMIT = 4096;
+const CHUNK_TARGET = 3900;
+
+/** Split a reply into WhatsApp-sized pieces, preferring paragraph then line
+ *  breaks so chunks land on natural boundaries instead of mid-word.
+ *
+ *  Returns [] for empty input — the caller must not post an empty message
+ *  (WhatsApp rejects it, and it would read as the agent replying with nothing). */
+export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): string[] {
+  const body = text.trim();
+  if (!body) return [];
+  if (body.length <= limit) return [body];
+
+  const out: string[] = [];
+  let rest = body;
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    // Prefer a paragraph break, then a line break, then a space. `+ 1` keeps
+    // the break character with the chunk being emitted.
+    let cut = window.lastIndexOf("\n\n");
+    if (cut < limit * 0.5) cut = window.lastIndexOf("\n");
+    if (cut < limit * 0.5) cut = window.lastIndexOf(" ");
+    if (cut < limit * 0.5) cut = limit; // no good boundary — hard split
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) out.push(rest);
+  return out.filter((c) => c.length > 0);
+}
+
+/** Drain an async text stream into one string. */
+export async function drainStream(stream: AsyncIterable<string>): Promise<string> {
+  let acc = "";
+  for await (const piece of stream) acc += piece;
+  return acc;
 }
 
 /** Which Genesis workspace a thread's sessions are pinned to (BRO-2216).
@@ -191,16 +241,30 @@ export async function handleAgentMessage(
 
   await thread.startTyping?.().catch(() => {});
   try {
-    await thread.post(
-      genesisStream({
-        baseUrl: opts.baseUrl,
-        threadId: thread.id,
-        text: trimmed,
-        token: opts.token,
-        fetchImpl: opts.fetchImpl,
-        workspaceId: opts.workspaceId,
-      }),
-    );
+    const stream = genesisStream({
+      baseUrl: opts.baseUrl,
+      threadId: thread.id,
+      text: trimmed,
+      token: opts.token,
+      fetchImpl: opts.fetchImpl,
+      workspaceId: opts.workspaceId,
+    });
+    if (opts.streaming === false) {
+      // Buffered path: drain first, then post whole. Streaming here would post
+      // a message and try to edit it, which this channel cannot do.
+      const reply = await drainStream(stream);
+      const chunks = chunkForWhatsapp(reply);
+      if (chunks.length === 0) {
+        // An empty reply must still say something — silence is indistinguishable
+        // from the bot being down, which is the failure mode this whole channel
+        // has to avoid.
+        await thread.post("(the agent finished without producing any text)");
+      } else {
+        for (const chunk of chunks) await thread.post(chunk);
+      }
+    } else {
+      await thread.post(stream);
+    }
   } catch (e) {
     console.error("[genesis-bot] dispatch failed", e);
     await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
