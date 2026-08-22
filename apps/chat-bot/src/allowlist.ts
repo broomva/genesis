@@ -1,20 +1,133 @@
-// Owner allowlist (BRO-1512) — gate which Telegram threads the bot will serve.
+// Owner allowlist (BRO-1512) — gate which threads the bot will serve.
 //
 // The interactive engine auto-allows ALL tools + bash. When the workspace is a
-// real directory (e.g. ~/broomva) rather than a throwaway sandbox, an
-// unauthenticated bot would let ANY Telegram user drive an auto-allow agent on
-// the owner's machine (RCE-by-DM). The allowlist restricts processing to
-// known thread ids (a DM thread id == the user's chat id).
+// real directory (e.g. ~/broomva or the VPS orchestrator workspace) rather than
+// a throwaway sandbox, an unauthenticated bot would let ANY user drive an
+// auto-allow agent on that machine (RCE-by-DM). The allowlist restricts
+// processing to known principals.
 //
-// `GENESIS_TELEGRAM_ALLOWED_USERS`: comma-separated ids. Each entry matches
-// either the bare chat id ("547052379") or the full thread id
-// ("telegram:547052379").
+// FAIL-CLOSED (BRO-1534): an UNSET allowlist would serve everyone. The bot
+// REFUSES TO START with no allowlist unless `GENESIS_ALLOW_OPEN=1` explicitly
+// acknowledges an open/throwaway-sandbox posture.
 //
-// FAIL-CLOSED (BRO-1534): an UNSET allowlist would serve every Telegram user —
-// RCE-by-DM on whatever workspace the agent has. So the bot REFUSES TO START
-// with no allowlist unless `GENESIS_ALLOW_OPEN=1` explicitly acknowledges an
-// open/throwaway-sandbox posture. The previous behavior (unset → allow-all with
-// only a log line) was a fail-open security gap.
+// ---------------------------------------------------------------------------
+// MULTI-CHANNEL (BRO-2216) — two changes, both load-bearing.
+//
+// 1. Thread ids are NOT uniformly `<channel>:<id>`. Telegram's are, but Kapso
+//    (WhatsApp) encodes as
+//        kapso:<b64url(phoneNumberId)>:<b64url(waId)>[:<b64url(conversationId)>]
+//    (verified against @kapso/chat-adapter@0.1.1 dist/index.js `encodeThreadId`).
+//    The old "slice after the first colon" rule yields a base64 blob for Kapso,
+//    so an operator-written phone number could NEVER match. That fails closed —
+//    every WhatsApp message silently dropped — but the natural debugging move is
+//    to set GENESIS_ALLOW_OPEN=1, which serves EVERY WhatsApp sender. The
+//    dangerous state is reached by fixing the harmless one, so the decoder is a
+//    security control, not a convenience.
+//
+// 2. A bare (unprefixed) entry now binds to ONE channel — the env var it came
+//    from — instead of matching on every channel. With a single channel that
+//    distinction was invisible; with two, an entry meant as a Telegram chat id
+//    would also authorize a WhatsApp sender whose number happened to collide.
+//
+// Env:
+//   GENESIS_TELEGRAM_ALLOWED_USERS  bare entries bind to telegram ("547052379")
+//   GENESIS_WHATSAPP_ALLOWED_USERS  bare entries bind to kapso, compared
+//                                   digits-only so "+57 300 123 4567",
+//                                   "573001234567" and "+573001234567" are one
+//                                   principal
+// Either accepts fully-qualified entries ("telegram:547052379", "kapso:5730..."),
+// which bind to the named channel regardless of which var they appear in.
+
+export type ChannelId = "telegram" | "kapso";
+
+/** A resolved actor: the channel it spoke on, and its id on that channel. */
+export interface Principal {
+  readonly channel: ChannelId;
+  readonly id: string;
+}
+
+/** Digits-only form of a phone number. "+57 300 123-4567" -> "573001234567". */
+function normalizePhone(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+/** Channel-appropriate canonical form for comparison. */
+function canonical(channel: ChannelId, id: string): string {
+  return channel === "kapso" ? normalizePhone(id) : id.trim();
+}
+
+/** base64url -> utf8, or undefined when `value` is not canonical base64url.
+ *  Node's decoder is lenient (it silently accepts junk and yields mojibake), so
+ *  the round-trip re-encode is what makes this a validation and not a guess. */
+function decodePart(value: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const decoded = Buffer.from(value, "base64url").toString("utf8");
+    if (decoded.length === 0) return undefined;
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== value) return undefined;
+    return decoded;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The principal a thread id speaks as, or undefined if it cannot be resolved.
+ *
+ *  Unresolvable is DENIED, never allowed: a thread id we cannot parse is a
+ *  thread id we cannot authorize. `fallback` is the channel a bare, prefix-less
+ *  id is attributed to (the allowlist's own channel — a bare thread id can only
+ *  reach a channel that was configured). */
+export function principalOf(threadId: string, fallback: ChannelId): Principal | undefined {
+  const trimmed = threadId.trim();
+  if (trimmed.length === 0) return undefined;
+
+  if (trimmed.startsWith("kapso:")) {
+    // kapso:<phoneNumberId>:<waId>[:<conversationId>] — all base64url.
+    // The SENDER is waId (part 2); phoneNumberId is OUR number, identical for
+    // every inbound message, so matching on it would authorize the world.
+    const parts = trimmed.split(":");
+    if (parts.length !== 3 && parts.length !== 4) return undefined;
+    const waId = decodePart(parts[2] ?? "");
+    if (waId === undefined) return undefined;
+    const id = normalizePhone(waId);
+    return id.length === 0 ? undefined : { channel: "kapso", id };
+  }
+
+  if (trimmed.startsWith("telegram:")) {
+    const id = trimmed.slice("telegram:".length).trim();
+    return id.length === 0 ? undefined : { channel: "telegram", id };
+  }
+
+  if (trimmed.includes(":")) return undefined; // a channel we do not know -> deny
+  return { channel: fallback, id: canonical(fallback, trimmed) };
+}
+
+/** The principal an OPERATOR-WRITTEN allowlist entry names.
+ *
+ *  Entries and thread ids are DIFFERENT grammars and must not share a parser:
+ *  a human writes `kapso:+57 300 123 4567`, while the adapter emits
+ *  `kapso:<b64url>:<b64url>`. Parsing one with the other's rules silently drops
+ *  the entry — which fails closed, but presents as "my allowlist does nothing",
+ *  the same trap that leads an operator to GENESIS_ALLOW_OPEN=1.
+ *
+ *  A pasted real thread id is still accepted: the thread-id grammar is tried
+ *  first, so both spellings of the same principal work. */
+export function entryPrincipal(entry: string, channel: ChannelId): Principal | undefined {
+  const asThreadId = principalOf(entry, channel);
+  if (asThreadId !== undefined) return asThreadId;
+
+  const trimmed = entry.trim();
+  const sep = trimmed.indexOf(":");
+  if (sep === -1) return undefined; // bare handled by principalOf above
+
+  const named = trimmed.slice(0, sep).toLowerCase();
+  const rest = trimmed.slice(sep + 1).trim();
+  if (rest.length === 0) return undefined;
+  if (named !== "telegram" && named !== "kapso") return undefined;
+
+  const id = canonical(named, rest);
+  return id.length === 0 ? undefined : { channel: named, id };
+}
 
 export interface Allowlist {
   /** True when no allowlist is configured (allow-all, sandbox posture). */
@@ -23,23 +136,38 @@ export interface Allowlist {
   allows(threadId: string): boolean;
 }
 
-/** Build an allowlist from the raw env value (comma-separated ids). */
-export function parseAllowlist(raw: string | undefined): Allowlist {
-  const ids = (raw ?? "")
+/** Build an allowlist from raw env values (comma-separated ids).
+ *
+ *  `channel` is the channel bare entries bind to — and the channel a bare
+ *  thread id is attributed to. Defaults to telegram so existing single-channel
+ *  callers and their config keep working unchanged. */
+export function parseAllowlist(
+  raw: string | undefined,
+  channel: ChannelId = "telegram",
+): Allowlist {
+  const entries = (raw ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  if (ids.length === 0) {
+
+  if (entries.length === 0) {
     return { open: true, allows: () => true };
   }
-  const set = new Set(ids);
+
+  // Key on "<channel> <id>" so a Telegram id can never satisfy a Kapso
+  // principal (or vice versa) even when the digits coincide.
+  const set = new Set<string>();
+  for (const entry of entries) {
+    const p = entryPrincipal(entry, channel);
+    if (p !== undefined) set.add(`${p.channel} ${p.id}`);
+  }
+
   return {
     open: false,
     allows(threadId: string): boolean {
-      if (set.has(threadId)) return true;
-      // Also match the bare chat id (thread ids look like "telegram:<id>").
-      const bare = threadId.includes(":") ? threadId.slice(threadId.indexOf(":") + 1) : threadId;
-      return set.has(bare);
+      const p = principalOf(threadId, channel);
+      if (p === undefined) return false; // unresolvable -> denied
+      return set.has(`${p.channel} ${p.id}`);
     },
   };
 }
@@ -50,17 +178,57 @@ export type StartupDecision =
   | { action: "serve"; allowlist: Allowlist; open: boolean }
   | { action: "refuse"; reason: string };
 
-export function startupGate(raw: string | undefined, allowOpen: boolean): StartupDecision {
-  const allowlist = parseAllowlist(raw);
-  if (allowlist.open && !allowOpen) {
+/** One channel the bot is about to register, and its configured allowlist. */
+export interface ChannelConfig {
+  readonly channel: ChannelId;
+  readonly raw: string | undefined;
+  /** Env var name, quoted back to the operator in the refusal. */
+  readonly envVar: string;
+}
+
+/** Gate every REGISTERED channel (BRO-2216).
+ *
+ *  Per-channel, not global: with a global gate, configuring Telegram alone
+ *  would satisfy the check while an also-registered WhatsApp number served
+ *  the world. A channel is gated because it is registered — so registering a
+ *  channel and forgetting its allowlist is a refusal, not an open door. */
+export function startupGateFor(
+  channels: readonly ChannelConfig[],
+  allowOpen: boolean,
+): StartupDecision {
+  if (channels.length === 0) {
+    return { action: "refuse", reason: "no channels registered — nothing to serve." };
+  }
+
+  const lists = channels.map((c) => ({ ...c, allowlist: parseAllowlist(c.raw, c.channel) }));
+  const unguarded = lists.filter((l) => l.allowlist.open);
+
+  if (unguarded.length > 0 && !allowOpen) {
+    const names = unguarded.map((l) => l.envVar).join(", ");
     return {
       action: "refuse",
-      reason:
-        "no GENESIS_TELEGRAM_ALLOWED_USERS set — refusing to start an OPEN bot " +
-        "(it would serve every Telegram user = RCE-by-DM on the workspace). " +
-        "Set GENESIS_TELEGRAM_ALLOWED_USERS=<your chat id>, or GENESIS_ALLOW_OPEN=1 " +
-        "for a throwaway sandbox.",
+      reason: `no ${names} set — refusing to start an OPEN bot (it would serve every user on that channel = RCE-by-DM on the workspace). Set ${names}=<your id>, or GENESIS_ALLOW_OPEN=1 for a throwaway sandbox.`,
     };
   }
-  return { action: "serve", allowlist, open: allowlist.open };
+
+  // Union across channels: each principal is already channel-qualified, so a
+  // thread only matches an entry configured for ITS channel.
+  const open = unguarded.length > 0;
+  return {
+    action: "serve",
+    open,
+    allowlist: {
+      open,
+      allows: (threadId: string) => lists.some((l) => l.allowlist.allows(threadId)),
+    },
+  };
+}
+
+/** Single-channel gate (Telegram). Retained so existing callers and tests are
+ *  unaffected by the multi-channel generalization. */
+export function startupGate(raw: string | undefined, allowOpen: boolean): StartupDecision {
+  return startupGateFor(
+    [{ channel: "telegram", raw, envVar: "GENESIS_TELEGRAM_ALLOWED_USERS" }],
+    allowOpen,
+  );
 }
