@@ -103,7 +103,10 @@ esac
 # INT/TERM as well as EXIT: a Ctrl-C mid-push must not leave a world-readable
 # temp directory containing the shared secret.
 cleanup () { rm -rf "$WORK"; }
-trap cleanup EXIT INT TERM
+# EXIT removes the staging dir; INT/TERM must ALSO exit, or Ctrl-C would run the
+# handler and then carry on into the pushes with the staging dir already gone.
+trap cleanup EXIT
+trap 'cleanup; echo; echo "✗ interrupted" >&2; exit 130' INT TERM
 cp -R "$SRC/." "$WORK/" || { echo "✗ could not stage configs into $WORK" >&2; exit 1; }
 
 echo "▶ substituting into a temp copy"

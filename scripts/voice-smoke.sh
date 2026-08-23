@@ -24,7 +24,8 @@ case "$D" in /tmp/voice-smoke.*|/private/tmp/voice-smoke.*) ;; *) echo "✗ unex
 FAILED=0
 PID=""
 cleanup () { [ -n "$PID" ] && kill "$PID" 2>/dev/null; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; echo; echo "✗ interrupted"; exit 130' INT TERM
 
 cd "$WT/apps/api" || exit 1
 if [ ! -d "$WT/node_modules/@genesis" ] && [ ! -d "$WT/apps/api/node_modules" ]; then
@@ -39,8 +40,11 @@ bad ()  { printf '  ✗ %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$
 eq ()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 # has <label> <needle> <haystack>
 has ()  { case "$3" in *"$2"*) ok "$1";; *) bad "$1" "contains $2" "$3";; esac }
-status () { curl -s -o /dev/null -w '%{http_code}' "$@"; }
-body ()   { curl -s "$@"; }
+# --max-time on every call: without it a wedged server does not fail the smoke,
+# it hangs it, which in CI is a timeout with no diagnosis rather than a red check.
+CURL=(curl -s --max-time 15)
+status () { "${CURL[@]}" -o /dev/null -w '%{http_code}' "$@"; }
+body ()   { "${CURL[@]}" "$@"; }
 
 H=(-H "x-genesis-voice-secret: $SECRET" -H 'content-type: application/json')
 U="http://localhost:$PORT"
@@ -50,7 +54,7 @@ GENESIS_DATA_DIR="$D/data" PORT="$PORT" GENESIS_VOICE_SECRET="$SECRET" \
   GENESIS_VOICE_PRINCIPALS="+57 301 775-8620:Carlos,573214994114" \
   bun src/index.ts > "$D/server.log" 2>&1 &
 PID=$!
-for _ in $(seq 1 60); do curl -sf "$U/health" -o /dev/null && break; sleep 0.5; done
+for _ in $(seq 1 60); do curl -sf --max-time 5 "$U/health" -o /dev/null && break; sleep 0.5; done
 if ! grep -qi "voice channel" "$D/server.log"; then
   echo "✗ the voice channel did not register at boot"; sed -n '1,20p' "$D/server.log"; exit 1
 fi
@@ -66,7 +70,7 @@ eq  "a wrong secret is 401" "401" "$(status -X POST "$U/voice/identify" -H "x-ge
 echo "▶ request"
 # ONE request, both its status and its body. Asserting a 200 on a warmup and a
 # body on a different call meant neither was evidence about the other.
-RESP=$(curl -s -w '\n%{http_code}' -X POST "$U/voice/request" "${H[@]}" \
+RESP=$("${CURL[@]}" -w '\n%{http_code}' -X POST "$U/voice/request" "${H[@]}" \
         -d '{"callerId":"573017758620","request":"send me the August invoice","conversationId":"conv-1"}')
 R=$(printf '%s' "$RESP" | sed '$d')
 eq  "a request returns 200" "200" "$(printf '%s' "$RESP" | tail -1)"
@@ -102,7 +106,7 @@ sleep 1
 # measuring the operator's shell rather than the code.
 env -u GENESIS_VOICE_SECRET GENESIS_DATA_DIR="$D/off" PORT=$((PORT+1)) bun src/index.ts > "$D/off.log" 2>&1 &
 PID=$!
-for _ in $(seq 1 60); do curl -sf "http://localhost:$((PORT+1))/health" -o /dev/null && break; sleep 0.5; done
+for _ in $(seq 1 60); do curl -sf --max-time 5 "http://localhost:$((PORT+1))/health" -o /dev/null && break; sleep 0.5; done
 for p in identify request; do
   eq "  /voice/$p is 404 when unconfigured" "404" "$(status -X POST "http://localhost:$((PORT+1))/voice/$p" -H 'content-type: application/json' -d '{"callerId":"573017758620","request":"x"}')"
 done
