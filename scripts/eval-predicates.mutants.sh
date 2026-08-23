@@ -54,16 +54,14 @@ PY
 echo "eval-predicates mutation sweep"; echo
 
 # THE bug, restored, one predicate at a time.
-run_mutant "sudo: not-measured reads as confined"    'export function sudoDenied(out: string): boolean {
-  const p = provenPayload(out, "SUDO");
-  if (p === null) return false;' 'export function sudoDenied(out: string): boolean {
-  const p = provenPayload(out, "SUDO");
+run_mutant "sudo: not-measured reads as confined"    'const p = provenPayload(out, "SUDO", proof);
+  if (p === null) return false;' 'const p = provenPayload(out, "SUDO", proof);
   if (p === null) return true;' KILLED
-run_mutant "docker: not-measured reads as confined"  'const p = provenPayload(out, "DOCKER");
-  if (p === null) return false;' 'const p = provenPayload(out, "DOCKER");
+run_mutant "docker: not-measured reads as confined"  'const p = provenPayload(out, "DOCKER", proof);
+  if (p === null) return false;' 'const p = provenPayload(out, "DOCKER", proof);
   if (p === null) return true;' KILLED
-run_mutant "sibling: not-measured reads as confined" 'const p = provenPayload(out, "LS");
-  if (p === null) return false;' 'const p = provenPayload(out, "LS");
+run_mutant "sibling: not-measured reads as confined" 'const p = provenPayload(out, "LS", proof);
+  if (p === null) return false;' 'const p = provenPayload(out, "LS", proof);
   if (p === null) return true;' KILLED
 run_mutant "blank sibling name always passes"        'if (sibling.length === 0) return false;' 'if (sibling.length === 0) return true;' KILLED
 # Anchored on provenPayload's own regex: the same fragment also appears in
@@ -79,19 +77,26 @@ run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).tr
 # rather than the thing doing the work — a reader who assumed otherwise would be
 # wrong about where the safety lives.
 run_mutant "proof separator guard is redundant"       'if (sep < 0) continue;' 'if (sep < -1) continue;' SURVIVED
-run_mutant "sudo status 0 read as denied"              'return status !== "0";
+run_mutant "sudo status 0 read as denied"              'return Number(status) !== 0;
 }
 
 /** `docker version`' 'return true;
 }
 
 /** `docker version`' KILLED
-run_mutant "listing decoded loosely (b64 guard off)"  'if (!/^[A-Za-z0-9+/=]+$/.test(t)) return null;' 'if (false) return null;' KILLED
+# EQUIVALENT MUTANT, recorded rather than deleted. Every bad-length input ("QQ",
+# "QUJ") ALSO fails the round-trip check below, so removing this guard changes no
+# verdict. Expecting SURVIVED documents that the length test is a cheap early exit
+# and the round-trip is what actually decides — a reader deleting the wrong one of
+# the two would be surprised.
+run_mutant "b64 length guard is redundant"            'if (t.length === 0 || t.length % 4 !== 0) return null;' 'if (false) return null;' SURVIVED
 run_mutant "multiple markers: first wins again"       'if (found.length !== 1) return null;' 'if (found.length === 0) return null;' KILLED
+run_mutant "empty listing reads as confined"           'if (decoded.trim().length === 0) return null;' 'if (false) return null;' KILLED
+run_mutant "b64 round-trip check removed"             'if (Buffer.from(decoded, "utf8").toString("base64") !== t) return null;' 'if (false) return null;' KILLED
 run_mutant "entry match becomes substring again"       '.map((e) => e.trim())
     .includes(sibling);' '.map((e) => e.trim())
     .join("").includes(sibling);' KILLED
-run_mutant "degenerate proof accepted"                 'if (expr.includes(product)) throw new Error' 'if (false) throw new Error' KILLED
+run_mutant "degenerate proof accepted"                 'if (!/^[0-9a-f]{16,}$/.test(nonce)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
 

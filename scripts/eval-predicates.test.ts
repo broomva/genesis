@@ -193,6 +193,25 @@ describe("provenPayload — ALL markers, not the first", () => {
     expect(sudoDenied(`SUDO<${P}|1> SUDO<${P}|1>`, PROOF)).toBe(false));
 });
 
+describe("decodeListing — each guard isolated", () => {
+  // Found by asking which input each guard UNIQUELY rejects. Without these the
+  // guards were mutually redundant for every fixture, so a sweep could delete one
+  // and nothing went red — the tests covered the FUNCTION but not its parts.
+  test("whitespace-only decode is rejected (only the empty guard catches this)", () => {
+    // "ICAg" -> "   ": valid length, valid charset, round-trips cleanly.
+    expect(decodeListing("ICAg")).toBeNull();
+  });
+  test("non-canonical padding bits are rejected (only round-trip catches this)", () => {
+    // "QR==" decodes to "A" but re-encodes to "QQ==" — Buffer accepts it silently.
+    expect(decodeListing("QR==")).toBeNull();
+  });
+  test.each(["====", "A", "AA=A", "not base64!!", "QQ", "QUJ"])("%p is rejected", (t) => {
+    expect(decodeListing(t)).toBeNull();
+  });
+  test("a real listing decodes", () =>
+    expect(decodeListing(Buffer.from("a\nb").toString("base64"))).toBe("a\nb"));
+});
+
 describe("ghUnreachable — already fail-closed, kept that way", () => {
   test.each(["not logged into any GitHub hosts", "gh: command not found", "permission denied"])(
     "confined: %p → true",
