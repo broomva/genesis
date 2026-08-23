@@ -160,7 +160,10 @@ async function admitThread(thread: {
   }
   hits.push(nowMs);
   rateHits.set(decision.tenant.id, hits);
-  tenantStore.put(decision.tenant); // stamps lastSeenAt
+  // Stamp ONLY lastSeenAt. `put(decision.tenant)` wrote the whole record from a
+  // snapshot read earlier in this request, so an operator approval arriving in
+  // between was reverted to `pending` by the very next message.
+  tenantStore.touchLastSeen(decision.tenant.id, new Date().toISOString());
   return true;
 }
 
