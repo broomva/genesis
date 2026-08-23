@@ -250,6 +250,20 @@ export function build(opts: BuildOpts) {
     });
   });
 
+  // Re-read the workspace registry without restarting (BRO-2230). Tenant
+  // workspaces are provisioned out of band as root, so their manifests land on
+  // disk without passing through this process; without this the api serves a
+  // boot-time snapshot and the bot refuses every newly approved tenant.
+  //
+  // Behind the same bearer gate as the list it refreshes: an unauthenticated
+  // reload is a cheap way to make the api re-scan a directory repeatedly.
+  app.post("/workspaces/refresh", async (c) => {
+    if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+    await supervisor.reloadWorkspaces();
+    const workspaces = await supervisor.listWorkspaces();
+    return c.json({ ok: true, count: workspaces.length, ids: workspaces.map((w) => w.id) });
+  });
+
   // Discover→pick provisioning (BRO-1629). Git repos under the allow-root not yet
   // registered — the "Add project" candidates. Same bearer gate. No rootPath leaves
   // the server (only the dir name + the id it would register as).

@@ -405,6 +405,25 @@ export class Supervisor {
     );
   }
 
+  /** Re-read the workspace registry from its source (BRO-2230).
+   *
+   *  The registry is an in-memory Map hydrated at boot and invalidated only by
+   *  mutations made THROUGH this supervisor. A manifest written directly to the
+   *  registry directory — which is how tenant workspaces are provisioned, as
+   *  root, out of band — is therefore invisible until the process restarts.
+   *
+   *  Measured consequence of not having this: after provisioning a new tenant,
+   *  genesis-bot asked the api whether the workspace existed, was told no, and
+   *  refused to serve WhatsApp AT ALL, crash-looping and taking the channel down
+   *  for every EXISTING tenant until the api was restarted too. At one tenant
+   *  that is an annoyance; at ten it is an outage per onboarding.
+   *
+   *  Serialized through the same chain as every other refresh, so a reload
+   *  racing a register cannot install a stale snapshot. */
+  reloadWorkspaces(): Promise<void> {
+    return this.refreshRegistry();
+  }
+
   /** Serialized registry refresh (CodeRabbit/Forge #2). Chains the reload onto the
    *  current hydration so two concurrent runtime mutations can't run overlapping
    *  `loadRegistry`s and have the SLOWER one overwrite the cache with a stale

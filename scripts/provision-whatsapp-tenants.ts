@@ -265,4 +265,29 @@ if (bad > 0) {
   console.error(`\n${bad} tenant(s) not correctly confined.`);
   process.exit(1);
 }
-console.log(`\nprovisioned ${tenants.length} tenant(s); restart genesis-bot to pick them up.`);
+console.log(`\nprovisioned ${tenants.length} tenant(s).`);
+
+// Tell the api to re-read the registry. Without this it serves a boot-time
+// snapshot, the bot asks whether the new workspace exists, is told no, and
+// refuses to serve WhatsApp AT ALL — an outage for every existing tenant, per
+// onboarding. Measured exactly that before this endpoint existed.
+const apiUrl = (process.env.GENESIS_URL ?? "http://localhost:8787").replace(/\/$/, "");
+const apiToken = process.env.GENESIS_TOKEN;
+try {
+  const res = await fetch(`${apiUrl}/workspaces/refresh`, {
+    method: "POST",
+    headers: apiToken ? { authorization: `Bearer ${apiToken}` } : {},
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = (await res.json()) as { count?: number };
+  console.log(`api registry reloaded (${body.count ?? "?"} workspaces) — no restart needed.`);
+} catch (e) {
+  // LOUD, not best-effort-silent: if the reload did not happen the operator must
+  // restart, and a quiet failure here is exactly the state that crash-loops the
+  // bot the next time it starts.
+  console.error(
+    `\ncould not reload the api registry at ${apiUrl} (${e instanceof Error ? e.message : e}).\nThe new tenant is NOT yet visible to the bot. Restart both, api first:\n  systemctl --user restart genesis-api.service && sleep 5\n  systemctl --user restart genesis-bot.service`,
+  );
+  process.exit(1);
+}
