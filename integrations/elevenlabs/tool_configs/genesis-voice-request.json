@@ -1,0 +1,39 @@
+{
+  "name": "genesis_voice_request",
+  "description": "Record what the caller is asking for. Genesis queues it and returns immediately — this does NOT run any work and does not produce an answer during the call. The response carries `followUp`, which is the ONLY thing that tells you what to say about what happens next. Read it and say exactly that; never decide for yourself that someone will get back to them.",
+  "type": "webhook",
+  "api_schema": {
+    "url": "${GENESIS_PUBLIC_URL}/voice/request",
+    "method": "POST",
+    "request_body_schema": {
+      "type": "object",
+      "description": "The caller's request, in their own words.",
+      "properties": {
+        "callerId": {
+          "type": "string",
+          "description": "The caller's phone number, verbatim from the telephony provider.",
+          "dynamic_variable": "system__caller_id"
+        },
+        "request": {
+          "type": "string",
+          "description": "What the caller asked for, in their own words. Summarize only if they rambled; do not add anything they did not say."
+        },
+        "conversationId": {
+          "type": "string",
+          "description": "This call's conversation id. Passing it makes a retried tool call land on the same ticket instead of creating a duplicate.",
+          "dynamic_variable": "system__conversation_id"
+        }
+      },
+      "required": ["callerId", "request"]
+    },
+    "request_headers": {
+      "Content-Type": "application/json",
+      "x-genesis-voice-secret": "${GENESIS_VOICE_SECRET}"
+    }
+  },
+  "response_timeout_secs": 10,
+  "dynamic_variables": { "dynamic_variable_placeholders": {} },
+  "assignments": [],
+  "disable_interruptions": false,
+  "force_pre_tool_speech": false
+}

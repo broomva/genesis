@@ -1,0 +1,9 @@
+{
+  "agents": [
+    {
+      "name": "Genesis Voice",
+      "config": "agent_configs/genesis-voice.json",
+      "id": ""
+    }
+  ]
+}
