@@ -54,6 +54,12 @@ export interface HandlerOptions {
    *  WHATSAPP_TEXT_LIMIT by chunkForWhatsapp so a misconfiguration degrades to
    *  "less readable" rather than "rejected by the transport". */
   chunkTarget?: number;
+  /** Typing re-arm interval. A seam, not a knob: at the 20s default a unit test
+   *  finishes long before the second re-arm, so "streaming channels get ONE
+   *  indicator, buffered channels get a keep-alive" is indistinguishable from
+   *  "both get one" — the mutation sweep proved it by SURVIVING removal of the
+   *  buffered gate. Shrinking the interval is what makes the claim falsifiable. */
+  typingRearmMs?: number;
 }
 
 /** WhatsApp's text body cap — a hard protocol limit. A body above it is
@@ -159,33 +165,31 @@ export const TYPING_MAX_MS = 5 * 60_000;
  *  typing support (or a transient API failure) must never fail the turn, since
  *  the indicator is a courtesy and the reply is the product.
  *
- *  Two guards beyond the interval, both from P20 round 1:
+ *  `inFlight` prevents overlap. If a round trip takes longer than `rearmMs` the
+ *  naive version issues a second request on top of the first, so the slower the
+ *  API is the MORE requests it gets — the exact inversion you want under
+ *  pressure. (P20 round 1, MAJOR.)
  *
- *  - `stopped` is checked INSIDE the async continuation, not just around the
- *    timer. `clearInterval` cannot cancel a call already in flight, so a slow
- *    `markRead` issued just before stop() would land AFTER the reply and show
- *    "typing" on an answered conversation. The flag makes a late arrival inert.
- *  - `inFlight` prevents overlap. If a round trip takes longer than `rearmMs`
- *    the naive version issues a second request on top of the first, and the
- *    slower the API is the more requests it gets — the exact inversion you want
- *    under pressure. */
+ *  There is deliberately NO `stopped` flag. An earlier fix added one, claiming
+ *  it made a late-landing call inert — that claim was false twice over, and the
+ *  mutation sweep caught it by SURVIVING its removal. `clearInterval` means no
+ *  timer callback can run again and `fire()` has no other caller, so the guard
+ *  was unreachable; and a `markRead` already on the wire cannot be unsent by
+ *  any flag. What actually bounds a late indicator is that WhatsApp dismisses
+ *  it on our next send, which the reply performs anyway. */
 export function keepTyping(
   thread: PostableThread,
   rearmMs: number = TYPING_REARM_MS,
   maxMs: number = TYPING_MAX_MS,
 ): () => void {
   if (!thread.startTyping) return () => {};
-  let stopped = false;
   let inFlight = false;
   const deadline = Date.now() + maxMs;
 
-  const stop = () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+  const stop = () => clearInterval(timer);
 
   const fire = () => {
-    if (stopped || inFlight) return;
+    if (inFlight) return;
     if (Date.now() >= deadline) {
       stop();
       return;
@@ -484,7 +488,7 @@ export async function handleAgentMessage(
   const buffered = opts.streaming === false;
   let stopTyping = () => {};
   if (buffered) {
-    stopTyping = keepTyping(thread);
+    stopTyping = keepTyping(thread, opts.typingRearmMs);
   } else {
     // Streaming channels keep the pre-existing single indicator: the stream
     // IS the progress display, so there is nothing for a keep-alive to add.

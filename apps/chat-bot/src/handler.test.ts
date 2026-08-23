@@ -418,6 +418,21 @@ describe("isOutsideServiceWindow", () => {
     expect(isOutsideServiceWindow(new Error("ECONNREFUSED"))).toBe(false);
   });
 
+  test("recognises it by CATEGORY even when the code is absent", () => {
+    // Without this the category branch is never exercised: every other case
+    // that sets category also sets code 131047, so blinding the category
+    // match survives. (Mutation sweep, arm `category-match-blinded`.)
+    expect(isOutsideServiceWindow({ category: "reengagementWindow" })).toBe(true);
+  });
+
+  test("a non-object is not a closed window", () => {
+    // The `typeof e !== "object"` guard was unexercised — inverting it to
+    // `return true` survived the whole suite.
+    for (const v of [undefined, null, "24-hour window", 131047]) {
+      expect(isOutsideServiceWindow(v)).toBe(false);
+    }
+  });
+
   test("a DIFFERENT Graph error is not mistaken for a closed window", () => {
     // 131026 is "message undeliverable" — a real error that must still surface
     // as a failure, with its ⚠️ and its apology.
@@ -568,10 +583,10 @@ describe("keepTyping — P20 round 1 hardening", () => {
     stop();
   });
 
-  test("an in-flight call that lands after stop() cannot re-arm", async () => {
-    // clearInterval cannot cancel a request already on the wire; without the
-    // `stopped` flag a slow call resolves after the reply and the conversation
-    // shows "typing" on an answered question.
+  test("stop() ends re-arming even while a call is in flight", async () => {
+    // clearInterval cannot cancel the request already on the wire — nothing
+    // can, and no flag inside this function changes that. What it must
+    // guarantee is that no FURTHER re-arm is issued once the reply is out.
     let started = 0;
     const thread: PostableThread = {
       id: "kapso:a:b",
@@ -610,16 +625,48 @@ describe("keepTyping — P20 round 1 hardening", () => {
 });
 
 describe("streaming channels keep their pre-existing indicator", () => {
-  test("a streaming channel gets exactly ONE indicator, not a keep-alive", async () => {
+  /** A fetch that holds the turn open long enough for several re-arms. */
+  function slowFetch(reply: string, ms: number): typeof fetch {
+    return (async () => {
+      await new Promise((r) => setTimeout(r, ms));
+      return new Response(
+        sseBody([
+          part({ type: "text-start", id: "t" }),
+          part({ type: "text-delta", id: "t", delta: reply }),
+          part({ type: "text-end", id: "t" }),
+          part({ type: "finish" }),
+        ]),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+  }
+
+  test("a STREAMING channel gets exactly ONE indicator across a long turn", async () => {
     // Telegram's behaviour must be unchanged: the stream itself is the progress
-    // display, and re-arming there would be a behaviour change this PR claims
-    // not to make.
+    // display, so re-arming there would be a behaviour change this PR claims
+    // not to make. The long turn is what makes this falsifiable — at the 20s
+    // production interval a fast test cannot tell one indicator from a
+    // keep-alive, and removing the buffered gate SURVIVED the earlier version.
     const thread = mockThread("tg-1");
     await handleAgentMessage(thread, "hello", {
       baseUrl: "https://x",
-      fetchImpl: okFetch("hi"),
+      fetchImpl: slowFetch("hi", 40),
+      typingRearmMs: 5,
     });
     expect(thread.typingCount).toBe(1);
+  });
+
+  test("a BUFFERED channel re-arms across the same long turn", async () => {
+    // The polarity partner. Without it, "streaming gets one" would also pass if
+    // the keep-alive were broken for everyone.
+    const thread = mockThread("kapso:a:b");
+    await handleAgentMessage(thread, "hello", {
+      baseUrl: "https://x",
+      fetchImpl: slowFetch("hi", 40),
+      streaming: false,
+      typingRearmMs: 5,
+    });
+    expect(thread.typingCount).toBeGreaterThan(1);
   });
 });
 
