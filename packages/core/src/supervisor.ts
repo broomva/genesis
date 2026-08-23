@@ -539,9 +539,7 @@ export class Supervisor {
       // BRO-2241: sticky is right for a human switching workspaces mid-thread, and
       // wrong for a channel, where a stale binding can point at an UNCONFINED
       // workspace the tenant was never meant to reach.
-      const stale = channelQualified
-        ? rebindRefusal(existing.workspaceId, workspaceId)
-        : undefined;
+      const stale = channelQualified ? rebindRefusal(existing.workspaceId, workspaceId) : undefined;
       if (stale) throw new Error(stale);
       return existing;
     }
