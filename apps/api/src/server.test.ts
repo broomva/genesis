@@ -97,10 +97,6 @@ describe("voice routes (BRO-2228)", () => {
       workspaceRoot: "/tmp",
       voiceSecret: SECRET,
       voicePrincipals: PRINCIPALS,
-      // The capability IS the consumer: there is no way to claim the channel
-      // without supplying the function that sends. Tests pass a stub; production
-      // passes nothing until #107 lands, which is why callers hear "none".
-      voiceDelivery: { channel: "whatsapp", deliver: async () => {} },
       enqueueVoice: (t: unknown) => {
         enqueued.push(t);
       },
@@ -148,7 +144,7 @@ describe("voice routes (BRO-2228)", () => {
       SECRET,
     );
     expect(known.status).toBe(200);
-    expect(await known.json()).toEqual({ known: true, canFollowUp: true });
+    expect(await known.json()).toEqual({ known: true, canFollowUp: false });
 
     const unknown = await post(
       app as never,
@@ -170,12 +166,16 @@ describe("voice routes (BRO-2228)", () => {
     const { app } = voiceApp();
     const res = await post(app as never, "/voice/identify", { callerId: "573017758620" }, SECRET);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toEqual({ known: true, canFollowUp: true });
+    expect(body).toEqual({ known: true, canFollowUp: false });
     expect(JSON.stringify(body)).not.toContain("Carlos");
   });
 
-  test("request: a known caller is queued and promised WhatsApp follow-up", async () => {
-    const { app, enqueued } = voiceApp(); // voiceDelivery: "whatsapp"
+  test("request: a known caller is QUEUED, and promised nothing (no consumer exists)", async () => {
+    // This test used to assert followUp:"whatsapp". It cannot any more, and that
+    // is the point: with no queue-draining consumer in the tree there is no value
+    // a caller of build() can pass to make this surface offer a follow-up. The
+    // work is still recorded with a delivery target; only the promise is withheld.
+    const { app, enqueued } = voiceApp();
     const res = await post(
       app as never,
       "/voice/request",
@@ -184,7 +184,7 @@ describe("voice routes (BRO-2228)", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ticketId: string; followUp: string };
-    expect(body.followUp).toBe("whatsapp");
+    expect(body.followUp).toBe("none");
     expect(enqueued).toHaveLength(1);
     expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBe("573017758620");
   });
@@ -204,12 +204,12 @@ describe("voice routes (BRO-2228)", () => {
     expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBeUndefined();
   });
 
-  test("identify: canFollowUp is FALSE when no delivery leg is wired", async () => {
+  test("identify: canFollowUp is ALWAYS false while no consumer exists", async () => {
     // Round 1 gated /voice/request and left identify unconditionally true, so
     // the two routes contradicted each other and the impossible promise came
     // back through identify — which is the answer the agent uses to decide
     // whether to OFFER a follow-up at all.
-    const { app } = voiceApp({ voiceDelivery: undefined });
+    const { app } = voiceApp();
     const res = await post(app as never, "/voice/identify", { callerId: "573017758620" }, SECRET);
     expect(await res.json()).toEqual({ known: true, canFollowUp: false });
   });
@@ -267,7 +267,7 @@ describe("voice routes (BRO-2228)", () => {
     // The blocker this encodes: the surface shipped promising "whatsapp" while
     // no consumer existed anywhere to drain the queue and send. A caller heard a
     // follow-up commitment that nothing in the system could honour.
-    const { app, enqueued } = voiceApp({ voiceDelivery: undefined });
+    const { app, enqueued } = voiceApp();
     const res = await post(
       app as never,
       "/voice/request",

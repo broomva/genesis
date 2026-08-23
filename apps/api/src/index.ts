@@ -311,23 +311,15 @@ const voicePrincipals = voiceSecret
   ? parseVoicePrincipals(process.env.GENESIS_VOICE_PRINCIPALS)
   : [];
 const enqueueVoice = voiceSecret ? createVoiceQueue(voiceQueueDir) : undefined;
-// The delivery leg. There is deliberately NO env var here: build() takes the
-// sending function itself, so the capability cannot be claimed without the
-// mechanism. Nothing drains the queue yet (scope item 4, blocked on #107), so
-// this is undefined and both routes correctly tell callers a message was taken.
-// When the consumer lands it is passed here — and that same act is what makes
-// the promise true, rather than a flag asserting it already is.
-const voiceDelivery = undefined;
 if (voiceSecret) {
   // An enabled channel with no principals still ANSWERS — every caller resolves
   // unknown and can leave a message. That is a legitimate configuration, so this
   // is a log line and not a refusal to boot; it is here because "nobody can get a
   // follow-up" is otherwise indistinguishable from a working deploy.
-  console.log(
-    `[genesis] voice channel → /voice/* enabled (queue: ${join(voiceQueueDir, "queue.jsonl")}, ` +
-      `${voicePrincipals.length} principal(s) can receive follow-up, ` +
-      `delivery: ${voiceDelivery ? "wired" : "NONE — callers are told a message was taken"})`,
-  );
+  const queuePath = join(voiceQueueDir, "queue.jsonl");
+  const reach = `${voicePrincipals.length} principal(s) reachable`;
+  const delivery = "delivery NONE — a request is recorded, no follow-up is promised";
+  console.log(`[genesis] voice channel → /voice/* enabled (${queuePath}, ${reach}, ${delivery})`);
 }
 
 const { app, websocket } = build({
@@ -364,7 +356,6 @@ const { app, websocket } = build({
   voiceSecret,
   voicePrincipals,
   enqueueVoice,
-  voiceDelivery,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes

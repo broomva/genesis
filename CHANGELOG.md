@@ -37,12 +37,15 @@
   between taking a message and offering a follow-up. What they must never gain is
   anything unbounded (a name, the account's data) or any action on their behalf.
   `/voice/identify` returned the principal's **name** and no longer does.
-- **The delivery channel is the consumer, not a flag.** `build()` takes the
-  function that sends, so no configuration can claim a follow-up channel with no
-  mechanism behind it. There is deliberately no env var: an earlier design had
-  one, and `GENESIS_VOICE_DELIVERY=whatsapp` re-enabled the impossible promise
-  from a config file while the repo contained no consumer. Until that consumer
-  lands, both routes tell every caller a message was taken.
+- **A follow-up cannot be promised, because it is not representable.** Two
+  designs were rejected before this one. An env var (`GENESIS_VOICE_DELIVERY`) was
+  an operator assertion — one config line re-enabled the impossible promise while
+  the repo contained no consumer. Replacing it with a `{channel, deliver}` object
+  was a *function-shaped* assertion: `deliver` had no call sites, so a no-op still
+  bought the promise. There is now no option at all. No value any caller of
+  `build()` can pass makes this surface offer a follow-up; the option returns in
+  the same change that adds the code honouring it. Work is still queued with its
+  delivery target — only the promise is withheld.
 - An enqueue failure **propagates** to a 503, deliberately unlike the event
   trace's swallow-everything policy: a dropped ticket is a follow-up promised
   aloud on a call and then silently never delivered.

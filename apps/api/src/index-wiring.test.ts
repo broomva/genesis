@@ -37,12 +37,9 @@ function buildCallSource(): string {
 describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
   const call = buildCallSource();
 
-  test.each(["voiceSecret", "voicePrincipals", "enqueueVoice", "voiceDelivery"])(
-    "build() receives %s",
-    (option) => {
-      expect(call).toContain(option);
-    },
-  );
+  test.each(["voiceSecret", "voicePrincipals", "enqueueVoice"])("build() receives %s", (option) => {
+    expect(call).toContain(option);
+  });
 
   test("the sink is the durable queue, not an inline throwaway", () => {
     // Asserting the BINDING, not mere presence of the identifier: round 2 noted
@@ -53,14 +50,17 @@ describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
     expect(src).toMatch(/const\s+voicePrincipals\s*=[^;]*parseVoicePrincipals\(/);
   });
 
-  test("delivery cannot be claimed from configuration", () => {
-    // Round 3 rejected the env-var design: a string an operator sets is an
-    // assertion, so GENESIS_VOICE_DELIVERY=whatsapp re-enabled the impossible
-    // promise from a config file while no consumer existed. The capability is now
-    // the consumer function itself, so there must be NO env var and no string
-    // literal claiming a channel.
+  test("delivery cannot be claimed at all — by config OR by argument", () => {
+    // Two designs were rejected here. An env string was an operator assertion;
+    // a {channel, deliver} object was a function-shaped one, since `deliver` had
+    // no call sites and a no-op still bought the promise. Neither the entrypoint
+    // nor build() may name a delivery channel until a consumer exists.
     const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    const server = readFileSync(join(import.meta.dir, "server.ts"), "utf8");
     expect(src).not.toContain("GENESIS_VOICE_DELIVERY");
-    expect(src).not.toMatch(/voiceDelivery\s*[:=]\s*["']whatsapp["']/);
+    expect(src).not.toContain("voiceDelivery");
+    // The option itself must not exist on BuildOpts: a caller that can pass it
+    // can claim the channel, which is exactly how the last design failed.
+    expect(server).not.toMatch(/^\s*voiceDelivery\??:/m);
   });
 });

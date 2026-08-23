@@ -61,11 +61,12 @@ export function parseVoicePrincipals(raw: string | undefined): DeliverablePrinci
  *  appendFileSync returns once the write reaches the page cache, not the platter,
  *  so a host or power loss can lose a ticket the caller was already told we
  *  recorded. Two things make that acceptable TODAY and stop being true later:
- *  the route currently promises no follow-up at all (voiceDelivery is off), and
+ *  the route promises no follow-up at all (there is no way to make it), and
  *  Genesis runs a single process, where a synchronous append on a single-threaded
- *  runtime cannot interleave with another writer. Before GENESIS_VOICE_DELIVERY
- *  is turned on — the moment a caller is told an answer IS coming — this needs an
- *  fsync or a real queue, and a second writing process needs record locking.
+ *  runtime cannot interleave with another writer. The change that adds a
+ *  queue-draining consumer — the moment a caller is told an answer IS coming — is
+ *  the change that must add an fsync or a real queue; a second writing process
+ *  needs record locking.
  *  (P20 Strata A, round 2.) */
 
 /** Where tickets land. Append-only JSONL, one ticket per line — the shape

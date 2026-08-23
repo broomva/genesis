@@ -94,23 +94,15 @@ export interface BuildOpts {
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
-  /** The delivery leg itself — NOT a flag asserting one exists.
-   *
-   *  Round 2 made this `voiceDelivery?: "whatsapp"` read from an env var, and
-   *  round 3 rejected that correctly: a string an operator sets is an assertion,
-   *  and `GENESIS_VOICE_DELIVERY=whatsapp` re-enabled the impossible promise from
-   *  a config file while the repo still contained no consumer. A comment warning
-   *  against that does not enforce it.
-   *
-   *  So the capability is now the CONSUMER. `deliver` is the function that
-   *  actually sends a queued answer; there is no way to claim the channel without
-   *  supplying one, because the claim and the mechanism are the same value. Until
-   *  a consumer exists (scope item 4, blocked on #107) nothing can construct this,
-   *  and both routes therefore tell callers a message was taken. */
-  voiceDelivery?: {
-    readonly channel: "whatsapp";
-    readonly deliver: (ticket: VoiceTicket, answer: string) => Promise<void>;
-  };
+  // NO voiceDelivery OPTION. Three designs failed here and the third failed most
+  // instructively: an env string was an operator assertion, so it became a
+  // {channel, deliver} object — and `deliver` had zero call sites, so passing
+  // `async () => {}` still bought canFollowUp:true. A function-shaped assertion
+  // is still an assertion. Until a consumer genuinely drains the queue (scope
+  // item 4, blocked on #107) the promise is not merely disabled, it is
+  // UNREPRESENTABLE: there is no value any caller of build() can pass to make
+  // this surface offer a follow-up. The option returns together with the code
+  // that honours it. (P20 Strata A, round 4.)
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
@@ -272,7 +264,7 @@ export function build(opts: BuildOpts) {
       const r = resolveCaller(callerId, voicePrincipals);
       // NO NAME. The header of voice.ts states the invariant this route was
       // breaking: caller id is spoofable, so it is a routing hint and a spoofer
-      // must gain NOTHING. Returning `name` handed an attacker who guessed a
+      // must gain nothing UNBOUNDED. Returning `name` handed an attacker who guessed a
       // number both "this number is known to the system" and the account
       // holder's name — information gained, from a claim we never verified.
       // `known` is what the agent needs to choose take-a-message vs
@@ -286,13 +278,13 @@ export function build(opts: BuildOpts) {
       // header: "any capability that does NOT have that property ... must not be
       // added here without a second factor"). (P20 Strata A, round 1.)
       // canFollowUp requires BOTH a known principal AND a wired delivery leg.
-      // Round 1 gated /voice/request on opts.voiceDelivery and left this route
-      // unconditionally true, so identify offered a follow-up that request then
-      // refused — the impossible promise re-entering through the other door.
-      // This is the answer the agent uses to decide whether to offer one at all.
+      // canFollowUp is FALSE, unconditionally, because nothing can deliver. This
+      // is the answer the agent uses to decide whether to offer a follow-up at
+      // all, so a stale `true` here re-created the impossible promise through the
+      // door round 1 left open after gating /voice/request alone.
       return c.json(
         r.kind === "known"
-          ? { known: true, canFollowUp: Boolean(opts.voiceDelivery) }
+          ? { known: true, canFollowUp: false }
           : { known: false, canFollowUp: false },
       );
     });
@@ -327,11 +319,11 @@ export function build(opts: BuildOpts) {
         // The agent reads this to the caller, so it must not promise delivery we
         // cannot make. TWO ways that promise can be false, and only the first was
         // handled: an unrecognized number has nowhere to follow up TO, and — the
-        // one that shipped — no delivery leg exists to follow up WITH. Until a
-        // consumer drains the queue and sends, `voiceDelivery` is undefined and
-        // every caller correctly hears that a message was taken. (P20 Strata A,
-        // round 1; the delivery leg is BRO-2228 scope item 4, blocked on #107.)
-        followUp: ticket.deliverTo && opts.voiceDelivery ? opts.voiceDelivery.channel : "none",
+        // one that shipped — no delivery leg exists to follow up WITH. The work is
+        // still QUEUED; only the promise is withheld. This becomes a real value
+        // again in the same change that adds the consumer. (BRO-2228 scope item 4,
+        // blocked on #107.)
+        followUp: "none",
       });
     });
   }
