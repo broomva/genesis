@@ -32,7 +32,7 @@ if (!tenantDir || !existsSync(tenantDir)) {
 }
 const root = dirname(tenantDir);
 const self = basename(tenantDir);
-import { acquireEvalLock, isProcessAlive, refusalMessage, releaseEvalLock } from "./eval-lock";
+import { acquireEvalLock, processLiveness, refusalMessage, releaseEvalLock } from "./eval-lock";
 import { type LeakVerdict, canaryFor, judgeLeak } from "./leak-oracle";
 
 const siblings = readdirSync(root).filter((d) => d !== self);
@@ -53,7 +53,7 @@ const lock = acquireEvalLock(LOCK_PATH, tenantDir);
 if (!lock.ok) {
   console.error(
     refusalMessage(lock.heldBy, LOCK_PATH, (p) =>
-      isProcessAlive(p, (q, sg) => process.kill(q, sg)),
+      processLiveness(p, (q, sg) => process.kill(q, sg)),
     ),
   );
   process.exit(2);
@@ -67,10 +67,19 @@ if (!lock.ok) {
 // NOT fire for SIGKILL or a hard crash. Those deliberately leave the lock behind:
 // there is no automatic takeover, because every version of this guard that had
 // one reintroduced concurrent runners. The refusal message names the file to rm.
-process.on("exit", () => releaseEvalLock(LOCK_PATH, lock.record));
+process.on("exit", () => {
+  // A false result is REPORTED, not swallowed: it means the lock was not ours any
+  // more, or the unlink failed. Either way the next run will refuse, and an
+  // operator needs to know why rather than discovering it at the next eval.
+  if (!releaseEvalLock(LOCK_PATH, lock.record)) {
+    console.error(`[eval-lock] did not release ${LOCK_PATH} — remove it by hand if stuck.`);
+  }
+});
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
-    releaseEvalLock(LOCK_PATH, lock.record);
+    if (!releaseEvalLock(LOCK_PATH, lock.record)) {
+      console.error(`[eval-lock] did not release ${LOCK_PATH} — remove it by hand if stuck.`);
+    }
     process.exit(130);
   });
 }

@@ -110,13 +110,21 @@ export function parseRecord(raw: string | null): LockRecord | null {
  *
  *  EPERM means the process EXISTS but belongs to another user, so it counts as
  *  alive; only ESRCH means "no such process". */
-export function isProcessAlive(pid: number, kill: (p: number, s: number) => void): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+export type Liveness = "alive" | "dead" | "unknown";
+
+export function processLiveness(pid: number, kill: (p: number, s: number) => void): Liveness {
+  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
   try {
     kill(pid, 0);
-    return true;
+    return "alive";
   } catch (err) {
-    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EPERM") return "alive";
+    if (code === "ESRCH") return "dead";
+    // Anything else — EINVAL, a platform quirk — is NOT evidence of death. The
+    // earlier boolean collapsed every non-EPERM error into `false`, which let the
+    // refusal message tell an operator "NOT running" on no evidence at all.
+    return "unknown";
   }
 }
 
@@ -170,7 +178,20 @@ export function acquireEvalLock(
 /** Release, but only if the lock still names us.
  *
  *  Returns whether a file was actually removed — including `false` when the
- *  unlink itself failed, so the return value never overstates what happened. */
+ *  unlink itself failed, so the return value never overstates what happened.
+ *
+ *  RESIDUAL WINDOW, AND WHY THE PROCEDURE CLOSES IT. Read-then-unlink cannot be
+ *  made atomic without a kernel-held lock, which Node and Bun do not expose. So
+ *  this sequence is possible IN PRINCIPLE: we read and match our nonce, an
+ *  operator removes our file, another runner acquires, and our unlink then
+ *  deletes THEIRS.
+ *
+ *  Every step of that requires us to still be RUNNING when the operator removes
+ *  our lock. That is why the refusal message tells the operator to kill the
+ *  holding pid FIRST and remove the file SECOND: after the kill there is no
+ *  process left to reach the unlink, so the window does not exist in the
+ *  supported procedure. An operator who removes the file out from under a live
+ *  run is outside it, and no path-based scheme can defend that case. */
 export function releaseEvalLock(
   lockPath: string,
   record: LockRecord | null,
@@ -196,12 +217,18 @@ export function releaseEvalLock(
   return remove(lockPath);
 }
 
+/** POSIX single-quoting, so a lock path from GENESIS_EVAL_LOCK containing spaces
+ *  or shell syntax is safe to paste. */
+export function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
 /** Operator-facing refusal text. Kept beside the code so the message and the exit
  *  code that carries it cannot drift apart. */
 export function refusalMessage(
   held: LockRecord | null,
   lockPath: string,
-  alive?: (pid: number) => boolean,
+  liveness?: (pid: number) => Liveness,
 ): string {
   const lines = ["confinement eval REFUSED: another run holds the lock.", `  lock:   ${lockPath}`];
   if (held) {
@@ -210,11 +237,14 @@ export function refusalMessage(
       `  since:  ${held.startedAt}`,
       `  tenant: ${held.tenantDir}`,
     );
-    if (alive) {
+    if (liveness) {
+      const l = liveness(held.pid);
       lines.push(
-        alive(held.pid)
-          ? "  status: that pid is currently RUNNING — wait for it."
-          : "  status: that pid is NOT running. The run probably crashed; see below.",
+        l === "alive"
+          ? "  status: that pid is RUNNING — wait for it."
+          : l === "dead"
+            ? "  status: that pid is not running; the run probably crashed."
+            : "  status: could not determine whether that pid is running.",
       );
     }
   } else {
@@ -224,9 +254,13 @@ export function refusalMessage(
     "",
     "There is no automatic takeover, on purpose: every version of this guard that",
     "reclaimed a stale lock automatically reintroduced concurrent runners, which is",
-    "the failure it exists to prevent. A stuck lock is loud and one `rm` fixes it.",
+    "the failure it exists to prevent. A stuck lock is loud and recovering is two",
+    "commands.",
     "",
-    `If you are certain no eval is running:  rm ${lockPath}`,
+    "RECOVER IN THIS ORDER — the kill must come first. Removing the file while the",
+    "holder is still alive lets its exit handler delete the NEXT runner's lock:",
   );
+  if (held) lines.push(`  kill ${held.pid}   # or: kill -9 ${held.pid}`);
+  lines.push(`  rm -- ${shellQuote(lockPath)}`);
   return lines.join("\n");
 }

@@ -6,10 +6,11 @@ import { join, resolve } from "node:path";
 import {
   type LockRecord,
   acquireEvalLock,
-  isProcessAlive,
   parseRecord,
+  processLiveness,
   refusalMessage,
   releaseEvalLock,
+  shellQuote,
 } from "./eval-lock";
 
 const HELD: LockRecord = {
@@ -188,29 +189,48 @@ describe("parseRecord — reporting only, so nonsense is merely null", () => {
   });
 });
 
-describe("isProcessAlive — advisory, never consulted by acquisition", () => {
-  test("signalable → alive", () => expect(isProcessAlive(4242, () => undefined)).toBe(true));
+describe("processLiveness — advisory, never consulted by acquisition", () => {
+  test("signalable → alive", () => expect(processLiveness(4242, () => undefined)).toBe("alive"));
   test("ESRCH → dead", () =>
     expect(
-      isProcessAlive(4242, () => {
+      processLiveness(4242, () => {
         throw ESRCH;
       }),
-    ).toBe(false));
+    ).toBe("dead"));
   // EPERM means the process EXISTS but is another user's.
-  test("EPERM → ALIVE, not dead", () =>
+  test("EPERM → alive, not dead", () =>
     expect(
-      isProcessAlive(4242, () => {
+      processLiveness(4242, () => {
         throw EPERM;
       }),
-    ).toBe(true));
-  test.each([0, -1, 1.5, Number.NaN])("rejects non-pid %p without signalling", (bad) => {
+    ).toBe("alive"));
+  // The overclaim this replaced: a boolean collapsed every non-EPERM error into
+  // "dead", so the refusal message asserted "NOT running" on no evidence.
+  test("an unexpected errno is UNKNOWN, never dead", () =>
+    expect(
+      processLiveness(4242, () => {
+        throw Object.assign(new Error("bad"), { code: "EINVAL" });
+      }),
+    ).toBe("unknown"));
+  test.each([0, -1, 1.5, Number.NaN])("non-pid %p → unknown, without signalling", (bad) => {
     let signalled = false;
     expect(
-      isProcessAlive(bad as number, () => {
+      processLiveness(bad as number, () => {
         signalled = true;
       }),
-    ).toBe(false);
+    ).toBe("unknown");
     expect(signalled).toBe(false);
+  });
+});
+
+describe("shellQuote — the lock path comes from an env var", () => {
+  test.each([
+    ["plain", "/var/lock/eval.lock", "'/var/lock/eval.lock'"],
+    ["spaces", "/tmp/my locks/e.lock", "'/tmp/my locks/e.lock'"],
+    ["single quote", "/tmp/o'brien.lock", "'/tmp/o'\\''brien.lock'"],
+    ["shell syntax", "/tmp/$(rm -rf ~).lock", "'/tmp/$(rm -rf ~).lock'"],
+  ])("%s", (_l, raw, want) => {
+    expect(shellQuote(raw)).toBe(want);
   });
 });
 
@@ -321,12 +341,26 @@ describe("refusalMessage", () => {
     const m = refusalMessage(HELD, "/var/lock/eval.lock");
     expect(m).toContain("4242");
     expect(m).toContain("573017758620");
-    expect(m).toContain("rm /var/lock/eval.lock");
+    expect(m).toContain("rm -- '/var/lock/eval.lock'");
   });
 
-  test("advisory liveness is shown when supplied, in both polarities", () => {
-    expect(refusalMessage(HELD, "/l", () => true)).toContain("RUNNING");
-    expect(refusalMessage(HELD, "/l", () => false)).toContain("NOT running");
+  test("advisory liveness is shown when supplied, in all three states", () => {
+    expect(refusalMessage(HELD, "/l", () => "alive")).toContain("RUNNING");
+    expect(refusalMessage(HELD, "/l", () => "dead")).toContain("probably crashed");
+    expect(refusalMessage(HELD, "/l", () => "unknown")).toContain("could not determine");
+  });
+
+  // The blocker from round 3: removing the file while the holder is alive lets
+  // its exit handler delete the NEXT runner's lock. The procedure must order the
+  // kill before the rm, or it hands the operator the race.
+  test("recovery instructions put the kill BEFORE the rm", () => {
+    const m = refusalMessage(HELD, "/var/lock/eval.lock");
+    expect(m.indexOf("kill 4242")).toBeGreaterThan(-1);
+    expect(m.indexOf("kill 4242")).toBeLessThan(m.indexOf("rm --"));
+  });
+
+  test("the rm path is shell-quoted", () => {
+    expect(refusalMessage(HELD, "/tmp/my locks/e.lock")).toContain("rm -- '/tmp/my locks/e.lock'");
   });
 
   test("survives an unreadable holder record", () => {

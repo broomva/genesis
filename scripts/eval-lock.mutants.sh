@@ -32,6 +32,12 @@ fi
 
 fail=0
 
+# Without this, Ctrl-C between mutate and revert leaves eval-lock.ts MODIFIED while
+# the script's own output claims "tree restored clean". Restoring on every exit
+# path is what makes that claim true.
+cleanup () { git checkout -- "$FILE" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
 run_mutant () {
   local name="$1" from="$2" to="$3" expected="$4"
   local n
@@ -76,6 +82,11 @@ run_mutant "EPERM read as dead"            '=== "EPERM"'                        
 run_mutant "release ignores ownership"     'if (held?.nonce !== record.nonce) return false;' 'if (false) return false;' KILLED
 run_mutant "EEXIST swallowed as acquired" 'if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;' 'if (false) throw err;' KILLED
 run_mutant "parseRecord accepts junk"      'typeof r?.pid === "number" && typeof r?.nonce === "string"' 'true' KILLED
+# Round 3's blocker: if the recovery text puts the rm before the kill, it hands the
+# operator the exact race the ordering exists to close.
+run_mutant "recovery drops the kill step"  'if (held) lines.push(`  kill ${held.pid}   # or: kill -9 ${held.pid}`);' 'if (false) lines.push("");' KILLED
+run_mutant "rm path unquoted"              'rm -- ${shellQuote(lockPath)}'      'rm -- ${lockPath}'                  KILLED
+run_mutant "unknown liveness read as dead" 'return "unknown";'                  'return "dead";'                     KILLED
 # Control: prose no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted prose"     'There is no automatic takeover'     'There is no auto takeover'          SURVIVED
 
