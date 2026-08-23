@@ -329,10 +329,24 @@ async function maybeHandleOperator(
 }
 
 chat.onDirectMessage(async (thread, message) => {
-  if (!(await admitThread(thread))) return;
-  // WhatsApp threads are always DMs, and `isOperator` only resolves kapso
-  // thread ids, so this is the only path where it can ever match.
+  // OPERATOR COMMANDS RUN BEFORE ADMISSION, and the order is load-bearing.
+  //
+  // Admission-first deadlocked the registry at bootstrap: with no tenants yet, the
+  // operator's own first message creates a PENDING record, admitThread returns
+  // false, and every later message is stopped before maybeHandleOperator ever runs
+  // -- so the one person who can approve tenants could never issue /tapprove. The
+  // registry could only ever be seeded out-of-band.
+  //
+  // Safe because maybeHandleOperator authenticates on its own and does not lean on
+  // admission: it returns false unless the text parses as an operator command AND
+  // `isOperator(thread.id, operatorPrincipal)` matches. A non-operator sending
+  // "/tapprove" falls straight through to admitThread exactly as before, and so
+  // does the operator sending ordinary text.
+  //
+  // WhatsApp threads are always DMs, and `isOperator` only resolves kapso thread
+  // ids, so this is the only path where it can ever match.
   if (await maybeHandleOperator(thread, message.text)) return;
+  if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
   await handleAgentMessage(thread, message.text, opts);
