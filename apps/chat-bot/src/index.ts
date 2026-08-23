@@ -41,10 +41,17 @@ import {
   type HandlerOptions,
   handleAgentMessage,
   nativeCommandMenu,
+  parseCommand,
   tenantWorkspaceId,
   unregisteredTenants,
   workspaceDecisionFor,
 } from "./handler";
+import {
+  applyOperatorCommand,
+  isOperator,
+  isOperatorToken,
+  parseOperatorCommand,
+} from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
 
@@ -285,8 +292,46 @@ function dispatchOptions(threadId: string): HandlerOptions | undefined {
 // every DM is handled, so a restart never strands a conversation.
 // WhatsApp threads are always DMs (the Kapso adapter reports isDM: true), so
 // this is the only path WhatsApp traffic takes.
+/** The principal allowed to change the registry from the channel itself.
+ *  Digits only. UNSET means nobody -- see `isOperator`, which fails closed. */
+const operatorPrincipal = process.env.GENESIS_WHATSAPP_OPERATOR?.trim();
+
+/** Handle an operator command. Returns true when it was one (and was handled).
+ *
+ *  Runs AFTER admit, so an unadmitted sender never learns this surface exists,
+ *  and the token check runs BEFORE the operator check so that a tenant typing
+ *  `/allow` gets the ordinary unknown-command path -- forwarded to the agent --
+ *  rather than a refusal that confirms the command is real. */
+async function maybeHandleOperator(
+  thread: { id: string; post: (t: string) => Promise<unknown> },
+  text: string,
+): Promise<boolean> {
+  const parsed = parseCommand(text);
+  if (parsed === undefined || !isOperatorToken(parsed.token)) return false;
+  if (!isOperator(thread.id, operatorPrincipal)) return false;
+  if (!tenantStore) {
+    await thread.post("No tenant registry is configured on this deployment.");
+    return true;
+  }
+  const cmd = parseOperatorCommand(parsed.token, parsed.args);
+  if (cmd === undefined) return false;
+  if ("error" in cmd) {
+    await thread.post(cmd.error);
+    return true;
+  }
+  const result = applyOperatorCommand(cmd, tenantStore, new Date().toISOString());
+  console.log(
+    `[genesis-bot] operator ${parsed.token} -> ${result.needsApply ? "registry changed" : "no change"}`,
+  );
+  await thread.post(result.reply);
+  return true;
+}
+
 chat.onDirectMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
+  // WhatsApp threads are always DMs, and `isOperator` only resolves kapso
+  // thread ids, so this is the only path where it can ever match.
+  if (await maybeHandleOperator(thread, message.text)) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
   await handleAgentMessage(thread, message.text, opts);
