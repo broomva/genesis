@@ -110,18 +110,27 @@ describe("the agent prompt cannot promise what the system cannot do", () => {
   ];
 
   test.each(PHRASES)("no field commits to %p", (phrase) => {
-    const hit = allText.find((t) => t.toLowerCase().includes(phrase));
-    expect(hit ?? "").not.toContain(phrase);
+    // Compare the LOWERCASED text on both sides. Searching lowercased and then
+    // asserting against the original meant "WhatsApp" sailed past a check for
+    // "whatsapp" — and the mutation that should have caught it only died because
+    // the regex below happened to fire instead.
+    const offenders = allText.filter((t) => t.toLowerCase().includes(phrase));
+    expect(offenders).toEqual([]);
   });
 
-  // The generalization: a first-person future commitment aimed at the caller.
-  // Catches "we will contact you", "I'll send you the answer", "we are going to
-  // get someone to call you" — phrasings no word list would have enumerated.
-  // Deliberately anchored on we/I so the prompt's own second-person instructions
-  // ("say plainly that you will take it down") are not false positives.
-  const COMMITMENT = /\b(we|i)\s*('ll|'re|\s+(will|shall|are going to|can))\b[^.!?]{0,80}\byou\b/i;
+  // The generalization: ANY future commitment landing on the caller, whoever is
+  // named as the actor. The first version anchored on we/I, so the third-person
+  // dodge "Someone from our team will ring you later." passed while promising
+  // exactly the thing that cannot happen. Actor-agnostic is the correct shape:
+  // what matters is that a future action is aimed at "you".
+  //
+  // Order matters and does the disambiguating work: this requires the modal
+  // BEFORE "you", so the prompt's own second-person instructions ("say plainly
+  // that you will take it down") do not match. [^.!?] keeps it inside one
+  // sentence, so an unrelated later clause cannot be dragged in.
+  const COMMITMENT = /\b(will|'ll|shall|is going to|are going to|gonna)\b[^.!?]{0,60}\byou\b/i;
 
-  test("no field makes a first-person future commitment to the caller", () => {
+  test("no field makes a future commitment to the caller, whoever the actor is", () => {
     const offenders = allText.filter((t) => COMMITMENT.test(t));
     expect(offenders).toEqual([]);
   });
@@ -131,9 +140,14 @@ describe("the agent prompt cannot promise what the system cannot do", () => {
     expect(COMMITMENT.test("We will contact you with the answer later.")).toBe(true);
     expect(COMMITMENT.test("I'll send you a summary shortly.")).toBe(true);
     expect(COMMITMENT.test("We are going to have someone ring you back.")).toBe(true);
-    // ...and does not fire on the second-person instructions the prompt needs.
+    // The third-person dodge that defeated the first version of this regex.
+    expect(COMMITMENT.test("Someone from our team will ring you later.")).toBe(true);
+    expect(COMMITMENT.test("A colleague is going to call you tomorrow.")).toBe(true);
+    // ...and does not fire on the second-person instructions the prompt needs,
+    // because the modal has to come BEFORE "you".
     expect(COMMITMENT.test("say plainly that you will take it down")).toBe(false);
     expect(COMMITMENT.test("I've written that down for you.")).toBe(false);
+    expect(COMMITMENT.test("Ask what you can take down for them.")).toBe(false);
   });
 
   test("the prompt defers to the followUp field rather than deciding itself", () => {

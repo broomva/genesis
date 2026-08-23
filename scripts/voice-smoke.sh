@@ -16,7 +16,8 @@ set -uo pipefail
 WT=${WT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 PORT=${PORT:-8899}
 SECRET=${SECRET:-smoke-secret}
-D=$(mktemp -d /tmp/voice-smoke.XXXXXX)
+D=$(mktemp -d /tmp/voice-smoke.XXXXXX) || { echo "✗ could not create a temp dir"; exit 1; }
+case "$D" in /tmp/voice-smoke.*) ;; *) echo "✗ unexpected temp dir '$D'"; exit 1 ;; esac
 FAILED=0
 PID=""
 cleanup () { [ -n "$PID" ] && kill "$PID" 2>/dev/null; }
@@ -60,6 +61,7 @@ eq  "an unknown caller is a normal 200" '{"known":false,"canFollowUp":false}' "$
 eq  "a wrong secret is 401" "401" "$(status -X POST "$U/voice/identify" -H "x-genesis-voice-secret: wrong" -H 'content-type: application/json' -d '{"callerId":"573017758620"}')"
 
 echo "▶ request"
+eq  "a request returns 200" "200" "$(status -X POST "$U/voice/request" "${H[@]}" -d '{"callerId":"573017758620","request":"warmup","conversationId":"warm"}')"
 R=$(body -X POST "$U/voice/request" "${H[@]}" -d '{"callerId":"573017758620","request":"send me the August invoice","conversationId":"conv-1"}')
 has "a request is accepted" '"ticketId"' "$R"
 has "and promises NO follow-up (nothing drains the queue)" '"followUp":"none"' "$R"
@@ -78,7 +80,7 @@ done
 echo "▶ the queue"
 Q="$D/data/voice/queue.jsonl"
 if [ -f "$Q" ]; then
-  eq "two records were persisted" "2" "$(wc -l < "$Q" | tr -d ' ')"
+  eq "three records were persisted (warmup + two)" "3" "$(wc -l < "$Q" | tr -d ' ')"
   has "the ticket carries its delivery target" '"deliverTo":"573017758620"' "$(head -1 "$Q")"
   cat "$Q"
 else
@@ -88,7 +90,10 @@ fi
 echo "▶ polarity: with NO secret configured the routes must not exist"
 kill "$PID" 2>/dev/null; PID=""
 sleep 1
-GENESIS_DATA_DIR="$D/off" PORT=$((PORT+1)) bun src/index.ts > "$D/off.log" 2>&1 &
+# env -u: if the operator has GENESIS_VOICE_SECRET exported, this boot would
+# inherit it and the routes WOULD register — the polarity check would then be
+# measuring the operator's shell rather than the code.
+env -u GENESIS_VOICE_SECRET GENESIS_DATA_DIR="$D/off" PORT=$((PORT+1)) bun src/index.ts > "$D/off.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 60); do curl -sf "http://localhost:$((PORT+1))/health" -o /dev/null && break; sleep 0.5; done
 for p in identify request; do

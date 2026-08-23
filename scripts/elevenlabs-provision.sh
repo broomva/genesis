@@ -73,14 +73,30 @@ if sys.argv[1].endswith("/"):
     sys.exit(f"✗ GENESIS_PUBLIC_URL must not end in '/' (got: {sys.argv[1]})")
 if u.query or u.fragment:
     sys.exit("✗ GENESIS_PUBLIC_URL must not carry a query or fragment")
+if u.username or u.password or "@" in u.netloc:
+    # Credentials in the URL would be embedded in every tool config AND echoed by
+    # the substitution log line below.
+    sys.exit("✗ GENESIS_PUBLIC_URL must not embed credentials (user:pass@host)")
+if u.port is not None and not (0 < u.port < 65536):
+    sys.exit("✗ GENESIS_PUBLIC_URL has an invalid port")
 PY
 
-WORK=$(mktemp -d /tmp/el-provision.XXXXXX)
+# `set -e` is not in force (a failed CLI call must be reported, not abort mid-push
+# leaving state), so every command whose failure would be catastrophic is checked
+# explicitly. This one most of all: an empty WORK makes the copy below target `/`
+# and makes substitution glob the CALLER'S cwd — which, run from
+# integrations/elevenlabs, writes the live secret into tracked config files.
+WORK=$(mktemp -d /tmp/el-provision.XXXXXX) || { echo "✗ could not create a temp dir" >&2; exit 1; }
+case "$WORK" in
+  /tmp/el-provision.*) ;;
+  *) echo "✗ refusing to continue: unexpected temp dir '$WORK'" >&2; exit 1 ;;
+esac
+[ -d "$WORK" ] || { echo "✗ temp dir '$WORK' is not a directory" >&2; exit 1; }
 # INT/TERM as well as EXIT: a Ctrl-C mid-push must not leave a world-readable
 # temp directory containing the shared secret.
 cleanup () { rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
-cp -R "$SRC/." "$WORK/"
+cp -R "$SRC/." "$WORK/" || { echo "✗ could not stage configs into $WORK" >&2; exit 1; }
 
 echo "▶ substituting into a temp copy"
 python3 - "$WORK" <<'PY' || exit 1
@@ -105,13 +121,50 @@ PY
 # the whole life of a slow push. ELEVENLABS_API_KEY must pass through.
 el () { env -u GENESIS_VOICE_SECRET npx -y "$CLI" "$@"; }
 
+# The pinned CLI catches per-item API failures, prints them, and still exits 0
+# (see its tools/commands/impl.ts and agents/commands/push-impl.ts). So an exit
+# code alone would let a failed update reach the final success line. Run the push,
+# show its output, and treat its own error markers as failure.
+el_push () {
+  local label="$1"; shift
+  local out rc
+  out=$( { el "$@"; rc=$?; } 2>&1; echo "__RC__$rc" )
+  rc=${out##*__RC__}
+  out=${out%__RC__*}
+  printf '%s' "$out"
+  if [ "$rc" -ne 0 ]; then
+    echo "✗ $label failed (exit $rc)" >&2; return 1
+  fi
+  if printf '%s' "$out" | grep -qiE "^(Error|✗)|Error (creating|processing|reading|updating)|not configured|Skipping"; then
+    echo "✗ $label reported an error while still exiting 0 — treating as failure" >&2
+    return 1
+  fi
+  return 0
+}
+
 echo "▶ pushing tools"
-( cd "$WORK" && el tools push ${DRY_RUN} ) || { echo "✗ tools push failed" >&2; exit 1; }
+( cd "$WORK" && el_push "tools push" tools push ${DRY_RUN} ) || exit 1
 
 if [ -n "$DRY_RUN" ]; then
   echo "▶ dry run: stopping before the agent push; nothing was created"
   exit 0
 fi
+
+# VALIDATE BEFORE PERSISTING. The distinctness check used to run after these ids
+# were already written into tracked tools.json, so a bad push left corrupted state
+# in the repo that the operator was then told to commit.
+echo "▶ validating tool ids"
+python3 - "$WORK" <<'PY' || exit 1
+import json, os, sys
+tools = json.load(open(os.path.join(sys.argv[1], "tools.json"), encoding="utf-8"))["tools"]
+ids = [t.get("id") for t in tools]
+if not all(ids):
+    sys.exit(f"✗ a tool has no id after push ({ids}); refusing to record or push further")
+if len(set(ids)) != len(tools):
+    sys.exit(f"✗ tool ids are not distinct ({ids}); refusing to record a state that "
+             f"would bind the agent to fewer tools than it needs")
+print(f"  {len(ids)} distinct tool id(s)")
+PY
 
 # Persist tool IDs NOW, before the agent push can fail. Deferring this until the
 # end meant a failed agent push destroyed the temp dir holding the only record of
@@ -145,8 +198,8 @@ ids = [t.get("id") for t in tools]
 if not all(ids):
     sys.exit("✗ a tool has no id after push; refusing to push an agent missing a "
              "tool it depends on")
-# Identity, not arity: two entries carrying the SAME id passed a length check
-# while leaving the agent bound to one tool instead of two.
+# Second barrier. The same check runs before persisting; this one guards the
+# WORK copy actually being pushed, which is what the agent is bound to.
 if len(set(ids)) != len(tools):
     sys.exit(f"✗ tool ids are not distinct ({ids}); the agent would be bound to "
              f"fewer tools than it needs")
@@ -159,7 +212,7 @@ print(f"  tool_ids = {ids}")
 PY
 
 echo "▶ pushing agent"
-( cd "$WORK" && el agents push ) || { echo "✗ agent push failed (tool ids were already recorded)" >&2; exit 1; }
+( cd "$WORK" && el_push "agent push" agents push ) || { echo "  (tool ids were already recorded — commit them)" >&2; exit 1; }
 
 echo "▶ recording agent id"
 python3 - "$WORK" "$SRC" agents.json agents <<'PY' || exit 1
