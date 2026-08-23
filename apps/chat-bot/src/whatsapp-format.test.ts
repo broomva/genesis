@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { balanceFences, endsInsideFence, markdownToWhatsApp as fmt } from "./whatsapp-format";
+import {
+  FENCE_OVERHEAD,
+  balanceFences,
+  endsInsideFence,
+  markdownToWhatsApp as fmt,
+} from "./whatsapp-format";
 
 /** The message that actually failed on a real phone (BRO-2267), abridged.
  *  A fixture taken from production output rather than invented, so the test
@@ -234,5 +239,70 @@ describe("BLOCKER: chunk boundaries must not break fenced code", () => {
     const balanced = balanceFences(["```\na", "b", "c\n```"]);
     for (const c of balanced) expect(endsInsideFence(c)).toBe(false);
     expect(balanced.join("\n")).toContain("b");
+  });
+});
+
+describe("P20 round-2 blockers — defects I introduced by over-reaching", () => {
+  test("BLOCKER: a heading keeps underscores that are CONTENT, not markers", () => {
+    // String-stripping `*` and `_` from the rendered heading turned
+    // `snake_case_name` into `snakecasename`. Silent corruption, and worse than
+    // the raw markdown this change exists to replace.
+    expect(fmt("## snake_case_name")).toBe("*snake_case_name*");
+    expect(fmt("## a_b and c_d")).toBe("*a_b and c_d*");
+    expect(fmt("## file_name.ts * 2")).toContain("file_name.ts");
+  });
+
+  test("BLOCKER: a table lead and its labels keep their underscores", () => {
+    const out = fmt("| a | my_label |\n|---|---|\n| snake_case | 2 |");
+    expect(out).toContain("snake_case"); // lead keeps content underscores
+    expect(out).toContain("my_label:"); // and so does the column label
+  });
+
+  test("a heading containing bold still does not NEST emphasis", () => {
+    // The property the broken flatten() was reaching for, kept.
+    expect(fmt("## A **B** C")).toBe("*A B C*");
+  });
+
+  test("BLOCKER: a code block containing ``` gets a LONGER fence", () => {
+    // A fixed triple fence is closed early by embedded ```, and the remainder
+    // escapes as formatted text.
+    const out = fmt("````\nhas ``` inside\n````");
+    expect(out).toContain("has ``` inside");
+    expect(out.startsWith("````")).toBe(true);
+  });
+
+  test("BLOCKER: blank lines INSIDE code are preserved exactly", () => {
+    // Global newline compaction rewrote code, which is the one place every
+    // character matters.
+    const out = fmt("```\na\n\n\n\nb\n```");
+    expect(out).toContain("a\n\n\n\nb");
+  });
+
+  test("BLOCKER: fence detection counts fence LINES, not ``` substrings", () => {
+    // A ``` inside inline code is not a fence, and ```` is one fence not two.
+    expect(endsInsideFence("text with `` ``` `` inline")).toBe(false);
+    expect(endsInsideFence("````\ncode\n````")).toBe(false);
+    expect(endsInsideFence("~~~\ncode")).toBe(true); // tilde fences count too
+  });
+
+  test("BLOCKER: balancing reserves headroom so a chunk cannot exceed the cap", () => {
+    expect(FENCE_OVERHEAD).toBeGreaterThanOrEqual(8);
+    const chunk = "x".repeat(100);
+    const balanced = balanceFences([`\`\`\`\n${chunk}`, `${chunk}\n\`\`\``]);
+    for (const c of balanced) {
+      expect(c.length).toBeLessThanOrEqual(chunk.length + FENCE_OVERHEAD);
+    }
+  });
+
+  test("MAJOR: an ordered list starting at 5 is not renumbered to 1", () => {
+    const out = fmt("5. five\n6. six");
+    expect(out).toContain("5. five");
+    expect(out).toContain("6. six");
+  });
+
+  test("MAJOR: task-list state survives", () => {
+    const out = fmt("- [x] done\n- [ ] todo");
+    expect(out).toContain("[x] done");
+    expect(out).toContain("[ ] todo");
   });
 });

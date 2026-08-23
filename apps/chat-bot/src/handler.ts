@@ -20,7 +20,7 @@ import {
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 import { withStallTimeout } from "./stall-timeout";
-import { balanceFences, markdownToWhatsApp } from "./whatsapp-format";
+import { FENCE_OVERHEAD, balanceFences, markdownToWhatsApp } from "./whatsapp-format";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -623,7 +623,11 @@ export async function handleAgentMessage(
       // WhatsApp message is rendered independently by the client, so a fenced
       // block split in two leaves an unmatched ``` in one message and loses
       // monospace in the next.
-      const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(reply), opts.chunkTarget));
+      // Reserve FENCE_OVERHEAD below the target: balancing may add a reopening
+      // and a closing fence, and a chunk pushed past the transport cap is
+      // REJECTED — the reply then simply never arrives.
+      const target = (opts.chunkTarget ?? CHUNK_TARGET) - FENCE_OVERHEAD;
+      const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(reply), target));
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable

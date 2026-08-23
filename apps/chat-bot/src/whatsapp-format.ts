@@ -40,7 +40,13 @@ interface Node {
   readonly type: string;
   readonly value?: string;
   readonly url?: string;
+  readonly alt?: string;
+  readonly title?: string;
+  readonly label?: string;
+  readonly identifier?: string;
   readonly ordered?: boolean;
+  readonly start?: number;
+  readonly checked?: boolean;
   readonly children?: readonly Node[];
 }
 
@@ -81,13 +87,39 @@ function inline(n: Node): string {
   }
 }
 
-/** Strip emphasis markers from text about to be wrapped in emphasis.
+/** Render inline content WITHOUT emphasis markers.
  *
  *  `*a *b* c*` renders as broken runs on WhatsApp, so a heading or table lead
- *  containing bold must not nest. Operates on ALREADY-RENDERED WhatsApp text,
- *  so it only removes markers this module produced. */
-function flatten(s: string): string {
-  return s.replaceAll("*", "").replaceAll("_", "");
+ *  containing bold must not nest. The first attempt stripped `*` and `_` from
+ *  the RENDERED string, which cannot tell a marker this module emitted from an
+ *  underscore that is literal content: a heading containing `snake_case_name`
+ *  came out as `snakecasename`. Silent data corruption, and worse than the raw
+ *  markdown this whole change exists to replace. (P20 BLOCKER.)
+ *
+ *  Walking the tree instead makes the distinction structural: emphasis nodes
+ *  contribute their children and no markers, while text nodes are emitted
+ *  verbatim, underscores and all. */
+function plain(n: Node): string {
+  switch (n.type) {
+    case "text":
+      return n.value ?? "";
+    case "inlineCode":
+      return `\`${n.value ?? ""}\``;
+    case "strong":
+    case "emphasis":
+    case "delete":
+      return plainAll(kids(n));
+    case "link":
+      return plainAll(kids(n)) || (n.url ?? "");
+    case "break":
+      return " ";
+    default:
+      return plainAll(kids(n)) || (n.value ?? "");
+  }
+}
+
+function plainAll(ns: readonly Node[]): string {
+  return ns.map(plain).join("");
 }
 
 /** One table row as a labelled block.
@@ -98,25 +130,34 @@ function flatten(s: string): string {
  *  header — a ragged row with more cells than columns — is still emitted under
  *  an ordinal label, because dropping data silently is the failure this whole
  *  arc is about. */
-function renderRow(header: readonly string[], row: readonly string[]): string {
+function renderRow(header: readonly Node[][], row: readonly Node[][]): string {
   const [lead, ...rest] = row;
-  const head = lead?.trim() ? `• *${flatten(lead.trim())}*` : "•";
+  // plainAll, not string surgery: the lead keeps its own underscores while
+  // contributing no emphasis markers of its own.
+  const leadText = lead ? plainAll(lead).trim() : "";
+  // The FIRST column's header is deliberately not emitted: the lead cell is the
+  // row's identity, and prefixing every row with `What: ` (the usual name of
+  // that column) is redundant noise on a narrow screen. Every other header IS
+  // emitted, as the label for its value.
+  const head = leadText ? `• *${leadText}*` : "•";
   const lines = rest
     .map((cell, i) => {
-      const value = cell.trim();
+      const value = inlineAll(cell).trim();
       if (!value) return undefined;
-      const label = header[i + 1]?.trim();
-      return label ? `  ${flatten(label)}: ${value}` : `  ${i + 2}: ${value}`;
+      const label = header[i + 1] ? plainAll(header[i + 1] as Node[]).trim() : "";
+      return label ? `  ${label}: ${value}` : `  ${i + 2}: ${value}`;
     })
     .filter((l): l is string => Boolean(l));
   return [head, ...lines].join("\n");
 }
 
 function renderTable(n: Node): string {
-  const rows = kids(n).map((r) => kids(r).map((c) => inlineAll(kids(c))));
+  // Cells are kept as NODES, not pre-rendered strings, so the lead and the
+  // header labels can be rendered marker-free without string surgery.
+  const rows: Node[][][] = kids(n).map((r) => kids(r).map((c) => [...kids(c)]));
   const [header, ...body] = rows;
   if (!header) return "";
-  if (body.length === 0) return header.map((h) => `• ${flatten(h)}`).join("\n");
+  if (body.length === 0) return header.map((h) => `• ${plainAll(h)}`).join("\n");
   return body.map((r) => renderRow(header, r)).join("\n");
 }
 
@@ -126,14 +167,17 @@ function renderList(n: Node, depth: number): string {
     .map((item, i) => {
       // Ordered lists keep their numbers; a bullet would discard the ordering
       // the author meant.
-      const marker = n.ordered ? `${i + 1}.` : "•";
+      // `start` matters: a list beginning at 5 must not be renumbered to 1.
+      const start = typeof n.start === "number" ? n.start : 1;
+      const checkbox = item.checked === true ? "[x] " : item.checked === false ? "[ ] " : "";
+      const marker = n.ordered ? `${start + i}.` : "•";
       const parts = kids(item)
         .map((child) =>
           child.type === "list" ? renderList(child, depth + 1) : block(child, depth),
         )
         .filter((p) => p !== "");
       const [first, ...rest] = parts;
-      return [`${indent}${marker} ${first ?? ""}`, ...rest].join("\n");
+      return [`${indent}${marker} ${checkbox}${first ?? ""}`, ...rest].join("\n");
     })
     .join("\n");
 }
@@ -144,11 +188,18 @@ function block(n: Node, depth = 0): string {
     case "heading":
       // WhatsApp has no headings but does have emphasis. Dropping the marker
       // without it — which the adapter does — loses the hierarchy entirely.
-      return `*${flatten(inlineAll(kids(n)))}*`;
+      return `*${plainAll(kids(n))}*`;
     case "paragraph":
       return inlineAll(kids(n));
-    case "code":
-      return `\`\`\`\n${n.value ?? ""}\n\`\`\``;
+    case "code": {
+      // A fence must be LONGER than the longest backtick run it contains, or
+      // embedded ``` closes it early and the rest of the block escapes as
+      // formatted text. (P20 BLOCKER.)
+      const body = n.value ?? "";
+      const longest = Math.max(0, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
+      const fence = "`".repeat(Math.max(3, longest + 1));
+      return `${fence}\n${body}\n${fence}`;
+    }
     case "blockquote":
       return kids(n)
         .map((c) => block(c, depth))
@@ -190,15 +241,32 @@ export function markdownToWhatsApp(markdown: string): string {
       .map((n) => block(n))
       .filter((s) => s !== "")
       .join("\n\n");
-    return out.replace(/\n{3,}/g, "\n\n").trimEnd() || markdown.trim();
+    // NO global newline compaction. Blocks are already joined with exactly one
+    // blank line, and a global pass would rewrite blank lines INSIDE a fenced
+    // block — silently altering code, which is the one place every character
+    // matters. (P20 BLOCKER.)
+    return out.trimEnd() || markdown.trim();
   } catch {
     return markdown;
   }
 }
 
-/** Does this text end inside an unclosed ``` fence? */
+/** Overhead balanceFences may add to a chunk: a reopening fence plus a closing
+ *  one. Callers MUST reserve this below the transport cap, or balancing turns a
+ *  maximum-length chunk into an over-length one that WhatsApp rejects — the
+ *  reply then vanishes, which is the failure mode this channel is least able to
+ *  diagnose. (P20 BLOCKER.) */
+export const FENCE_OVERHEAD = 10;
+
+/** Does this text end inside an unclosed fence?
+ *
+ *  Counts fence LINES rather than ``` substrings: a substring count misreads
+ *  ```` (which is one fence, not one-and-a-bit) and counts a ``` that appears
+ *  inside inline code. A fence in CommonMark is a run of three or more
+ *  backticks or tildes at the start of a line. */
 export function endsInsideFence(text: string): boolean {
-  return (text.match(/```/g)?.length ?? 0) % 2 === 1;
+  const fences = text.split("\n").filter((l) => /^\s{0,3}(`{3,}|~{3,})/.test(l));
+  return fences.length % 2 === 1;
 }
 
 /** Close an open fence at a chunk boundary and reopen it in the next chunk.
