@@ -77,7 +77,11 @@ if u.username or u.password or "@" in u.netloc:
     # Credentials in the URL would be embedded in every tool config AND echoed by
     # the substitution log line below.
     sys.exit("✗ GENESIS_PUBLIC_URL must not embed credentials (user:pass@host)")
-if u.port is not None and not (0 < u.port < 65536):
+try:
+    port = u.port          # raises ValueError on a textual or out-of-range port
+except ValueError:
+    sys.exit("✗ GENESIS_PUBLIC_URL has an invalid port")
+if port is not None and not (0 < port < 65536):
     sys.exit("✗ GENESIS_PUBLIC_URL has an invalid port")
 PY
 
@@ -87,8 +91,12 @@ PY
 # and makes substitution glob the CALLER'S cwd — which, run from
 # integrations/elevenlabs, writes the live secret into tracked config files.
 WORK=$(mktemp -d /tmp/el-provision.XXXXXX) || { echo "✗ could not create a temp dir" >&2; exit 1; }
+# CANONICALIZE before matching: a prefix check alone accepts
+# /tmp/el-provision.fake/../<repo>, which normalizes back into the working tree —
+# and `rm -rf "$WORK"` would then run on it.
+WORK=$(cd "$WORK" 2>/dev/null && pwd -P) || { echo "✗ temp dir is not usable" >&2; exit 1; }
 case "$WORK" in
-  /tmp/el-provision.*) ;;
+  /tmp/el-provision.*|/private/tmp/el-provision.*) ;;
   *) echo "✗ refusing to continue: unexpected temp dir '$WORK'" >&2; exit 1 ;;
 esac
 [ -d "$WORK" ] || { echo "✗ temp dir '$WORK' is not a directory" >&2; exit 1; }
@@ -135,19 +143,60 @@ el_push () {
   if [ "$rc" -ne 0 ]; then
     echo "✗ $label failed (exit $rc)" >&2; return 1
   fi
-  if printf '%s' "$out" | grep -qiE "^(Error|✗)|Error (creating|processing|reading|updating)|not configured|Skipping"; then
+  # The CLI reports failure several ways and none of them change its exit code:
+  # "Error processing X", a leading-space "✗ Error pushing branch", and
+  # "Warning: Config file not found" (which silently pushes FEWER items than
+  # intended). Match them with leading whitespace allowed.
+  if printf '%s' "$out" | grep -qiE "^[[:space:]]*(error|✗|warning:)|error (creating|processing|reading|updating|pushing)|not configured|not found|skipping"; then
     echo "✗ $label reported an error while still exiting 0 — treating as failure" >&2
     return 1
   fi
   return 0
 }
 
+# RECOVERABILITY. The CLI records the items that DID succeed and still exits 0
+# when a sibling failed. Exiting immediately on a detected error therefore
+# destroyed the staging dir holding the only record of tools that were really
+# created, and the retry made duplicates. So: push, then ALWAYS try to record
+# whatever valid ids came back, and only then fail.
 echo "▶ pushing tools"
-( cd "$WORK" && el_push "tools push" tools push ${DRY_RUN} ) || exit 1
+( cd "$WORK" && el_push "tools push" tools push ${DRY_RUN} )
+TOOLS_RC=$?
 
 if [ -n "$DRY_RUN" ]; then
+  [ "$TOOLS_RC" -eq 0 ] || exit 1
   echo "▶ dry run: stopping before the agent push; nothing was created"
   exit 0
+fi
+
+# Record BEFORE deciding to abort, so a partial success is not thrown away.
+if [ "$TOOLS_RC" -ne 0 ]; then
+  echo "▶ tools push reported a failure — salvaging any ids that were assigned"
+  python3 - "$WORK" "$SRC" tools.json tools <<'SALVAGE'
+import json, os, sys
+work, src, name, key = sys.argv[1:5]
+try:
+    pushed = {e["name"]: e.get("id", "") for e in json.load(open(os.path.join(work, name), encoding="utf-8"))[key]}
+except Exception as exc:                       # staging unreadable: nothing to salvage
+    sys.exit(0)
+p = os.path.join(src, name)
+doc = json.load(open(p, encoding="utf-8"))
+changed = False
+for e in doc[key]:
+    new = pushed.get(e["name"], "")
+    if new and e.get("id") != new:
+        print(f"  salvaged {e['name']} id -> {new}")
+        e["id"] = new; changed = True
+if changed:
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False); fh.write("\n")
+    print("  ✔ COMMIT these ids — they name tools that really exist remotely, and")
+    print("    without them the next run creates duplicates.")
+else:
+    print("  (no ids were assigned; nothing was created remotely)")
+SALVAGE
+  echo "✗ aborting after a failed tools push" >&2
+  exit 1
 fi
 
 # VALIDATE BEFORE PERSISTING. The distinctness check used to run after these ids
@@ -158,6 +207,10 @@ python3 - "$WORK" <<'PY' || exit 1
 import json, os, sys
 tools = json.load(open(os.path.join(sys.argv[1], "tools.json"), encoding="utf-8"))["tools"]
 ids = [t.get("id") for t in tools]
+if not tools:
+    # all([]) is True, so an empty list used to sail through and then push an
+    # agent wired to no tools at all.
+    sys.exit("✗ tools.json lists no tools; nothing to wire an agent to")
 if not all(ids):
     sys.exit(f"✗ a tool has no id after push ({ids}); refusing to record or push further")
 if len(set(ids)) != len(tools):

@@ -42,9 +42,19 @@ follow-up cannot be promised — the option to claim one was removed from
 
 A prompt can undo all of that with one sentence, from outside the codebase, where
 no route test can see it. So `apps/api/src/voice-agent-config.test.ts` asserts the
-prompt against a list of commitment phrasings and fails CI if one appears. If you
-are editing the prompt and that test fails, it is not in your way — it is telling
-you the agent would promise a caller something the system cannot do.
+prompt against known commitment phrasings and fails CI if one appears. If you are
+editing the prompt and that test fails, it is not in your way — it is telling you
+the agent would promise a caller something the system cannot do.
+
+**Know what that test is and is not.** It is a regression net, not a proof. Three
+cross-model review rounds went into widening it, and each round produced a
+phrasing that got past the previous one — ending with *"Expect a call from our
+team tomorrow"*, which names no actor and uses no future modal, so no regex could
+see it. That is not a defect in the patterns; it is what natural language is. CI
+can prove the prompt **contains** its safety clauses, and can stop a phrasing we
+have already seen from coming back. It cannot prove prose free of contradiction.
+The real control is that this prompt lives in a repo and a human reads it in the
+diff, which is the reason it is here rather than in a dashboard.
 
 The prompt also refuses to greet by name. `/voice/identify` stopped returning the
 principal's name because caller id is spoofable and a name was unbounded
@@ -58,3 +68,18 @@ from any other source would reopen exactly that leak.
 2. ElevenLabs' agent-test console invokes the tools without placing a real call,
    so steps 1–3 of provisioning are testable before a number is purchased.
 3. A real PSTN call needs a telephony number attached to the agent.
+
+## Residual risk, named
+
+- **Provisioning is not transactional.** The CLI records items that succeed even
+  when a sibling fails, and reports both with exit 0. The script detects failure
+  from the CLI's own output and salvages any ids that were assigned before
+  aborting, so a retry updates rather than duplicates — but it does not reconcile
+  against remote state. Truly closing this means listing remote tools and agents
+  through the API after each push, which needs a key to build against.
+- **`ELEVENLABS_API_KEY` is in the CLI's environment** for the life of a push, and
+  visible to the same user in a process listing. That is inherent to invoking the
+  vendor CLI. `GENESIS_VOICE_SECRET` is dropped from child environments, since the
+  configs already carry it.
+- **The queue is best-effort** (no fsync) and nothing drains it yet. Both must be
+  addressed by the change that adds the consumer, not before.

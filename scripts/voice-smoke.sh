@@ -17,7 +17,10 @@ WT=${WT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 PORT=${PORT:-8899}
 SECRET=${SECRET:-smoke-secret}
 D=$(mktemp -d /tmp/voice-smoke.XXXXXX) || { echo "✗ could not create a temp dir"; exit 1; }
-case "$D" in /tmp/voice-smoke.*) ;; *) echo "✗ unexpected temp dir '$D'"; exit 1 ;; esac
+# Canonicalize: a prefix match alone accepts /tmp/voice-smoke.fake/../<repo>.
+D=$(cd "$D" 2>/dev/null && pwd -P) || { echo "✗ temp dir is not usable"; exit 1; }
+case "$D" in /tmp/voice-smoke.*|/private/tmp/voice-smoke.*) ;; *) echo "✗ unexpected temp dir '$D'"; exit 1 ;; esac
+[ -d "$D" ] || { echo "✗ temp dir '$D' is not a directory"; exit 1; }
 FAILED=0
 PID=""
 cleanup () { [ -n "$PID" ] && kill "$PID" 2>/dev/null; }
@@ -61,8 +64,12 @@ eq  "an unknown caller is a normal 200" '{"known":false,"canFollowUp":false}' "$
 eq  "a wrong secret is 401" "401" "$(status -X POST "$U/voice/identify" -H "x-genesis-voice-secret: wrong" -H 'content-type: application/json' -d '{"callerId":"573017758620"}')"
 
 echo "▶ request"
-eq  "a request returns 200" "200" "$(status -X POST "$U/voice/request" "${H[@]}" -d '{"callerId":"573017758620","request":"warmup","conversationId":"warm"}')"
-R=$(body -X POST "$U/voice/request" "${H[@]}" -d '{"callerId":"573017758620","request":"send me the August invoice","conversationId":"conv-1"}')
+# ONE request, both its status and its body. Asserting a 200 on a warmup and a
+# body on a different call meant neither was evidence about the other.
+RESP=$(curl -s -w '\n%{http_code}' -X POST "$U/voice/request" "${H[@]}" \
+        -d '{"callerId":"573017758620","request":"send me the August invoice","conversationId":"conv-1"}')
+R=$(printf '%s' "$RESP" | sed '$d')
+eq  "a request returns 200" "200" "$(printf '%s' "$RESP" | tail -1)"
 has "a request is accepted" '"ticketId"' "$R"
 has "and promises NO follow-up (nothing drains the queue)" '"followUp":"none"' "$R"
 T1=$(printf '%s' "$R" | sed 's/.*"ticketId":"\([^"]*\)".*/\1/')
@@ -80,7 +87,7 @@ done
 echo "▶ the queue"
 Q="$D/data/voice/queue.jsonl"
 if [ -f "$Q" ]; then
-  eq "three records were persisted (warmup + two)" "3" "$(wc -l < "$Q" | tr -d ' ')"
+  eq "two records were persisted" "2" "$(wc -l < "$Q" | tr -d ' ')"
   has "the ticket carries its delivery target" '"deliverTo":"573017758620"' "$(head -1 "$Q")"
   cat "$Q"
 else

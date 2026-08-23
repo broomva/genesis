@@ -94,8 +94,18 @@ describe("the agent prompt cannot promise what the system cannot do", () => {
     expect(allText.length).toBeGreaterThan(5);
   });
 
-  // A blocklist is a FLOOR, never a ceiling — it catches the phrasings we thought
-  // of. The regex below is the part that generalizes.
+  // A FLOOR, AND IT CANNOT BE MADE A CEILING. Worth stating plainly, because
+  // three review rounds were spent trying: each time the list and the regex were
+  // widened, another phrasing got past — "we will contact you", then "Someone
+  // from our team will ring you later", then "Expect a call from our team
+  // tomorrow", which names no actor and uses no future modal at all. That is not
+  // a bug in these patterns; it is what natural language is.
+  //
+  // CI can prove the prompt CONTAINS its safety clauses (the exact-string
+  // assertions below, which are robust) and can stop a phrasing we have actually
+  // seen from reappearing. It cannot prove English prose free of contradiction.
+  // This is a regression net, not a proof. The real control is that the prompt
+  // lives in the repo and a human reads it in the diff.
   const PHRASES = [
     "whatsapp",
     "get back to you",
@@ -107,6 +117,13 @@ describe("the agent prompt cannot promise what the system cannot do", () => {
     "contact you",
     "send you",
     "let you know",
+    // Each of these got past an earlier version of this test during review.
+    "expect a call",
+    "expect a response",
+    "expect to hear",
+    "plans to",
+    "someone will",
+    "our team will",
   ];
 
   test.each(PHRASES)("no field commits to %p", (phrase) => {
@@ -133,6 +150,16 @@ describe("the agent prompt cannot promise what the system cannot do", () => {
   test("no field makes a future commitment to the caller, whoever the actor is", () => {
     const offenders = allText.filter((t) => COMMITMENT.test(t));
     expect(offenders).toEqual([]);
+  });
+
+  test("KNOWN GAP: an actorless, modal-less promise is invisible to the regex", () => {
+    // Recorded rather than hidden. "Expect a call from our team tomorrow" commits
+    // the caller with no actor and no future modal, so the regex cannot see it —
+    // it dies only because it is on the phrase list. A phrasing nobody has thought
+    // of yet will pass both. Anyone editing the prompt should know that.
+    const actorless = "Expect a call from our team tomorrow.";
+    expect(COMMITMENT.test(actorless)).toBe(false);
+    expect(actorless.toLowerCase()).toContain("expect a call");
   });
 
   test("the commitment regex is not vacuous — it fires on a real promise", () => {
