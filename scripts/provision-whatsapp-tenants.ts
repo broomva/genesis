@@ -26,6 +26,7 @@ import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } 
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
 import { TenantStore } from "../apps/chat-bot/src/tenant-store";
+import { denyRulesFor } from "./tenant-deny-rules";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -109,10 +110,24 @@ function settingsFor(dir: string): string {
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
         deny: [
-          "Read(//home/agent/.ssh/**)",
-          "Read(//home/agent/.aws/**)",
-          "Read(//home/agent/.config/**)",
-          "Read(//home/agent/.claude/**)",
+          // Built BY CONSTRUCTION from HOME and a verb list, not written out by
+          // hand. Two defects motivated that, both found on this list:
+          //
+          // 1. HARDCODED HOME. `HOME` above is `GENESIS_TENANT_HOME ?? "/home/agent"`,
+          //    but every rule below used to spell `/home/agent` literally. The
+          //    sandbox denyRead IS derived from HOME, so pointing GENESIS_TENANT_HOME
+          //    anywhere else left the two layers guarding different directories --
+          //    and for Read/Glob/Grep this list is the WHOLE boundary.
+          //
+          // 2. READ/GREP ASYMMETRY. `.ssh`, `.aws`, `.config`, `.claude` and `*.env`
+          //    were denied for Read and NOT for Grep, while broomva/ and genesis/ were
+          //    denied for both. Grep returns matching CONTENT, so it is a read
+          //    primitive; a hand-maintained parallel list drifts the moment someone
+          //    adds a path to one column. Glob is included too: it does not return
+          //    content, but it enumerates what is there to ask for next.
+          //
+          // The cross-product cannot drift, which is the whole point.
+          ...denyRulesFor(HOME, dir),
           // The sandbox denyRead below covers Bash. It does NOT cover the
           // built-in file tools, which run inside the Claude Code process --
           // so for Read/Glob/Grep, THIS list is the whole boundary, and it
@@ -131,13 +146,6 @@ function settingsFor(dir: string): string {
           // named-and-known ones. A sibling tenant cannot be denied by prefix
           // without denying the tenant's own directory, so that gap stays open
           // for the file-tool channel and is measured by the eval instead.
-          "Read(//home/agent/broomva/**)",
-          "Read(//home/agent/genesis/**)",
-          "Read(//home/agent/*.env)",
-          "Grep(//home/agent/broomva/**)",
-          "Grep(//home/agent/genesis/**)",
-          `Edit(//${dir.replace(/^\//, "")}/.claude/**)`,
-          `Write(//${dir.replace(/^\//, "")}/.claude/**)`,
         ],
       },
       sandbox: {

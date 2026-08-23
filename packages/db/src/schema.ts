@@ -14,6 +14,13 @@ export const workspaces = pgTable("workspaces", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   rootPath: text("root_path").notNull(),
+  // BRO-2236. `confined` decides whether a turn gets --strict-mcp-config. Before
+  // this column it lived only on the in-memory registry, so a workspace resolved
+  // from the DB arrived with confined: undefined and hardenedExtraArgs
+  // short-circuited -- the tenant ran with the operator's MCP servers attached.
+  // Nullable on purpose: null means "never stated", which the read path treats as
+  // NOT confined and refuses to serve on a channel, rather than guessing.
+  confined: boolean("confined"),
 });
 
 export const sessions = pgTable("sessions", {
@@ -109,6 +116,7 @@ CREATE TABLE IF NOT EXISTS turns (
   created_at text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turns_session_idx ON turns (session_id);
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS confined boolean;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived boolean NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engine text;

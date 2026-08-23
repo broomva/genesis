@@ -36,6 +36,10 @@ export interface IncomingMessage {
    *  selectable set is server-dynamic, so there's no client-side enum to validate
    *  against (membership is checked downstream in Supervisor.resolve). */
   workspaceId?: string;
+  /** BRO-2236/BRO-2241 — the request came off a PUBLIC CHANNEL, so an unregistered
+   *  or re-bound workspaceId must be REFUSED rather than quietly resolved to the
+   *  default workspace. Only the channel adapter knows this; core cannot infer it. */
+  channelQualified?: boolean;
   /** Requested worktree posture (BRO-1656) — `true` = per-session worktree, `false`
    *  = run at the workspace root. Honored only on turn 1 (sticky), and only when the
    *  workspace allows a worktree (a nested-repo workspace stays root-only). */

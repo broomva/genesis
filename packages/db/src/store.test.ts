@@ -29,6 +29,35 @@ describe("DrizzleStore (pglite) — Store contract", () => {
     await store.close();
   });
 
+  test("BRO-2236 — `confined` survives the round trip, in BOTH polarities", async () => {
+    // The defect this covers: the workspaces table had three columns and the upsert
+    // was projected to those three, so `confined` was dropped on every write. A
+    // workspace read back from the DB then arrived with confined: undefined,
+    // hardenedExtraArgs short-circuited, and the tenant ran with the operator's MCP
+    // servers attached. Nothing failed loudly — that is why it survived.
+    //
+    // Mutation-proven: removing `confined` from the store projection makes this red.
+    // Without it the projection could silently regress and 818 other tests stay green.
+    const store = await createPgliteStore();
+
+    await store.upsertWorkspace({ ...ws, id: "ws-confined", confined: true });
+    expect((await store.getWorkspace("ws-confined"))?.confined).toBe(true);
+
+    // NEGATIVE POLARITY — false must persist as false, not collapse to null and read
+    // back as "never stated". A single-polarity assertion would pass on a store that
+    // hardcoded true.
+    await store.upsertWorkspace({ ...ws, id: "ws-open", confined: false });
+    expect((await store.getWorkspace("ws-open"))?.confined).toBe(false);
+
+    // AND an UPDATE must carry it too: the onConflictDoUpdate set is a second,
+    // separately-projected code path, and a fix applied at one site only is the
+    // recurring shape here.
+    await store.upsertWorkspace({ ...ws, id: "ws-confined", confined: false });
+    expect((await store.getWorkspace("ws-confined"))?.confined).toBe(false);
+
+    await store.close();
+  });
+
   test("session find-by-thread + agentSessionId null↔undefined round-trip", async () => {
     const store = await createPgliteStore();
     await store.upsertWorkspace(ws);
