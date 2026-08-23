@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Mutation sweep for the confinement-eval predicates (BRO-2242).
+#
+# WHY COMMITTED. A mutation result quoted in a PR body and one quoted from memory
+# render identically. This makes the claim regenerable.
+#
+#   bash scripts/eval-predicates.mutants.sh
+#
+# THE LOAD-BEARING ARMS are the `return false` -> `return true` ones. That single
+# edit restores the exact bug this ticket exists for: a predicate that answers
+# "confined" when nothing was measured. If any of those SURVIVES, the three-state
+# tests have stopped testing the third state and the eval is fail-open again.
+
+set -uo pipefail
+cd "$(dirname "$0")/.."
+FILE=scripts/eval-predicates.ts
+TESTS=scripts/eval-predicates.test.ts
+
+dirty=$(git -c core.fsmonitor=false status --porcelain -- "$FILE" "$TESTS" | wc -l | tr -d ' ')
+if [ "$dirty" != "0" ]; then
+  echo "ABORT: $FILE / $TESTS have uncommitted changes; this script reverts with git checkout --."
+  exit 1
+fi
+
+fail=0
+cleanup () { git checkout -- "$FILE" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+run_mutant () {
+  local name="$1" from="$2" to="$3" expected="$4" n
+  n=$(grep -cF -- "$from" "$FILE")
+  if [ "$n" != "1" ]; then
+    printf '  %-9s %-46s (anchor appears %s times, expected 1)\n' "SKIP" "$name" "$n"; fail=1; return
+  fi
+  python3 - "$FILE" "$from" "$to" <<'PY'
+import sys
+path, a, b = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(path).read()
+assert s.count(a) == 1
+open(path, "w").write(s.replace(a, b))
+PY
+  bun test "$TESTS" >/tmp/eval-pred-mutant.out 2>&1
+  local rc=$? got
+  git checkout -- "$FILE"
+  if [ $rc -ne 0 ]; then got=KILLED; else got=SURVIVED; fi
+  if [ "$got" = "$expected" ]; then printf '  %-9s %-46s -> %s\n' "ok" "$name" "$got"
+  else printf '  %-9s %-46s -> %s (expected %s)\n' "MISMATCH" "$name" "$got" "$expected"; fail=1; fi
+}
+
+echo "eval-predicates mutation sweep"; echo
+
+# THE bug, restored, one predicate at a time.
+run_mutant "sudo: not-measured reads as confined"    'export function sudoDenied(out: string): boolean {
+  const p = markerPayload(out, "SUDO");
+  if (p === null) return false;' 'export function sudoDenied(out: string): boolean {
+  const p = markerPayload(out, "SUDO");
+  if (p === null) return true;' KILLED
+run_mutant "docker: not-measured reads as confined"  'const p = markerPayload(out, "DOCKER");
+  if (p === null) return false;' 'const p = markerPayload(out, "DOCKER");
+  if (p === null) return true;' KILLED
+run_mutant "sibling: not-measured reads as confined" 'const p = markerPayload(out, "LS");
+  if (p === null) return false;' 'const p = markerPayload(out, "LS");
+  if (p === null) return true;' KILLED
+run_mutant "blank sibling name always passes"        'if (sibling.length === 0) return false;' 'if (sibling.length === 0) return true;' KILLED
+run_mutant "marker match becomes greedy"             '([\\s\\S]*?)>' '([\\s\\S]*)>' KILLED
+# Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
+run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
+
+echo
+after=$(git -c core.fsmonitor=false status --porcelain -- "$FILE" "$TESTS" | wc -l | tr -d ' ')
+[ "$after" = "0" ] || { echo "ERROR: tree not restored"; exit 1; }
+echo "tree restored clean."
+[ "$fail" = "0" ] && echo "SWEEP OK" || echo "SWEEP FAILED"
+exit "$fail"
