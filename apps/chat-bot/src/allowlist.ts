@@ -247,15 +247,39 @@ export function startupGateFor(
     };
   }
 
-  // Union across channels: each principal is already channel-qualified, so a
-  // thread only matches an entry configured for ITS channel.
   const open = unguarded.length > 0;
+
+  /** Whether `l` is entitled to speak for this thread at all.
+   *
+   *  The union used to be `lists.some((l) => l.allowlist.allows(threadId))`, on the
+   *  reasoning that "each principal is already channel-qualified". That holds for
+   *  operator-written ENTRIES and fails in two places:
+   *
+   *  1. An OPEN list's predicate is `() => true` — not channel-qualified at all. So
+   *     registering WhatsApp without its allowlist made the ENFORCED Telegram list
+   *     inert: `allows("telegram:111")` returned true from the kapso list.
+   *  2. A BARE (unprefixed) thread id is attributed by `principalOf(id, fallback)` to
+   *     whichever fallback the caller passes, and each list passes its own channel.
+   *     So one channel's list could authorize another channel's bare thread.
+   *
+   *  A bare id genuinely has no channel of its own. With one channel registered that
+   *  is unambiguous and still works; with several it is a guess, and guessing which
+   *  channel a principal belongs to is the whole thing this module exists to prevent. */
+  const multiChannel = lists.length > 1;
+  const ownsThread = (l: (typeof lists)[number], threadId: string): boolean => {
+    if (multiChannel && !threadId.includes(":")) return false; // ambiguous -> nobody owns it
+    const p = principalOf(threadId, l.channel);
+    return p !== undefined && p.channel === l.channel;
+  };
+
   const decide = (threadId: string): Decision => {
-    if (lists.some((l) => l.allowlist.allows(threadId))) return { allowed: true };
+    if (lists.some((l) => ownsThread(l, threadId) && l.allowlist.allows(threadId)))
+      return { allowed: true };
     // Refused by every channel. Report "unresolvable" only when NO channel
     // could even parse the id — if one understood it and simply did not list
     // it, that is the control working and must not read as a malfunction.
     const parsedSomewhere = lists.some((l) => {
+      if (!ownsThread(l, threadId)) return false; // a list that cannot speak for it did not "parse" it
       const d = l.allowlist.decide(threadId);
       return d.allowed || d.reason !== "unresolvable";
     });
