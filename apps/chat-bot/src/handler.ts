@@ -20,6 +20,7 @@ import {
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 import { withStallTimeout } from "./stall-timeout";
+import { markdownToWhatsApp } from "./whatsapp-format";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -612,7 +613,13 @@ export async function handleAgentMessage(
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
-      const chunks = chunkForWhatsapp(reply, opts.chunkTarget);
+      // Convert BEFORE chunking. WhatsApp shows a plain string verbatim, so the
+      // agent's markdown reached phones as raw `##` and `|---|` pipes
+      // (BRO-2267). Order matters: converting first means a table is rendered
+      // whole and only then split, whereas chunking first could cut a table
+      // across two messages and destroy the row structure. A split emphasis
+      // marker is a cosmetic wart; split data is not.
+      const chunks = chunkForWhatsapp(markdownToWhatsApp(reply), opts.chunkTarget);
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
