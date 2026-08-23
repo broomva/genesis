@@ -294,3 +294,30 @@ describe("normalizeDomain — special-use TLDs never reach the internet (BRO-224
     expect(normalizeDomain("test.example.com")).toBe("test.example.com");
   });
 });
+
+describe("normalizeDomain — the public suffix list, as a dependency (BRO-2245)", () => {
+  test("a wildcard over a public suffix is refused — the whole registry in one yes", () => {
+    // The finding: `*.co.uk` has two labels after the wildcard, so the old
+    // label-counting rule accepted it and one approval opened every .co.uk there is.
+    for (const d of ["*.co.uk", "*.com.au", "*.co.jp", "*.org.uk", "*.com.br"]) {
+      expect(normalizeDomain(d)).toBeUndefined();
+    }
+  });
+
+  test("a BARE public suffix is refused too — it is not a host anyone means", () => {
+    // Same predicate, and the reason it is one rule rather than two: `co.uk` alone
+    // was previously accepted as an exact host.
+    expect(normalizeDomain("co.uk")).toBeUndefined();
+    expect(normalizeDomain("com.au")).toBeUndefined();
+  });
+
+  test("POSITIVE CONTROLS — a real domain under a multi-label suffix still works", () => {
+    // Without these, rejecting anything with a two-label tail would pass the tests
+    // above while breaking every legitimate UK or Australian domain.
+    expect(normalizeDomain("bbc.co.uk")).toBe("bbc.co.uk");
+    expect(normalizeDomain("*.bbc.co.uk")).toBe("*.bbc.co.uk");
+    expect(normalizeDomain("csiro.com.au")).toBe("csiro.com.au");
+    expect(normalizeDomain("github.com")).toBe("github.com");
+    expect(normalizeDomain("*.github.com")).toBe("*.github.com");
+  });
+});

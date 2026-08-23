@@ -33,6 +33,7 @@ import {
   webFetchRulesFor,
 } from "../apps/chat-bot/src/tenants";
 import { STACK_AGENTS, seedAgentStack } from "../packages/core/src/agent-stack";
+import { seedSkills } from "../packages/core/src/skill-seed";
 import { denyRulesFor } from "./tenant-deny-rules";
 
 const dryRun = process.argv.includes("--dry-run");
@@ -53,6 +54,9 @@ const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
 // for people the bot does not serve while the real tenants stay unprovisioned —
 // and the bot's startup check would then refuse to serve WhatsApp at all.
 const TENANTS_DIR = process.env.GENESIS_WHATSAPP_TENANTS_DIR?.trim();
+// Skills installed into every tenant workspace, root-owned. Read by THIS process
+// (root), never by a tenant, so one directory updates every tenant's stack.
+const TENANT_SKILLS_DIR = process.env.GENESIS_TENANT_SKILLS_DIR?.trim();
 const allowlist = parseAllowlist(RAW_ALLOWLIST, "kapso");
 
 // An open allowlist authorizes senders we cannot name, so there is no finite
@@ -341,6 +345,23 @@ for (const t of tenants) {
   const seeded = seedAgentStack(t.dir, {
     ownership: { uid: 0, gid: 0, mode: 0o444 },
   });
+  // Skills, installed the same way and for the same reason. BRO-2245 wanted a tenant
+  // to hold a skill and got there by making `.claude/` tenant-writable, which is a
+  // permission escalation because `allowed-tools:` frontmatter is a real permission
+  // layer. Seeding root-owned 0444 gives the tenant the skill and nobody the layer.
+  // Optional: unset GENESIS_TENANT_SKILLS_DIR simply seeds none.
+  const skills = TENANT_SKILLS_DIR
+    ? seedSkills(t.dir, {
+        sourceDir: TENANT_SKILLS_DIR,
+        ownership: { uid: 0, gid: 0, mode: 0o444 },
+      })
+    : undefined;
+  if (skills) {
+    for (const path of skills.skipped) {
+      console.log(`  skill not replaced (differs from source): ${path}`);
+    }
+    console.log(`  skills: ${skills.written.length} written, ${skills.unchanged.length} unchanged`);
+  }
   for (const path of seeded.skipped) {
     console.warn(
       `    SHADOWED ${path} — a tenant-authored agent holds this name; the stack version was NOT written. Re-run with the file removed to restore it.`,
