@@ -56,7 +56,7 @@ import {
 } from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
-import { type Transcriber, textToDispatch } from "./voice-note";
+import { textToDispatch } from "./voice-note";
 import { webhookPort } from "./webhook-port";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -213,13 +213,6 @@ const chat = kapsoAdapter
  *  progress by streaming the reply in place; adding reactions there would be a
  *  second, redundant status channel. This exists because WhatsApp has no edit
  *  and a reaction is its only mutable surface. */
-// Transcription backend for inbound voice notes (BRO-2266). UNSET is a
-// supported state, not a broken one: with no backend the channel TELLS the
-// sender it cannot hear voice notes, which is strictly better than the silent
-// drop that came before. The backend choice (local whisper vs a hosted API) is
-// an operator decision and plugs in here.
-const transcriber: Transcriber | undefined = undefined;
-
 function turnSignalsFor(threadId: string, messageId: string): TurnSignals | undefined {
   if (!kapsoAdapter || !threadId.startsWith("kapso:") || !messageId) return undefined;
   return {
@@ -378,7 +371,7 @@ chat.onDirectMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  const text = await textToDispatch(thread, message, transcriber);
+  const text = await textToDispatch(thread, message);
   if (!text) return;
   await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
@@ -390,7 +383,7 @@ chat.onNewMention(async (thread, message) => {
   await thread.subscribe();
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  const text = await textToDispatch(thread, message, transcriber);
+  const text = await textToDispatch(thread, message);
   if (!text) return;
   await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
@@ -398,7 +391,7 @@ chat.onSubscribedMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  const text = await textToDispatch(thread, message, transcriber);
+  const text = await textToDispatch(thread, message);
   if (!text) return;
   await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });

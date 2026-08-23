@@ -33,10 +33,12 @@ describe("voice notes are reachable from the entrypoint", () => {
   // with a recording thread; see "the refusal actually reaches the sender".
   // Keeping a grep alongside that real test would be a weaker second gate.
 
-  test("the transcriber binding exists and is PASSED, not just declared", () => {
-    // BRO-2228's defect exactly: options declared on a surface and supplied by
-    // nothing, so the branch behind them never ran in any deploy.
-    expect(index).toMatch(/transcriber(\s*:\s*Transcriber\s*\|\s*undefined)?\s*=/);
-    expect(index).toContain("textToDispatch(thread, message, transcriber)");
+  test("no transcription scaffolding is left behind", () => {
+    // The ingestion path (download, size bounds, Transcriber port) was CUT
+    // after review found two blockers in code that could not run — no backend
+    // is configured, so it returned at the first branch and never downloaded.
+    // Both fixes depend on which backend is chosen, so the boundary lands with
+    // it. This asserts the dead scaffolding did not survive the cut.
+    expect(index).not.toMatch(/Transcriber|transcriber|resolveVoiceNote/);
   });
 });

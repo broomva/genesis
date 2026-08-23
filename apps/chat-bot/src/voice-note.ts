@@ -1,51 +1,36 @@
-// Inbound voice notes (BRO-2266).
+// Inbound voice notes (BRO-2266) — the ANSWER, not yet the ingestion.
 //
-// WHY THIS EXISTS. A WhatsApp voice note carries no text, and the handler
-// dispatches on `message.text`. So until now a voice note was SILENTLY
-// DROPPED: no reply, no log, nothing on the sender's phone — indistinguishable
-// from the bot being dead. That is the same silence-as-failure mode the rest of
-// BRO-2256 exists to remove, and it is the reason the no-transcriber path here
-// answers rather than returns.
+// THE BUG THIS CLOSES. A WhatsApp voice note carries no text, and dispatch runs
+// on `message.text`, so one was SILENTLY DROPPED: no reply, no log, nothing on
+// the sender's phone — indistinguishable from a dead bot. That is the same
+// silence-as-failure mode the rest of BRO-2256 was about.
 //
-// WHAT IS ALREADY SOLVED. Download is not our problem: Chat SDK's `Attachment`
-// carries `fetchData()`, and `@kapso/chat-adapter` 0.1.1 builds audio
-// attachments from the webhook's `raw.audio` and knows how to rehydrate the
-// WhatsApp mediaId behind it (read from `dist`; the docs describe none of it).
-// Only transcription is missing, and the BACKEND for that is deliberately not
-// chosen here — see `Transcriber`.
+// WHY THERE IS NO DOWNLOAD OR TRANSCRIPTION HERE. An earlier cut of this file
+// carried the whole ingestion path — fetchData(), size bounds, a Transcriber
+// port. Cross-model review found two blockers in it, and both were in code that
+// CANNOT RUN: with no backend configured the function returns at the first
+// branch and never downloads anything. The findings were real —
+//
+//   - `fetchData()` buffers the entire object before any length we can measure,
+//     so a post-download check bounds nothing; the only pre-emptive gate reads
+//     the sender's own declared `size`, which is metadata, not a measurement.
+//   - bytes do not bound COST for compressed audio: 16 MB of Opus is hours of
+//     speech, so a byte cap limits allocation and not transcription time, and
+//     nothing limited concurrency on a 2-vCPU box.
+//
+// — and neither is answerable without knowing the backend, because the fix
+// differs entirely between a local decoder and a hosted API. Shipping the
+// boundary now would be designing it blind and then defending the design.
+// It lands with the backend, in BRO-2266.
+//
+// What remains is live, small, and the part that actually helps today.
 
-/** The slice of Chat SDK's `Attachment` this module needs. Narrow so the unit
- *  tests do not have to construct a whole SDK object. */
+/** The slice of Chat SDK's `Attachment` this module needs. */
 export interface AudioAttachment {
   readonly type: "image" | "file" | "video" | "audio";
   readonly mimeType?: string;
   readonly size?: number;
-  readonly data?: Buffer | Blob;
-  fetchData?: () => Promise<Buffer>;
 }
-
-/** Transcription backend. A PORT, not an implementation.
- *
- *  The backend is an operator decision with real trade-offs — whisper.cpp on
- *  the VPS costs CPU on a 2-vCPU box, an API costs money and adds a vendor — so
- *  this module refuses to pick one. Everything here works identically behind
- *  either, and the choice plugs in at the entrypoint. */
-export interface Transcriber {
-  /** Return the spoken text. Throwing is fine; callers treat it as a failure
-   *  the user is told about, never as a silent drop. */
-  transcribe(audio: Buffer, mimeType?: string): Promise<string>;
-}
-
-/** Largest voice note we will pull into memory.
- *
- *  WhatsApp caps audio at 16 MB, so this is not primarily a protocol bound — it
- *  is a memory bound on a 2-vCPU / 8 GB box that has already been taken down
- *  once today by resource exhaustion. `fetchData()` buffers the WHOLE file, and
- *  a channel that anyone with the number can post to must not be able to choose
- *  our allocation size. Checked BEFORE the download, from the attachment
- *  metadata, so an oversized note is refused rather than fetched and then
- *  rejected. */
-export const MAX_VOICE_NOTE_BYTES = 16 * 1024 * 1024;
 
 /** Is this the audio attachment of a voice note? */
 export function isAudio(a: AudioAttachment): boolean {
@@ -59,109 +44,22 @@ export function findVoiceNote(
   return attachments.find(isAudio);
 }
 
-export type VoiceNoteResult =
-  /** Transcribed. `text` is what the agent should be asked. */
-  | { kind: "text"; text: string }
-  /** Could not transcribe. `reply` is what to tell the user — NEVER silence. */
-  | { kind: "refused"; reply: string; reason: string };
-
-/** The message shown when no backend is configured.
+/** Shown when a voice note arrives and we cannot listen to it.
  *
- *  Deliberately says what the user can DO. "Unsupported media type" tells them
- *  nothing; "type it instead" is actionable and true. */
-export const NO_TRANSCRIBER_REPLY =
-  "I can't listen to voice notes yet — could you type that instead?";
+ *  Says what the sender can DO. "Unsupported media type" tells them nothing;
+ *  "type it instead" is actionable and true. */
+export const CANNOT_HEAR_REPLY = "I can't listen to voice notes yet — could you type that instead?";
 
-/** Turn a voice note into text, or into something to say about why not.
+/** Shown when a message carries BOTH text and a voice note.
  *
- *  Never throws and never returns nothing: every path produces either text to
- *  dispatch or a reply to post. That total-ness is the point of the module. */
-export async function resolveVoiceNote(
-  attachment: AudioAttachment,
-  transcriber: Transcriber | undefined,
-): Promise<VoiceNoteResult> {
-  if (!transcriber) {
-    return {
-      kind: "refused",
-      reply: NO_TRANSCRIBER_REPLY,
-      reason: "no transcriber configured",
-    };
-  }
+ *  The typed words are dispatched, because they are the higher-confidence
+ *  signal. But dropping the audio without saying so would be a silent discard
+ *  committed by the very module whose purpose is to end silent discards —
+ *  cross-model review caught that inconsistency, and it was correct. */
+export const AUDIO_IGNORED_NOTE =
+  "(I answered your typed message — I can't listen to voice notes yet, so I skipped the audio.)";
 
-  // Size gate BEFORE the fetch — see MAX_VOICE_NOTE_BYTES. `size` is optional
-  // in the SDK type, so an absent size is not treated as zero: it is unknown,
-  // and the post-download check below is what covers that case.
-  if (typeof attachment.size === "number" && attachment.size > MAX_VOICE_NOTE_BYTES) {
-    return {
-      kind: "refused",
-      reply: "That voice note is too long for me to process — could you send a shorter one?",
-      reason: `declared size ${attachment.size} exceeds ${MAX_VOICE_NOTE_BYTES}`,
-    };
-  }
-
-  let audio: Buffer;
-  try {
-    audio = attachment.data instanceof Buffer ? attachment.data : await fetchAudio(attachment);
-  } catch (e) {
-    return {
-      kind: "refused",
-      reply: "I couldn't download that voice note — could you try again, or type it?",
-      reason: `download failed: ${errText(e)}`,
-    };
-  }
-
-  // Second size check, on what actually arrived. The declared size is metadata
-  // from the sender's side; this is the only figure we have measured.
-  if (audio.byteLength > MAX_VOICE_NOTE_BYTES) {
-    return {
-      kind: "refused",
-      reply: "That voice note is too long for me to process — could you send a shorter one?",
-      reason: `downloaded ${audio.byteLength} bytes exceeds ${MAX_VOICE_NOTE_BYTES}`,
-    };
-  }
-  if (audio.byteLength === 0) {
-    return {
-      kind: "refused",
-      reply: "That voice note came through empty — could you send it again?",
-      reason: "empty audio",
-    };
-  }
-
-  let text: string;
-  try {
-    text = await transcriber.transcribe(audio, attachment.mimeType);
-  } catch (e) {
-    return {
-      kind: "refused",
-      reply: "I couldn't make out that voice note — could you try again, or type it?",
-      reason: `transcription failed: ${errText(e)}`,
-    };
-  }
-
-  const trimmed = text.trim();
-  if (!trimmed) {
-    // A transcriber that returns "" has succeeded at producing nothing. Feeding
-    // that to the agent would start a turn on an empty prompt, which the
-    // handler drops — silently, which is the whole thing we are avoiding.
-    return {
-      kind: "refused",
-      reply: "I couldn't hear anything in that voice note — could you try again?",
-      reason: "transcript empty",
-    };
-  }
-  return { kind: "text", text: trimmed };
-}
-
-async function fetchAudio(a: AudioAttachment): Promise<Buffer> {
-  if (!a.fetchData) throw new Error("attachment has no fetchData()");
-  return await a.fetchData();
-}
-
-function errText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-/** The minimum a thread must do for a refusal to be delivered. */
+/** The minimum a thread must do for a reply to reach the sender. */
 export interface AnswerableThread {
   readonly id: string;
   post(content: string): Promise<unknown>;
@@ -173,44 +71,40 @@ export interface IncomingMessage {
   readonly attachments?: readonly AudioAttachment[];
 }
 
-/** Resolve the text to dispatch for an inbound message, ANSWERING the sender
- *  when there is none.
+/** Resolve the text to dispatch, ANSWERING the sender whenever audio is
+ *  involved and cannot be used.
  *
  *  Lives here rather than in the entrypoint so the guarantee is testable. The
- *  mutation sweep proved why: with this logic inline in index.ts, the only
- *  available assertion was a grep over the source, and replacing the real
- *  `thread.post(...)` with a no-op that still mentioned `outcome.reply`
- *  SURVIVED. A claim this change is built on cannot rest on a substring match.
+ *  mutation sweep proved why: with this logic inline in index.ts the only
+ *  available assertion was a grep over source, and a no-op that still mentioned
+ *  the reply variable SURVIVED it. A claim this module exists to make cannot
+ *  rest on a substring match.
  *
- *  Returns undefined only when there is nothing to say AND nothing to dispatch
- *  (an ordinary empty message) or when the sender has already been answered —
- *  never because something was quietly discarded.
- *
- *  Typed text WINS over audio when a message carries both: the typed words are
- *  the higher-confidence signal, and transcription is the lossy path. */
+ *  Returns undefined when there is nothing to dispatch — which now means the
+ *  sender has been told, or the message was genuinely empty. Never "discarded
+ *  quietly". */
 export async function textToDispatch(
   thread: AnswerableThread,
   message: IncomingMessage,
-  transcriber: Transcriber | undefined,
-  log: { info(m: string): void; warn(m: string): void } = {
-    info: (m) => console.log(m),
-    warn: (m) => console.warn(m),
-  },
+  log: { warn(m: string): void } = { warn: (m) => console.warn(m) },
 ): Promise<string | undefined> {
   const typed = message.text?.trim();
-  if (typed) return typed;
-
   const note = findVoiceNote(message.attachments ?? []);
+
+  if (typed && note) {
+    // Both. Dispatch the text, but SAY that the audio was skipped.
+    log.warn(`[genesis-bot] ${thread.id}: answered typed text, skipped an attached voice note`);
+    await thread
+      .post(AUDIO_IGNORED_NOTE)
+      .catch((e) => log.warn(`[genesis-bot] could not note the skipped audio: ${e}`));
+    return typed;
+  }
+  if (typed) return typed;
   if (!note) return undefined;
 
-  const outcome = await resolveVoiceNote(note, transcriber);
-  if (outcome.kind === "text") {
-    log.info(`[genesis-bot] transcribed a voice note for ${thread.id}`);
-    return outcome.text;
-  }
-  log.warn(`[genesis-bot] voice note not dispatched for ${thread.id}: ${outcome.reason}`);
+  log.warn(`[genesis-bot] ${thread.id}: voice note received, no transcription backend configured`);
   await thread
-    .post(outcome.reply)
+    .post(CANNOT_HEAR_REPLY)
     .catch((e) => log.warn(`[genesis-bot] could not answer a voice note: ${e}`));
   return undefined;
 }
