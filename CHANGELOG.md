@@ -1,5 +1,73 @@
 # Changelog
 
+## [Unreleased] — WhatsApp channel says something while it works (BRO-2256)
+
+### Added
+- **Typing keep-alive.** `thread.startTyping()` was already wired end-to-end —
+  Chat SDK's `Thread` exposes it and `@kapso/chat-adapter` implements it as
+  `markRead` + `typingIndicator:{type:"text"}` — but it was called **once**, and
+  WhatsApp dismisses the indicator after ~25s. A 3-minute turn showed typing for
+  25 seconds and then nothing, which reads worse than never having shown it:
+  silence *after* a promise of activity looks like the bot died mid-thought.
+  `keepTyping()` re-arms every 20s, is stopped in a `finally`, and is stopped
+  before the first chunk (WhatsApp dismisses on send anyway, and re-arming
+  between chunks would show "typing" after the answer had begun arriving).
+- **Turn outcome as a reaction.** WhatsApp has no message edit, but a
+  **reaction** is the one primitive that changes an already-delivered message's
+  appearance. When the turn ends, the user's own question is marked ✅ done or
+  ⚠️ failed — a signal that OUTLIVES the typing indicator and tells them
+  afterwards how it went. Routed through `Adapter.addReaction`, because Chat
+  SDK's inbound `Message` carries an id but no reaction methods (those are on
+  `SentMessage`, i.e. messages *we* sent — the wrong message to mark).
+  WhatsApp-only: Telegram streams in place and needs no second status channel.
+
+  **Exactly one reaction per turn, at the end.** An earlier design sent 👀 on
+  receipt and replaced it on completion; that ordering could not be made safe.
+  The two reactions are independent API calls, and a timeout can only *abandon*
+  a slow one — an in-flight request cannot be cancelled — so the 👀 could land
+  *after* the terminal mark and stick permanently. A status claiming the turn
+  never finished, on a turn that did, is worse than no status. Nothing is lost:
+  the typing indicator already covers "working", for the whole turn.
+
+### Changed
+- **`CHUNK_TARGET` 3900 → 1000.** 3900 was sized to the transport cap, not to a
+  phone screen: ~600 words arriving as one balloon reads as a document dump
+  rather than a reply. `chunkForWhatsapp` now also **clamps** to
+  `WHATSAPP_TEXT_LIMIT`, so a configured target above 4096 degrades to "less
+  readable" instead of "silently rejected by WhatsApp", and a non-positive
+  target falls back to the default rather than spinning the `while` loop
+  forever. Configurable per channel via `HandlerOptions.chunkTarget`.
+
+### Fixed
+- **A closed 24-hour service window was indistinguishable from a crash.** Meta
+  only permits free-form messages within 24h of the user's last inbound message;
+  outside it every send fails 422. The handler now names that case explicitly in
+  the log and deliberately does **not** post an apology — the nature of this
+  failure is that we cannot message the user at all, so the apology fails
+  identically and buries the real cause under a second exception. It also does
+  not mark the turn failed, because the reaction would fail for the same reason.
+  A failure indistinguishable from success is the worst state this channel can
+  be in, and this one now says so where the operator can see it.
+
+### Known residue
+- **Feedback still shares the reply's rate budget.** `TYPING_MAX_MS` bounds one
+  turn to ~15 re-arms, but not concurrency: enough simultaneous turns exhaust
+  Kapso's per-key window and the calls that fail are the replies. A process-wide
+  limiter was built for this and **deleted** — it approximated an upstream
+  counter this process cannot observe, and each review round found a new way the
+  approximation was wrong. The correct fix is to gate on the
+  `X-RateLimit-Remaining` header Kapso returns on every response, which needs the
+  adapter to surface response headers the Chat SDK does not expose.
+- A typing re-arm issued microseconds before the reply can still land after it,
+  briefly showing "typing" on an answered conversation. Not fixable here: no
+  process can recall an in-flight request, and WhatsApp exposes no stop-typing
+  call — only `markRead` *with* an indicator, never without. Bounded, since
+  WhatsApp drops the indicator ~25s later and our next send drops it sooner.
+
+### Compatibility
+`handleAgentMessage` takes `signals` as a new **optional 4th parameter**;
+Telegram passes nothing and behaves exactly as before.
+
 ## [Unreleased] — Voice channel reaches production (BRO-2228)
 
 ### Added
