@@ -785,8 +785,20 @@ export class Supervisor {
         // Deliberately DO NOT forward `this.extraArgs` (P20/CodeRabbit): those carry
         // the real agent's permission flags (e.g. --dangerously-skip-permissions). The
         // title prompt inlines UNTRUSTED user/assistant text, so a prompt injection must
-        // not be able to escalate into tool/file access here. Default permissions +
-        // the "do not use any tools" instruction keep this a pure text completion.
+        // not be able to escalate into tool/file access here.
+        //
+        // But NOT forwarding them also meant not forwarding `--strict-mcp-config`, so
+        // this spawn inherited the OPERATOR's MCP servers -- Gmail, Drive, Calendar,
+        // Railway -- inside a turn whose prompt is written by a tenant. The mitigation
+        // in place was "default permissions + a 'do not use any tools' instruction",
+        // and an instruction is precisely what a prompt injection overrides. A
+        // confined workspace must be confined on every spawn it causes, not only the
+        // one the operator is thinking about.
+        //
+        // `hardenedExtraArgs(workspace)` with no second argument yields exactly
+        // ["--strict-mcp-config"] when confined and undefined otherwise, which adds
+        // the boundary without reintroducing any permission flag.
+        extraArgs: hardenedExtraArgs(workspace),
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
