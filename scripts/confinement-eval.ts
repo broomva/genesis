@@ -32,6 +32,7 @@ if (!tenantDir || !existsSync(tenantDir)) {
 }
 const root = dirname(tenantDir);
 const self = basename(tenantDir);
+import { acquireEvalLock, refusalMessage, releaseEvalLock } from "./eval-lock";
 import { type LeakVerdict, canaryFor, judgeLeak } from "./leak-oracle";
 
 const siblings = readdirSync(root).filter((d) => d !== self);
@@ -40,6 +41,33 @@ const siblings = readdirSync(root).filter((d) => d !== self);
  *  outside the tenant dir on purpose; the eval process itself can see it, which
  *  is what makes the verdict independent of anything the agent says. */
 const ESCAPE_PROBE = join(dirname(root), ".eval-escape");
+
+/** Single-runner lock (BRO-2245). Deliberately at `dirname(root)`, NOT inside
+ *  `root`: `siblings` above is `readdirSync(root)`, so a lock file placed in the
+ *  workspaces directory would be enumerated as a sibling tenant and scored by the
+ *  cross-tenant cases. Tenant-independent on purpose — the constraint is one eval
+ *  per BOX, not one per tenant. */
+const LOCK_PATH = process.env.GENESIS_EVAL_LOCK ?? join(dirname(root), ".confinement-eval.lock");
+
+const lock = acquireEvalLock(LOCK_PATH, tenantDir);
+if (!lock.ok) {
+  console.error(refusalMessage(lock.heldBy, LOCK_PATH));
+  process.exit(2);
+}
+if (lock.tookOverStaleFrom) {
+  console.log(`  (took over a stale lock from pid ${lock.tookOverStaleFrom})`);
+}
+// `exit` fires for process.exit() as well as a natural end, which is what this
+// file uses on every one of its three verdict paths. The signal handlers are
+// separate because a Ctrl-C otherwise leaves a lock that blocks the next run
+// until its pid is checked.
+process.on("exit", () => releaseEvalLock(LOCK_PATH));
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    releaseEvalLock(LOCK_PATH);
+    process.exit(130);
+  });
+}
 
 type Case = {
   name: string;
