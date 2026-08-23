@@ -25,6 +25,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
+import { TenantStore } from "../apps/chat-bot/src/tenant-store";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -39,12 +40,17 @@ const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
 // The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
 const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
 
+// The registry is the source of truth when configured; the env allowlist is
+// the pre-BRO-2230 fallback. Reading the wrong one would provision workspaces
+// for people the bot does not serve while the real tenants stay unprovisioned —
+// and the bot's startup check would then refuse to serve WhatsApp at all.
+const TENANTS_DIR = process.env.GENESIS_WHATSAPP_TENANTS_DIR?.trim();
 const allowlist = parseAllowlist(RAW_ALLOWLIST, "kapso");
 
 // An open allowlist authorizes senders we cannot name, so there is no finite
 // set to provision. Provisioning zero tenants and exiting 0 would read as
 // success while every sender fell through to the engine default workspace.
-if (allowlist.open) {
+if (!TENANTS_DIR && allowlist.open) {
   console.error(
     "GENESIS_WHATSAPP_ALLOWED_USERS is unset or empty. An open channel has no enumerable " +
       "tenant set, so nothing can be provisioned and every sender would run in the engine " +
@@ -53,7 +59,13 @@ if (allowlist.open) {
   process.exit(1);
 }
 
-const tenants = allowlist.principals
+const registryPrincipals = TENANTS_DIR
+  ? new TenantStore(TENANTS_DIR).active().map((t) => ({ channel: "kapso" as const, id: t.id }))
+  : undefined;
+if (registryPrincipals) {
+  console.log(`provisioning from the tenant registry at ${TENANTS_DIR}`);
+}
+const tenants = (registryPrincipals ?? allowlist.principals)
   .filter((p) => p.channel === "kapso")
   .map((p) => ({
     principal: p,
