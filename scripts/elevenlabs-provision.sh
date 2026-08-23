@@ -1,89 +1,155 @@
 #!/usr/bin/env bash
-# Provision the Genesis Voice agent on ElevenLabs from the configs in
-# integrations/elevenlabs/ (BRO-2257 / BRO-2228).
+# Provision the Genesis Voice agent on ElevenLabs from integrations/elevenlabs/
+# (BRO-2257 / BRO-2228).
 #
-# WHY A SCRIPT AND NOT `elevenlabs agents push` DIRECTLY. Three things the raw
-# CLI will not do for us:
-#   1. The committed tool configs carry ${GENESIS_PUBLIC_URL} and
-#      ${GENESIS_VOICE_SECRET} placeholders. The shared secret must never be
-#      written into a tracked file, so substitution happens into a TEMP copy that
-#      is deleted on exit; the repo copy is never mutated with a secret.
-#   2. The agent needs the tool IDs, which do not exist until the tools are
-#      pushed. This pushes tools first, reads the IDs back, injects them into the
-#      agent's prompt.tool_ids, and only then pushes the agent.
-#   3. IDs assigned on first push are merged back into the tracked index files so
-#      the next run UPDATES instead of creating a second copy of everything.
-#
-# Usage:
-#   ELEVENLABS_API_KEY=... GENESIS_PUBLIC_URL=https://host GENESIS_VOICE_SECRET=... \
-#     scripts/elevenlabs-provision.sh [--dry-run]
-set -euo pipefail
+# WHY A SCRIPT AND NOT `elevenlabs agents push` DIRECTLY:
+#   1. Committed configs carry ${GENESIS_PUBLIC_URL}/${GENESIS_VOICE_SECRET}
+#      placeholders — a literal secret in a tracked file is a committed
+#      credential. Substitution happens into a temp copy deleted on exit.
+#   2. The agent needs tool IDs that do not exist until the tools are pushed.
+#   3. IDs are written back so a second run UPDATES instead of duplicating.
+set -uo pipefail
 
+# Secrets pass through this script. Under `bash -x` every substitution would be
+# echoed verbatim into the terminal or a CI log, so tracing is turned OFF here
+# regardless of how we were invoked. This is deliberate and not a convenience.
+set +x
+
+usage () {
+  cat >&2 <<USAGE
+usage: scripts/elevenlabs-provision.sh [--dry-run]
+
+  --dry-run   validate and substitute, push nothing.
+
+required environment:
+  ELEVENLABS_API_KEY    from https://elevenlabs.io/app/settings/api-keys
+  GENESIS_PUBLIC_URL    base URL ElevenLabs reaches Genesis on. Scheme required,
+                        no path, no trailing slash — /voice/* is appended.
+                        A Tailscale funnel works; do NOT use --set-path, it
+                        strips the prefix and /voice/* stops resolving.
+  GENESIS_VOICE_SECRET  must EQUAL the value Genesis is running with, or every
+                        tool call returns 401 while sounding like success.
+USAGE
+}
+
+# Fail CLOSED on anything unrecognized: silently treating `--dry-rnu` as live
+# mode would push to a real workspace while the operator believed nothing moved.
 DRY_RUN=""
-[ "${1:-}" = "--dry-run" ] && DRY_RUN="--dry-run"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN="--dry-run"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "✗ unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SRC="$REPO_ROOT/integrations/elevenlabs"
-CLI_VERSION="${ELEVENLABS_CLI_VERSION:-0.5.6}"
+CLI="@elevenlabs/cli@${ELEVENLABS_CLI_VERSION:-0.5.6}"
 
 missing=()
 [ -n "${ELEVENLABS_API_KEY:-}" ]   || missing+=("ELEVENLABS_API_KEY")
 [ -n "${GENESIS_PUBLIC_URL:-}" ]   || missing+=("GENESIS_PUBLIC_URL")
 [ -n "${GENESIS_VOICE_SECRET:-}" ] || missing+=("GENESIS_VOICE_SECRET")
 if [ ${#missing[@]} -gt 0 ]; then
-  echo "✗ missing required environment: ${missing[*]}" >&2
-  echo >&2
-  echo "  ELEVENLABS_API_KEY    from https://elevenlabs.io/app/settings/api-keys" >&2
-  echo "  GENESIS_PUBLIC_URL    the base URL ElevenLabs can reach Genesis on, no" >&2
-  echo "                        trailing slash and no path — /voice/* is appended." >&2
-  echo "                        A Tailscale funnel works; do NOT use --set-path," >&2
-  echo "                        it strips the prefix and /voice/* stops resolving." >&2
-  echo "  GENESIS_VOICE_SECRET  must EQUAL the value Genesis itself is running" >&2
-  echo "                        with, or every tool call comes back 401." >&2
-  exit 2
+  echo "✗ missing required environment: ${missing[*]}" >&2; echo >&2; usage; exit 2
 fi
 
-case "$GENESIS_PUBLIC_URL" in
-  */) echo "✗ GENESIS_PUBLIC_URL must not end in '/' (got: $GENESIS_PUBLIC_URL)" >&2; exit 2 ;;
-  http://*|https://*) ;;
-  *) echo "✗ GENESIS_PUBLIC_URL must include the scheme (got: $GENESIS_PUBLIC_URL)" >&2; exit 2 ;;
-esac
+# Scheme required, and NO path component — the README promises /voice/* is
+# appended to a bare origin, and https://host/prefix would silently provision
+# tools pointing at /prefix/voice/* which Genesis does not serve.
+python3 - "$GENESIS_PUBLIC_URL" <<'PY' || exit 2
+import sys
+from urllib.parse import urlparse
+u = urlparse(sys.argv[1])
+if u.scheme not in ("http", "https"):
+    sys.exit(f"✗ GENESIS_PUBLIC_URL needs an http(s) scheme (got: {sys.argv[1]})")
+if not u.netloc:
+    sys.exit(f"✗ GENESIS_PUBLIC_URL has no host (got: {sys.argv[1]})")
+if u.path not in ("", "/"):
+    sys.exit(f"✗ GENESIS_PUBLIC_URL must be a bare origin with no path; /voice/* is\n"
+             f"  appended to it. Got path {u.path!r}. Genesis serves /voice/* at the root.")
+if sys.argv[1].endswith("/"):
+    sys.exit(f"✗ GENESIS_PUBLIC_URL must not end in '/' (got: {sys.argv[1]})")
+if u.query or u.fragment:
+    sys.exit("✗ GENESIS_PUBLIC_URL must not carry a query or fragment")
+PY
 
 WORK=$(mktemp -d /tmp/el-provision.XXXXXX)
-trap 'rm -rf "$WORK"' EXIT   # the substituted copy holds the secret; never persist it
+# INT/TERM as well as EXIT: a Ctrl-C mid-push must not leave a world-readable
+# temp directory containing the shared secret.
+cleanup () { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
 cp -R "$SRC/." "$WORK/"
 
-python3 - "$WORK" <<'PY'
+echo "▶ substituting into a temp copy"
+python3 - "$WORK" <<'PY' || exit 1
 import json, os, sys, glob
 work = sys.argv[1]
 url, secret = os.environ["GENESIS_PUBLIC_URL"], os.environ["GENESIS_VOICE_SECRET"]
+# json.dumps then strip the quotes: a secret containing " or \ would otherwise
+# produce invalid JSON, rejecting a perfectly legal credential.
+esc = lambda v: json.dumps(v)[1:-1]
 for f in glob.glob(os.path.join(work, "tool_configs", "*.json")):
     raw = open(f, encoding="utf-8").read()
-    raw = raw.replace("${GENESIS_PUBLIC_URL}", url).replace("${GENESIS_VOICE_SECRET}", secret)
+    raw = raw.replace("${GENESIS_PUBLIC_URL}", esc(url)).replace("${GENESIS_VOICE_SECRET}", esc(secret))
     if "${" in raw:
-        sys.exit(f"unsubstituted placeholder left in {f}")
+        sys.exit(f"✗ unsubstituted placeholder left in {f}")
     open(f, "w", encoding="utf-8").write(raw)
-    cfg = json.load(open(f, encoding="utf-8"))
+    cfg = json.loads(raw)   # parses => the substitution did not corrupt the JSON
     print(f"  {cfg['name']} -> {cfg['api_schema']['url']}")
 PY
 
+# GENESIS_VOICE_SECRET is already baked into the temp configs; the CLI never
+# needs it. Dropping it from the child environment keeps it out of `ps eww` for
+# the whole life of a slow push. ELEVENLABS_API_KEY must pass through.
+el () { env -u GENESIS_VOICE_SECRET npx -y "$CLI" "$@"; }
+
 echo "▶ pushing tools"
-( cd "$WORK" && npx -y "@elevenlabs/cli@${CLI_VERSION}" tools push ${DRY_RUN} )
+( cd "$WORK" && el tools push ${DRY_RUN} ) || { echo "✗ tools push failed" >&2; exit 1; }
 
 if [ -n "$DRY_RUN" ]; then
-  echo "▶ dry run: stopping before the agent push (tool ids were never assigned)"
+  echo "▶ dry run: stopping before the agent push; nothing was created"
   exit 0
 fi
 
+# Persist tool IDs NOW, before the agent push can fail. Deferring this until the
+# end meant a failed agent push destroyed the temp dir holding the only record of
+# freshly created tools, and the retry created a second copy of each.
+echo "▶ recording tool ids"
+python3 - "$WORK" "$SRC" tools.json tools <<'PY' || exit 1
+import json, os, sys
+work, src, name, key = sys.argv[1:5]
+pushed = {e["name"]: e.get("id", "") for e in json.load(open(os.path.join(work, name), encoding="utf-8"))[key]}
+p = os.path.join(src, name)
+doc = json.load(open(p, encoding="utf-8"))
+changed = False
+for e in doc[key]:
+    new = pushed.get(e["name"], "")
+    if new and e.get("id") != new:
+        print(f"  {name}: {e['name']} id -> {new}")
+        e["id"] = new; changed = True
+if changed:
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False); fh.write("\n")
+    print(f"  ✔ {name} updated — COMMIT THIS even if the agent push below fails,")
+    print(f"    or the next run creates duplicate tools.")
+PY
+
 echo "▶ wiring tool ids into the agent"
-python3 - "$WORK" <<'PY'
+python3 - "$WORK" <<'PY' || exit 1
 import json, os, sys
 work = sys.argv[1]
-tools = json.load(open(os.path.join(work, "tools.json"), encoding="utf-8"))
-ids = [t["id"] for t in tools["tools"] if t.get("id")]
-if len(ids) != len(tools["tools"]):
-    sys.exit("✗ not every tool has an id after push; refusing to push an agent "
-             "that would be missing a tool it depends on")
+tools = json.load(open(os.path.join(work, "tools.json"), encoding="utf-8"))["tools"]
+ids = [t.get("id") for t in tools]
+if not all(ids):
+    sys.exit("✗ a tool has no id after push; refusing to push an agent missing a "
+             "tool it depends on")
+# Identity, not arity: two entries carrying the SAME id passed a length check
+# while leaving the agent bound to one tool instead of two.
+if len(set(ids)) != len(tools):
+    sys.exit(f"✗ tool ids are not distinct ({ids}); the agent would be bound to "
+             f"fewer tools than it needs")
 agents = json.load(open(os.path.join(work, "agents.json"), encoding="utf-8"))
 p = os.path.join(work, agents["agents"][0]["config"])
 cfg = json.load(open(p, encoding="utf-8"))
@@ -93,30 +159,26 @@ print(f"  tool_ids = {ids}")
 PY
 
 echo "▶ pushing agent"
-( cd "$WORK" && npx -y "@elevenlabs/cli@${CLI_VERSION}" agents push )
+( cd "$WORK" && el agents push ) || { echo "✗ agent push failed (tool ids were already recorded)" >&2; exit 1; }
 
-echo "▶ writing assigned ids back into the tracked index files"
-python3 - "$WORK" "$SRC" <<'PY'
+echo "▶ recording agent id"
+python3 - "$WORK" "$SRC" agents.json agents <<'PY' || exit 1
 import json, os, sys
-work, src = sys.argv[1], sys.argv[2]
-for name, key in (("tools.json", "tools"), ("agents.json", "agents")):
-    pushed = {e["name"]: e.get("id", "") for e in json.load(open(os.path.join(work, name), encoding="utf-8"))[key]}
-    p = os.path.join(src, name)
-    doc = json.load(open(p, encoding="utf-8"))
-    changed = False
-    for e in doc[key]:
-        new = pushed.get(e["name"], "")
-        if new and e.get("id") != new:
-            print(f"  {name}: {e['name']} id -> {new}")
-            e["id"] = new
-            changed = True
-    if changed:
-        with open(p, "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
+work, src, name, key = sys.argv[1:5]
+pushed = {e["name"]: e.get("id", "") for e in json.load(open(os.path.join(work, name), encoding="utf-8"))[key]}
+p = os.path.join(src, name)
+doc = json.load(open(p, encoding="utf-8"))
+changed = False
+for e in doc[key]:
+    new = pushed.get(e["name"], "")
+    if new and e.get("id") != new:
+        print(f"  {name}: {e['name']} id -> {new}")
+        e["id"] = new; changed = True
+if changed:
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False); fh.write("\n")
 PY
 
 echo
-echo "✓ provisioned. Commit the id changes in integrations/elevenlabs/*.json so the"
-echo "  next run updates these agents instead of creating duplicates."
-echo "  The secret was only ever in a temp copy, now deleted."
+echo "✓ provisioned. Commit the id changes in integrations/elevenlabs/*.json."
+echo "  The secret existed only in a temp copy, now deleted."
