@@ -59,6 +59,17 @@ export const CANNOT_HEAR_REPLY = "I can't listen to voice notes yet — could yo
 export const AUDIO_IGNORED_NOTE =
   "(I answered your typed message — I can't listen to voice notes yet, so I skipped the audio.)";
 
+/** Ceiling on an ADVISORY post.
+ *
+ *  The skipped-audio note is a courtesy; the typed turn is the product. Awaiting
+ *  it unbounded let a stalled channel request suppress a perfectly valid message
+ *  indefinitely — feedback holding the product hostage. That is the THIRD time
+ *  this exact shape appeared in this work (BRO-2256 awaited a status reaction on
+ *  the dispatch path, then let a never-settling one block the terminal status),
+ *  which is why the bound is stated as a named constant rather than fixed in
+ *  place: the rule is that no advisory call may gate a turn. (P20 round 2.) */
+export const ADVISORY_POST_TIMEOUT_MS = 5_000;
+
 /** The minimum a thread must do for a reply to reach the sender. */
 export interface AnswerableThread {
   readonly id: string;
@@ -87,24 +98,59 @@ export async function textToDispatch(
   thread: AnswerableThread,
   message: IncomingMessage,
   log: { warn(m: string): void } = { warn: (m) => console.warn(m) },
+  advisoryTimeoutMs: number = ADVISORY_POST_TIMEOUT_MS,
 ): Promise<string | undefined> {
   const typed = message.text?.trim();
   const note = findVoiceNote(message.attachments ?? []);
 
   if (typed && note) {
-    // Both. Dispatch the text, but SAY that the audio was skipped.
+    // Both. Dispatch the text, and SAY the audio was skipped — but never let
+    // saying so delay the answer by more than ADVISORY_POST_TIMEOUT_MS.
     log.warn(`[genesis-bot] ${thread.id}: answered typed text, skipped an attached voice note`);
-    await thread
-      .post(AUDIO_IGNORED_NOTE)
-      .catch((e) => log.warn(`[genesis-bot] could not note the skipped audio: ${e}`));
+    await bounded(
+      thread.post(AUDIO_IGNORED_NOTE).catch((e) => {
+        log.warn(`[genesis-bot] could not note the skipped audio: ${e}`);
+      }),
+      advisoryTimeoutMs,
+    );
     return typed;
   }
   if (typed) return typed;
   if (!note) return undefined;
 
   log.warn(`[genesis-bot] ${thread.id}: voice note received, no transcription backend configured`);
-  await thread
-    .post(CANNOT_HEAR_REPLY)
-    .catch((e) => log.warn(`[genesis-bot] could not answer a voice note: ${e}`));
+  // Bounded for the same reason as the caption path. Review flagged only the
+  // mixed-message case, but the defect was at BOTH sites — a fix landing at one
+  // of two reachable call sites is a recurring failure in this repo, and the
+  // second was found by writing the polarity test rather than by the review.
+  await bounded(
+    thread.post(CANNOT_HEAR_REPLY).catch((e) => {
+      log.warn(`[genesis-bot] could not answer a voice note: ${e}`);
+    }),
+    advisoryTimeoutMs,
+  );
   return undefined;
+}
+
+/** Await `p`, or give up after `ms`. Never rejects and never rethrows: an
+ *  advisory post that stalls is abandoned, exactly like one that fails.
+ *
+ *  Abandoning is not cancelling — the request is still on the wire and may
+ *  still land. That is fine HERE, unlike for a status reaction, because this
+ *  note carries no state: arriving late makes it redundant, not wrong. */
+async function bounded(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      p,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+        (timer as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  } catch {
+    // abandoned
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

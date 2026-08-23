@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ADVISORY_POST_TIMEOUT_MS,
   AUDIO_IGNORED_NOTE,
   type AudioAttachment,
   CANNOT_HEAR_REPLY,
@@ -81,6 +82,31 @@ describe("textToDispatch — nothing involving audio is ever silent", () => {
     const { posts, t } = recordingThread();
     expect(await textToDispatch(t, { text: "  ", attachments: [audio()] }, quiet)).toBeUndefined();
     expect(posts).toEqual([CANNOT_HEAR_REPLY]);
+  });
+
+  test("a STALLED advisory post cannot hold back the typed answer", async () => {
+    // Third occurrence of this shape in one arc: an advisory feedback call
+    // gating the product. The typed message is the product; the skipped-audio
+    // note is a courtesy and must never be able to withhold it.
+    const t = {
+      id: "kapso:a:b",
+      post: () => new Promise<void>(() => {}), // never settles
+    };
+    const started = Date.now();
+    const out = await textToDispatch(t, { text: "urgent", attachments: [audio()] }, quiet, 40);
+    expect(out).toBe("urgent");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("the advisory bound is a real constant, not an accident", () => {
+    expect(ADVISORY_POST_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  test("a stalled refusal post also cannot hang an audio-only turn", async () => {
+    const t = { id: "kapso:a:b", post: () => new Promise<void>(() => {}) };
+    const started = Date.now();
+    expect(await textToDispatch(t, { attachments: [audio()] }, quiet, 40)).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   test("a failing post never throws the turn", async () => {
