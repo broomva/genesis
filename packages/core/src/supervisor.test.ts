@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunResult } from "@genesis/runner";
+import { STACK_AGENTS } from "./agent-stack";
 import { InMemoryStore } from "./store";
 import {
   Supervisor,
@@ -913,6 +914,46 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(second.id).toBe("ws-proj"); // the existing id, not the new one
     expect(second).toEqual(first);
     expect((await sup.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-proj"]);
+  });
+
+  test("registerWorkspace seeds the agent stack into a workspace that exists on disk (BRO-2252)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "genesis-sup-seed-"));
+    const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
+    await sup.registerWorkspace({ id: "ws-seed", name: "seed", rootPath: root });
+    for (const a of STACK_AGENTS) {
+      expect(existsSync(join(root, ".claude", "agents", `${a.name}.md`))).toBe(true);
+    }
+  });
+
+  // The NEGATIVE half, and the reason the guard is the real existsSync rather
+  // than the injectable probe: a test that fakes `workspaceExists` for a path
+  // like /repos/live must not cause a real mkdir at the filesystem root.
+  test("registerWorkspace does NOT seed a rootPath that is not on this filesystem (BRO-2252)", async () => {
+    const seen: string[] = [];
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaceExists: () => true, // lies, as the existing tests do
+      run: fakeRunner("x"),
+      stackSeeder: (rootPath) => seen.push(rootPath),
+    });
+    await sup.registerWorkspace({ id: "ws-remote", name: "remote", rootPath: "/repos/remote" });
+    expect(seen).toEqual([]);
+  });
+
+  // A seeder that throws must not fail the registration: a workspace with no
+  // seeded agents still works, one that failed to register does not.
+  test("registerWorkspace survives a seeder that throws (BRO-2252)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "genesis-sup-seedfail-"));
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: fakeRunner("x"),
+      stackSeeder: () => {
+        throw new Error("disk full");
+      },
+    });
+    const saved = await sup.registerWorkspace({ id: "ws-bad", name: "bad", rootPath: root });
+    expect(saved.id).toBe("ws-bad");
+    expect((await sup.listWorkspaces()).map((w) => w.id)).toContain("ws-bad");
   });
 
   test("registerWorkspace rejects the reserved default id (BRO-1629)", async () => {

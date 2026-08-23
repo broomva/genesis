@@ -25,6 +25,7 @@ import {
   removeWorktree,
   runAgent,
 } from "@genesis/runner";
+import { seedAgentStack } from "./agent-stack";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, TokenUsage, Turn, Workspace } from "./types";
 import { InMemoryWorkspaceRepository, type WorkspaceRepository } from "./workspace-repository";
@@ -132,6 +133,10 @@ export interface SupervisorConfig {
    *  Default: `existsSync`. Injected in tests so fake rootPaths don't trip the
    *  vanished-workspace guard (which is enforced only for LOCAL hosts). */
   workspaceExists?: (rootPath: string) => boolean;
+  /** Seed a newly registered workspace's `.claude/agents` with the bstack agent
+   *  stack (BRO-2252). Default: {@link seedAgentStack}. Injected in tests so the
+   *  call can be asserted without touching a real filesystem. */
+  stackSeeder?: (rootPath: string) => void;
 }
 
 export interface DispatchResult {
@@ -294,6 +299,8 @@ export class Supervisor {
   /** Workspace ids already warned about as missing-on-disk — dedupes the
    *  reconciliation warning across registry reloads (BRO-1630 P20 #4). */
   private readonly warnedMissingWorkspaces = new Set<string>();
+  /** Agent-stack seeder (BRO-2252); the real filesystem writer in production. */
+  private readonly stackSeeder: (rootPath: string) => void;
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
@@ -316,6 +323,11 @@ export class Supervisor {
     this.remoteCwd = cfg.remoteCwd;
     this.noWorktree = cfg.noWorktree ?? false;
     this.workspaceExists = cfg.workspaceExists ?? existsSync;
+    this.stackSeeder =
+      cfg.stackSeeder ??
+      ((rootPath: string) => {
+        seedAgentStack(rootPath);
+      });
     this.defaultWorkspace = cfg.defaultWorkspace;
     // Build the env-derived SEED (BRO-1627 order preserved): default first, then the
     // boot-discovered workspaces (a later extra with the same id wins). The default
@@ -439,6 +451,38 @@ export class Supervisor {
     return this.workspaceEnsured;
   }
 
+  /** Ensure a newly registered workspace comes up already holding the bstack
+   *  agent stack in `.claude/agents` (BRO-2252). Measured: `claude -p` discovers
+   *  project-level agent files, so this is the difference between a workspace
+   *  that knows the discipline and one that must be told it inline every turn.
+   *
+   *  GUARDED ON LOCAL EXISTENCE, deliberately. The seeder is `node:fs` — it
+   *  assumes the workspace root is on THIS filesystem. True for LocalHost, false
+   *  for the phase-2 microVM substrate, where writing here would silently create
+   *  a directory on the VPS that the tenant's real host never sees.
+   *
+   *  The guard is the REAL `existsSync`, NOT the injected `this.workspaceExists`.
+   *  That injection exists so tests can assert "yes" for fake rootPaths like
+   *  `/repos/live` and bypass the vanished-workspace guard — which is exactly
+   *  the lie that must not reach a function doing real `mkdirSync`. Honouring it
+   *  here would have any such test create directories at the filesystem root.
+   *  A caller who wants to observe the seed injects `stackSeeder` instead.
+   *
+   *  NEVER THROWS. A workspace with no seeded agents is a working workspace; a
+   *  registration that fails because a markdown file could not be written is not.
+   *  Loud on stderr rather than silent — a stack that did not land is precisely
+   *  the state where "we rolled it out" and "it is running" disagree. */
+  private seedStack(ws: Workspace): void {
+    if (!existsSync(ws.rootPath)) return;
+    try {
+      this.stackSeeder(ws.rootPath);
+    } catch (e) {
+      console.error(
+        `[genesis] could not seed the agent stack into ${ws.rootPath}/.claude/agents (${e instanceof Error ? e.message : e}) — the workspace is registered and usable, but its sessions start without the stack.`,
+      );
+    }
+  }
+
   /** Register a workspace at RUNTIME (BRO-1629) — writes the source + refreshes the
    *  live cache, no restart. The caller (an auth-gated endpoint) MUST derive +
    *  validate `rootPath` server-side; the client never names a filesystem path. */
@@ -457,6 +501,7 @@ export class Supervisor {
     // gap review reasoned around by assuming exactly-once submission.)
     const existing = [...this.workspaceRegistry.values()].find((w) => w.rootPath === ws.rootPath);
     if (existing) return existing;
+    this.seedStack(ws);
     const saved = await this.workspaceRepository.register(ws);
     await this.refreshRegistry();
     return saved;

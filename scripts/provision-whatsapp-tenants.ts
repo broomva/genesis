@@ -32,6 +32,7 @@ import {
   policyOf,
   webFetchRulesFor,
 } from "../apps/chat-bot/src/tenants";
+import { STACK_AGENTS, seedAgentStack } from "../packages/core/src/agent-stack";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -292,6 +293,29 @@ for (const t of tenants) {
     chownSync(join(claudeDir, protectedPath), 0, AGENT_GID);
     execFileSync("/bin/chmod", ["1775", join(claudeDir, protectedPath)]);
   }
+
+  // Seed the bstack agent stack (BRO-2252). Until now `.claude/agents` was
+  // created EMPTY, purely so bubblewrap could bind its read-only placeholder,
+  // and every tenant session started with only the default agent set.
+  //
+  // root:root 0444, inside the sticky 1775 directory above: the tenant can still
+  // author its OWN agents (that is what BRO-2245 opened `agents/` and `skills/`
+  // for) but cannot rewrite the operator's. This is a durability property, not a
+  // security boundary — an agent file is prompt-level content and can only
+  // narrow within what settings.json already allows. The two files that DO gate
+  // capability are denied and root-owned separately, below.
+  //
+  // Non-clobbering by default: a re-provision must not silently delete a tenant
+  // agent that happens to share a name. A shadowing name is reported instead.
+  const seeded = seedAgentStack(t.dir, {
+    ownership: { uid: 0, gid: 0, mode: 0o444 },
+  });
+  for (const path of seeded.skipped) {
+    console.warn(
+      `    SHADOWED ${path} — a tenant-authored agent holds this name; the stack version was NOT written. Re-run with the file removed to restore it.`,
+    );
+  }
+
   writeFileSync(settingsPath, settingsFor(t.dir, t.record));
 
   // settings.local.json is PROJECT-LOCAL settings — precedence level 3, ABOVE
@@ -353,6 +377,26 @@ for (const t of tenants) {
       `  WRITABLE-BY-TENANT ${settingsPath} (uid=${st.uid}, mode=${mode.toString(8)}) — the agent could disable its own sandbox. Re-run as root.`,
     );
     bad++;
+    continue;
+  }
+  // The stack landed, and landed root-owned (BRO-2252). Checking existence alone
+  // would pass on a tenant-authored file of the same name that shadowed it — the
+  // exact case the seeder refuses to overwrite and reports. This is a WARNING,
+  // not a `bad++`: a missing agent file degrades a session, it does not
+  // un-confine one, and failing the whole provision over prompt-level content
+  // would block a security re-provision on a cosmetic problem.
+  for (const agent of STACK_AGENTS) {
+    const agentPath = join(t.dir, ".claude/agents", `${agent.name}.md`);
+    if (!existsSync(agentPath)) {
+      console.warn(`  MISSING-AGENT ${agentPath} — sessions start without \`${agent.name}\`.`);
+      continue;
+    }
+    const ast = statSync(agentPath);
+    if (ast.uid !== 0 || (ast.mode & 0o222) !== 0) {
+      console.warn(
+        `  TENANT-OWNED-AGENT ${agentPath} (uid=${ast.uid}, mode=${(ast.mode & 0o777).toString(8)}) — this is the tenant's own file, not the seeded stack.`,
+      );
+    }
   }
 }
 if (bad > 0) {
