@@ -15,6 +15,7 @@ import {
   setPolicy,
   suspend,
   webFetchHost,
+  webFetchRulesFor,
 } from "./tenants";
 
 const b64 = (v: string) => Buffer.from(v, "utf8").toString("base64url");
@@ -252,5 +253,14 @@ describe("policy tier and the egress set", () => {
   test("the WebFetch rule names a host, never a literal wildcard", () => {
     expect(webFetchHost("*.skills.sh")).toBe("skills.sh");
     expect(webFetchHost("github.com")).toBe("github.com");
+  });
+
+  test("WebFetch rules are de-duplicated after the wildcard is stripped", () => {
+    // The base set carries BOTH `skills.sh` and `*.skills.sh` — two sandbox
+    // rules that collapse to one permission rule. Emitted verbatim, the
+    // generated settings.json carried `WebFetch(domain:skills.sh)` twice.
+    const rules = webFetchRulesFor(rec());
+    expect(new Set(rules).size).toBe(rules.length);
+    expect(rules.filter((r) => r === "WebFetch(domain:skills.sh)")).toHaveLength(1);
   });
 });

@@ -181,6 +181,19 @@ export function webFetchHost(domain: string): string {
   return domain.startsWith("*.") ? domain.slice(2) : domain;
 }
 
+/** The `WebFetch(domain:)` rules for a tenant, DE-DUPLICATED.
+ *
+ *  Stripping the wildcard collapses entries: `*.skills.sh` and `skills.sh` are
+ *  two distinct sandbox rules and one permission rule. Mapping without a
+ *  de-dupe emitted `WebFetch(domain:skills.sh)` twice into every settings file
+ *  — harmless to the matcher, but it makes a security-relevant file look
+ *  hand-edited and it grows with each such pair. */
+export function webFetchRulesFor(t: TenantRecord): string[] {
+  return [...new Set(egressDomainsFor(t).map(webFetchHost))]
+    .sort()
+    .map((h) => `WebFetch(domain:${h})`);
+}
+
 /** A label: alphanumeric with interior hyphens, 1-63 chars, per RFC 1035. */
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 

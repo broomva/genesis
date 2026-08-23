@@ -30,7 +30,7 @@ import {
   type TenantRecord,
   egressDomainsFor,
   policyOf,
-  webFetchHost,
+  webFetchRulesFor,
 } from "../apps/chat-bot/src/tenants";
 
 const dryRun = process.argv.includes("--dry-run");
@@ -133,7 +133,7 @@ function settingsFor(dir: string, tenant: TenantRecord): string {
         // Emitted even at the `trusted` tier, where allow rules are inert, so
         // that flipping a tenant back to `confined` does not silently revoke
         // domains an operator already said yes to.
-        allow: ["WebSearch", ...domains.map((d) => `WebFetch(domain:${webFetchHost(d)})`)],
+        allow: ["WebSearch", ...webFetchRulesFor(tenant)],
         // Deny rules block in EVERY mode, so these survive a future operator
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
