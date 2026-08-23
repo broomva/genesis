@@ -113,6 +113,29 @@ function settingsFor(dir: string): string {
           "Read(//home/agent/.aws/**)",
           "Read(//home/agent/.config/**)",
           "Read(//home/agent/.claude/**)",
+          // The sandbox denyRead below covers Bash. It does NOT cover the
+          // built-in file tools, which run inside the Claude Code process --
+          // so for Read/Glob/Grep, THIS list is the whole boundary, and it
+          // named none of the things actually worth protecting.
+          //
+          // What stood in for a rule was an emergent property: "an out-of-cwd
+          // read fails closed under `claude -p`". That is not uniform on this
+          // box. Out-of-cwd Read has succeeded here twice, under a
+          // configuration that no longer exists to inspect. An emergent
+          // behaviour nobody configured is not a control, and the eval had
+          // eleven Bash cases and zero file-tool cases, so nothing would have
+          // caught it changing.
+          //
+          // Still a blocklist, with the weakness this file already names two
+          // comments down: anything unnamed stays readable. These are the
+          // named-and-known ones. A sibling tenant cannot be denied by prefix
+          // without denying the tenant's own directory, so that gap stays open
+          // for the file-tool channel and is measured by the eval instead.
+          "Read(//home/agent/broomva/**)",
+          "Read(//home/agent/genesis/**)",
+          "Read(//home/agent/*.env)",
+          "Grep(//home/agent/broomva/**)",
+          "Grep(//home/agent/genesis/**)",
           `Edit(//${dir.replace(/^\//, "")}/.claude/**)`,
           `Write(//${dir.replace(/^\//, "")}/.claude/**)`,
         ],
