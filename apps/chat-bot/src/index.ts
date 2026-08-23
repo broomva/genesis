@@ -36,6 +36,7 @@ import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { createKapsoAdapter } from "@kapso/chat-adapter";
 import { Chat, type Logger, type StateAdapter } from "chat";
 import { type ChannelConfig, principalOf, startupGateFor } from "./allowlist";
+import { FeedbackBudget } from "./feedback-budget";
 import { botStateFile, createFileState } from "./file-state";
 import {
   type HandlerOptions,
@@ -212,6 +213,14 @@ const chat = kapsoAdapter
  *  progress by streaming the reply in place; adding reactions there would be a
  *  second, redundant status channel. This exists because WhatsApp has no edit
  *  and a reaction is its only mutable surface. */
+// ONE budget per process, shared by every thread and both channels — the limit
+// it models is per API key and project-wide, so a per-thread limiter would not
+// see the concurrency that actually exhausts it. Replies never consult it;
+// only typing indicators and status reactions do. (P20 round 2, BLOCKER.)
+const feedbackBudget = new FeedbackBudget(
+  Number(process.env.GENESIS_FEEDBACK_RPM ?? "") || undefined,
+);
+
 function turnSignalsFor(threadId: string, messageId: string): TurnSignals | undefined {
   if (!kapsoAdapter || !threadId.startsWith("kapso:") || !messageId) return undefined;
   return {
@@ -302,8 +311,8 @@ function dispatchOptions(threadId: string): HandlerOptions | undefined {
   // (Chat SDK streams via post-then-edit). Buffer it instead.
   const streaming = !threadId.startsWith("kapso:");
   return decision.kind === "pin"
-    ? { baseUrl, token, workspaceId: decision.workspaceId, streaming }
-    : { baseUrl, token, streaming };
+    ? { baseUrl, token, workspaceId: decision.workspaceId, streaming, feedbackBudget }
+    : { baseUrl, token, streaming, feedbackBudget };
 }
 
 // DMs: `onDirectMessage` fires for EVERY direct message regardless of

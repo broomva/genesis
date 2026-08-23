@@ -60,6 +60,18 @@ export interface HandlerOptions {
    *  "both get one" — the mutation sweep proved it by SURVIVING removal of the
    *  buffered gate. Shrinking the interval is what makes the claim falsifiable. */
   typingRearmMs?: number;
+  /** Shared, reply-prioritised budget for FEEDBACK requests only.
+   *
+   *  One instance per API key, shared across every thread — the limit it models
+   *  is project-wide, so a per-turn or per-thread limiter would not see the
+   *  concurrency that actually exhausts it. Replies never consult it. */
+  feedbackBudget?: FeedbackClaim;
+}
+
+/** The slice of FeedbackBudget the handler needs. Narrow on purpose: the
+ *  handler must be able to DROP feedback, never to queue or retry it. */
+export interface FeedbackClaim {
+  tryClaim(): boolean;
 }
 
 /** WhatsApp's text body cap — a hard protocol limit. A body above it is
@@ -175,12 +187,22 @@ export const TYPING_MAX_MS = 5 * 60_000;
  *  mutation sweep caught it by SURVIVING its removal. `clearInterval` means no
  *  timer callback can run again and `fire()` has no other caller, so the guard
  *  was unreachable; and a `markRead` already on the wire cannot be unsent by
- *  any flag. What actually bounds a late indicator is that WhatsApp dismisses
- *  it on our next send, which the reply performs anyway. */
+ *  any flag.
+ *
+ *  KNOWN RESIDUE, not fixed because it is not fixable here (P20 round 2
+ *  re-raised it and I am recording it rather than claiming otherwise): a
+ *  re-arm issued microseconds before the reply can still land after it, showing
+ *  "typing" on an answered conversation. Nothing in this process can recall an
+ *  in-flight request, and WhatsApp exposes no stop-typing call — only `markRead`
+ *  with an indicator, never without. The exposure is bounded: WhatsApp drops the
+ *  indicator ~25s later on its own, and our next send drops it sooner. It is a
+ *  cosmetic wart with a ceiling, not a stuck state, and it is stated here so the
+ *  next reader does not mistake its absence for an oversight. */
 export function keepTyping(
   thread: PostableThread,
   rearmMs: number = TYPING_REARM_MS,
   maxMs: number = TYPING_MAX_MS,
+  budget?: FeedbackClaim,
 ): () => void {
   if (!thread.startTyping) return () => {};
   let inFlight = false;
@@ -194,6 +216,9 @@ export function keepTyping(
       stop();
       return;
     }
+    // DROP, never queue. Delaying an indicator until budget frees up would
+    // deliver "typing" after the answer, which is worse than skipping it.
+    if (budget && !budget.tryClaim()) return;
     inFlight = true;
     void thread
       .startTyping?.()
@@ -488,14 +513,37 @@ export async function handleAgentMessage(
   const buffered = opts.streaming === false;
   let stopTyping = () => {};
   if (buffered) {
-    stopTyping = keepTyping(thread, opts.typingRearmMs);
+    stopTyping = keepTyping(thread, opts.typingRearmMs, undefined, opts.feedbackBudget);
   } else {
     // Streaming channels keep the pre-existing single indicator: the stream
     // IS the progress display, so there is nothing for a keep-alive to add.
     // No longer awaited, so a hung indicator cannot stall the turn behind it.
-    void thread.startTyping?.().catch(() => {});
+    if (!opts.feedbackBudget || opts.feedbackBudget.tryClaim()) {
+      void thread.startTyping?.().catch(() => {});
+    }
   }
-  void signals?.setStatus?.("working").catch(() => {});
+  // Statuses are SEQUENCED through one chain, not fired independently.
+  //
+  // Making "working" fire-and-forget removed it from the critical path, but
+  // opened a race: two independent promises can resolve out of order, so a slow
+  // "working" landing after "done" leaves the reaction permanently stuck on 👀
+  // — a status that says the turn never finished, on a turn that did. That is
+  // worse than the latency it was trading away. Chaining preserves order while
+  // still not blocking dispatch: only the FINAL status is awaited, by which
+  // point "working" has long since gone out. (P20 round 2, MAJOR.)
+  let statusChain: Promise<void> = Promise.resolve();
+  const setStatus = (status: TurnStatus): Promise<void> => {
+    statusChain = statusChain
+      .then(() => {
+        if (opts.feedbackBudget && !opts.feedbackBudget.tryClaim()) return;
+        return signals?.setStatus?.(status);
+      })
+      .then(() => {})
+      .catch(() => {});
+    return statusChain;
+  };
+
+  void setStatus("working");
   try {
     const stream = genesisStream({
       baseUrl: opts.baseUrl,
@@ -525,7 +573,7 @@ export async function handleAgentMessage(
     } else {
       await thread.post(stream);
     }
-    await signals?.setStatus?.("done").catch(() => {});
+    await setStatus("done");
   } catch (e) {
     if (isOutsideServiceWindow(e)) {
       // Distinct from an ordinary dispatch failure, and deliberately not
@@ -539,7 +587,7 @@ export async function handleAgentMessage(
       return;
     }
     console.error("[genesis-bot] dispatch failed", e);
-    await signals?.setStatus?.("failed").catch(() => {});
+    await setStatus("failed");
     await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
   } finally {
     stopTyping();

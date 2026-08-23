@@ -685,3 +685,76 @@ describe("chunkForWhatsapp — fractional limits", () => {
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(4);
   });
 });
+
+describe("P20 round 2 — status ordering and the shared budget", () => {
+  test("a SLOW 'working' can never land after 'done'", async () => {
+    // The race introduced by making 'working' fire-and-forget: two independent
+    // promises can resolve out of order, leaving the reaction stuck on 👀 —
+    // a status claiming the turn never finished, on a turn that did.
+    const applied: TurnStatus[] = [];
+    const signals = {
+      async setStatus(s: TurnStatus) {
+        if (s === "working") await new Promise((r) => setTimeout(r, 30));
+        applied.push(s);
+      },
+    };
+    const thread = mockThread("kapso:a:b");
+    await handleAgentMessage(
+      thread,
+      "hello",
+      { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
+      signals,
+    );
+    expect(applied).toEqual(["working", "done"]);
+    expect(applied.at(-1)).toBe("done"); // the visible status when it settles
+  });
+
+  test("an exhausted budget drops FEEDBACK but still delivers the REPLY", async () => {
+    // Drop-first is the whole point: under quota pressure the indicator and the
+    // reaction are what get sacrificed, never the answer.
+    const applied: TurnStatus[] = [];
+    const thread = mockThread("kapso:a:b");
+    await handleAgentMessage(
+      thread,
+      "hello",
+      {
+        baseUrl: "https://x",
+        fetchImpl: okFetch("the answer"),
+        streaming: false,
+        feedbackBudget: { tryClaim: () => false },
+      },
+      {
+        async setStatus(s: TurnStatus) {
+          applied.push(s);
+        },
+      },
+    );
+    expect(thread.posts).toEqual(["the answer"]); // reply survives
+    expect(applied).toEqual([]); // feedback dropped
+    expect(thread.typingCount).toBe(0);
+  });
+
+  test("an available budget lets feedback through", async () => {
+    // Polarity partner: without it, a budget wired to always-deny would pass
+    // the test above while disabling the feature entirely.
+    const applied: TurnStatus[] = [];
+    const thread = mockThread("kapso:a:b");
+    await handleAgentMessage(
+      thread,
+      "hello",
+      {
+        baseUrl: "https://x",
+        fetchImpl: okFetch("the answer"),
+        streaming: false,
+        feedbackBudget: { tryClaim: () => true },
+      },
+      {
+        async setStatus(s: TurnStatus) {
+          applied.push(s);
+        },
+      },
+    );
+    expect(applied).toEqual(["working", "done"]);
+    expect(thread.typingCount).toBeGreaterThan(0);
+  });
+});
