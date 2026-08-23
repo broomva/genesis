@@ -68,7 +68,10 @@ echo "eval-lock mutation sweep"
 echo
 
 # THE one that matters: drop O_EXCL and exclusion is gone.
-run_mutant "wx -> w (drops O_EXCL)"        'flag: "wx"'                         'flag: "w"'                          KILLED
+# Anchored on the full options object: the bare string `flag: "wx"` also appears
+# in this file's header comment, and the uniqueness guard correctly refused to run
+# an ambiguous mutant rather than silently patching prose and reporting SURVIVED.
+run_mutant "wx -> w (drops O_EXCL)"        '{ flag: "wx", mode: 0o644 }'        '{ flag: "w", mode: 0o644 }'         KILLED
 run_mutant "EPERM read as dead"            '=== "EPERM"'                        '=== "ESRCH"'                        KILLED
 run_mutant "release ignores ownership"     'if (held?.nonce !== record.nonce) return false;' 'if (false) return false;' KILLED
 run_mutant "never yields to a live holder" 'if (!alive(record.pid)) return false;' 'if (alive(record.pid)) return false;' KILLED
