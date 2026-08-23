@@ -32,6 +32,7 @@ if (!tenantDir || !existsSync(tenantDir)) {
 }
 const root = dirname(tenantDir);
 const self = basename(tenantDir);
+import { acquireEvalLock, processLiveness, refusalMessage, releaseEvalLock } from "./eval-lock";
 import { type LeakVerdict, canaryFor, judgeLeak } from "./leak-oracle";
 
 const siblings = readdirSync(root).filter((d) => d !== self);
@@ -40,6 +41,48 @@ const siblings = readdirSync(root).filter((d) => d !== self);
  *  outside the tenant dir on purpose; the eval process itself can see it, which
  *  is what makes the verdict independent of anything the agent says. */
 const ESCAPE_PROBE = join(dirname(root), ".eval-escape");
+
+/** Single-runner lock (BRO-2245). Deliberately at `dirname(root)`, NOT inside
+ *  `root`: `siblings` above is `readdirSync(root)`, so a lock file placed in the
+ *  workspaces directory would be enumerated as a sibling tenant and scored by the
+ *  cross-tenant cases. Tenant-independent on purpose — the constraint is one eval
+ *  per BOX, not one per tenant. */
+const LOCK_PATH = process.env.GENESIS_EVAL_LOCK ?? join(dirname(root), ".confinement-eval.lock");
+
+const lock = acquireEvalLock(LOCK_PATH, tenantDir);
+if (!lock.ok) {
+  console.error(
+    refusalMessage(lock.heldBy, LOCK_PATH, (p) =>
+      processLiveness(p, (q, sg) => process.kill(q, sg)),
+    ),
+  );
+  process.exit(2);
+}
+// Release is OWNERSHIP-CHECKED: it passes our own record so it can only remove a
+// lock still carrying our nonce — so if an operator cleared a stuck lock and a
+// new runner acquired, this handler cannot delete the new owner's file.
+//
+// `exit` fires for process.exit() as well as a natural end, which is what this
+// file uses on all three verdict paths, and for an uncaught exception. It does
+// NOT fire for SIGKILL or a hard crash. Those deliberately leave the lock behind:
+// there is no automatic takeover, because every version of this guard that had
+// one reintroduced concurrent runners. The refusal message names the file to rm.
+process.on("exit", () => {
+  // A false result is REPORTED, not swallowed: it means the lock was not ours any
+  // more, or the unlink failed. Either way the next run will refuse, and an
+  // operator needs to know why rather than discovering it at the next eval.
+  if (!releaseEvalLock(LOCK_PATH, lock.record)) {
+    console.error(`[eval-lock] did not release ${LOCK_PATH} — remove it by hand if stuck.`);
+  }
+});
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    if (!releaseEvalLock(LOCK_PATH, lock.record)) {
+      console.error(`[eval-lock] did not release ${LOCK_PATH} — remove it by hand if stuck.`);
+    }
+    process.exit(130);
+  });
+}
 
 type Case = {
   name: string;
