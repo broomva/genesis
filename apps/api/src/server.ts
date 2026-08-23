@@ -15,6 +15,15 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import {
+  type DeliverablePrincipal,
+  type VoiceTicket,
+  VoiceValidationError,
+  buildTicket,
+  readCallerId,
+  resolveCaller,
+  secretMatches,
+} from "./voice";
 import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
@@ -24,6 +33,7 @@ import {
   readWorkspaceFileRaw,
 } from "./workspace-fs";
 import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
+
 import {
   WorkspaceValidationError,
   availableWorkspaces,
@@ -74,6 +84,25 @@ export interface BuildOpts {
   /** Alternate runner (e.g. the exempt interactive engine, BRO-1488). Omit →
    *  the default print engine (`runAgent`, `claude -p`). */
   run?: (opts: RunOptions) => Promise<RunResult>;
+  /** Shared secret an ElevenLabs webhook tool presents on /voice/* (BRO-2228).
+   *  OMITTED → the voice routes are NOT REGISTERED AT ALL. Deliberately not
+   *  "registered but open": an unconfigured deploy must 404, not answer. */
+  voiceSecret?: string;
+  /** Numbers the voice channel may deliver an answer to. A caller matching one
+   *  gets follow-up on that number; everyone else can only leave a message. */
+  voicePrincipals?: readonly DeliverablePrincipal[];
+  /** Sink for queued voice work. Must return fast — a caller is on the line.
+   *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
+  enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
+  // NO voiceDelivery OPTION. Three designs failed here and the third failed most
+  // instructively: an env string was an operator assertion, so it became a
+  // {channel, deliver} object — and `deliver` had zero call sites, so passing
+  // `async () => {}` still bought canFollowUp:true. A function-shaped assertion
+  // is still an assertion. Until a consumer genuinely drains the queue (scope
+  // item 4, blocked on #107) the promise is not merely disabled, it is
+  // UNREPRESENTABLE: there is no value any caller of build() can pass to make
+  // this surface offer a follow-up. The option returns together with the code
+  // that honours it. (P20 Strata A, round 4.)
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
@@ -195,6 +224,133 @@ export function build(opts: BuildOpts) {
       // GET /workspaces; /health stays a liveness probe (engine-capability only).
     }),
   );
+
+  // Voice channel (BRO-2228). Registered ONLY with a configured secret, so an
+  // unconfigured deploy 404s instead of exposing an open intake. Nothing here
+  // runs an agent: a caller is on the line and a turn takes 9-30s+.
+  if (opts.voiceSecret) {
+    // A configured channel with no sink used to answer 200 + "I'll follow up"
+    // while storing nothing, because enqueueVoice was optional-chained away.
+    // That is a misconfiguration, not a runtime condition, so it fails at BUILD
+    // rather than silently per-call. (P20 Strata A, round 1.)
+    if (!opts.enqueueVoice) {
+      throw new Error(
+        "voiceSecret is set but enqueueVoice is not: the voice routes would " +
+          "acknowledge requests and discard them. Pass a sink (createVoiceQueue).",
+      );
+    }
+    const enqueueVoice = opts.enqueueVoice;
+    const voicePrincipals = opts.voicePrincipals ?? [];
+    const voiceDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
+      !secretMatches(c.req.header("x-genesis-voice-secret"), opts.voiceSecret ?? "");
+
+    // Who is calling? Unknown is a normal answer, not an error — most callers
+    // are strangers and the agent's correct move for them is to take a message.
+    app.post("/voice/identify", async (c) => {
+      if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // A PARSE FAILURE IS NOT AN UNKNOWN CALLER. Collapsing it to `{}` made the
+      // two indistinguishable: asString(undefined) returns "" rather than throwing,
+      // so callerId became "", resolveCaller said not-known, and a truncated body or
+      // a serialization bug on ElevenLabs' side returned a cheerful 200 {known:false}
+      // — the same answer a stranger gets. A transport fault would have looked like
+      // normal traffic forever.
+      //
+      // `?? {}` is still right for a literal `null` body, which is VALID json, so
+      // .catch() never fires and the dereference below was a 500 on both routes.
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { callerId?: unknown };
+      // SAME validation boundary as /voice/request. Round 1 hardened buildTicket
+      // and left this route casting raw JSON, so the two disagreed about what a
+      // callerId may be: `42` was a 500 here and a 400 there.
+      let callerId: string;
+      try {
+        callerId = readCallerId(body.callerId);
+      } catch (e) {
+        if (e instanceof VoiceValidationError) return c.json({ error: e.message }, 400);
+        throw e;
+      }
+      const r = resolveCaller(callerId, voicePrincipals);
+      // NO NAME. The header of voice.ts states the invariant this route was
+      // breaking: caller id is spoofable, so it is a routing hint and a spoofer
+      // must gain nothing UNBOUNDED. Returning `name` handed an attacker who guessed a
+      // number both "this number is known to the system" and the account
+      // holder's name — information gained, from a claim we never verified.
+      // `known` is what the agent needs to choose take-a-message vs
+      // offer-follow-up. It is NOT free of disclosure — it confirms that the
+      // guessed number is in the configured principal set, which is a real bit an
+      // attacker did not have (an earlier version of this comment claimed
+      // otherwise and was wrong). It is a single bit the caller already
+      // half-asserted by dialing it, and withholding it would make the agent
+      // unable to answer at all; a NAME was unbounded new information and is
+      // gone. Greeting by name needs a second factor (voice.ts
+      // header: "any capability that does NOT have that property ... must not be
+      // added here without a second factor"). (P20 Strata A, round 1.)
+      // canFollowUp requires BOTH a known principal AND a wired delivery leg.
+      // canFollowUp is FALSE, unconditionally, because nothing can deliver. This
+      // is the answer the agent uses to decide whether to offer a follow-up at
+      // all, so a stale `true` here re-created the impossible promise through the
+      // door round 1 left open after gating /voice/request alone.
+      return c.json(
+        r.kind === "known"
+          ? { known: true, canFollowUp: false }
+          : { known: false, canFollowUp: false },
+      );
+    });
+
+    // Queue work and RETURN. When a delivery leg exists the answer goes to the
+    // number ON FILE — which is what makes a spoofed caller id useless rather
+    // than dangerous. None exists yet, so this records the request and promises
+    // nothing; the ticket still carries its deliverTo for the future consumer.
+    app.post("/voice/request", async (c) => {
+      if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // Same reasoning as /voice/identify above: a body that did not PARSE is a
+      // transport fault, not a request with missing fields. Fixing identify alone
+      // would leave the sibling route converting a truncated body into whatever
+      // buildTicket makes of `{}`.
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as {
+        callerId?: unknown;
+        request?: unknown;
+        conversationId?: unknown;
+      };
+      let ticket: VoiceTicket;
+      try {
+        ticket = buildTicket(body, voicePrincipals, new Date().toISOString(), crypto.randomUUID());
+      } catch (e) {
+        // A validation message is caller-safe by construction; anything else is
+        // internal and must not be read out on a phone call.
+        if (e instanceof VoiceValidationError) return c.json({ error: e.message }, 400);
+        throw e;
+      }
+      try {
+        await enqueueVoice(ticket);
+      } catch (e) {
+        console.error(`[genesis] voice enqueue failed: ${e instanceof Error ? e.message : e}`);
+        return c.json({ error: "could not record the request; please try again" }, 503);
+      }
+      return c.json({
+        ticketId: ticket.id,
+        // The agent reads this to the caller, so it must not promise delivery we
+        // cannot make. TWO ways that promise can be false, and only the first was
+        // handled: an unrecognized number has nowhere to follow up TO, and — the
+        // one that shipped — no delivery leg exists to follow up WITH. The work is
+        // still QUEUED; only the promise is withheld. This becomes a real value
+        // again in the same change that adds the consumer. (BRO-2228 scope item 4,
+        // blocked on #107.)
+        followUp: "none",
+      });
+    });
+  }
 
   // Thread session control (BRO-1493): reset (fresh context) / interrupt /
   // status. Slash commands map here, never into the agent TUI.

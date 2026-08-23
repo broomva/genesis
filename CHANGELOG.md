@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased] — Voice channel reaches production (BRO-2228)
+
+### Added
+- **Voice intake for an ElevenLabs phone agent.** `POST /voice/identify` and
+  `POST /voice/request`, guarded by a shared secret in `x-genesis-voice-secret`
+  and compared with a timing-safe equal. Shape is **voice for intake, WhatsApp
+  for delivery**: a Claude Code turn is 9-30s+ (measured on srv1692698) and a
+  caller will not hold, so no handler runs an agent — each answers from state we
+  already have or enqueues and returns.
+- **`GENESIS_VOICE_SECRET` / `GENESIS_VOICE_PRINCIPALS` / `GENESIS_VOICE_QUEUE_DIR`.**
+  Unset secret → the routes are not registered at all (404), never "registered but
+  open". Principals accept `number` or `number:Name`, same grammar as
+  `GENESIS_WHATSAPP_ALLOWED_USERS`.
+
+### Fixed
+- **The voice routes existed in tests and in no deploy.** `voiceSecret`,
+  `voicePrincipals` and `enqueueVoice` were declared on the server options and
+  passed by nothing, so `if (opts.voiceSecret)` never ran. Twenty-five green tests
+  exercised a surface no caller could reach — a gate that never executes. The
+  entrypoint now supplies all three from env. Verified by booting
+  the real entrypoint: with the secret set both routes answer and tickets land in
+  `queue.jsonl`; with it unset both return 404 and no queue directory is created.
+- **A human-formatted principal matched no one.** `resolveCaller` normalizes the
+  presented caller id and compares it to `principal.id` verbatim, so an operator
+  writing the natural `+57 301 775-8620` stored an id nothing could ever match —
+  and it failed *silently*, every caller resolving unknown exactly as a stranger
+  would. Ids are now normalized at parse time.
+
+### Security
+- Caller ID is treated as a **routing hint, never an authorization claim**. It is
+  spoofable; safety comes from delivering only to the number on file, so a spoofer
+  causes the real owner to receive an unrequested reply — a detection, not a
+  breach. Stated precisely: a spoofer does learn ONE bit — whether the guessed
+  number is in the principal set — which is the minimum the agent needs to choose
+  between taking a message and offering a follow-up. What they must never gain is
+  anything unbounded (a name, the account's data) or any action on their behalf.
+  `/voice/identify` returned the principal's **name** and no longer does.
+- **A follow-up cannot be promised, because it is not representable.** Two
+  designs were rejected before this one. An env var (`GENESIS_VOICE_DELIVERY`) was
+  an operator assertion — one config line re-enabled the impossible promise while
+  the repo contained no consumer. Replacing it with a `{channel, deliver}` object
+  was a *function-shaped* assertion: `deliver` had no call sites, so a no-op still
+  bought the promise. There is now no option at all. No value any caller of
+  `build()` can pass makes this surface offer a follow-up; the option returns in
+  the same change that adds the code honouring it. Work is still queued with its
+  delivery target — only the promise is withheld.
+- An enqueue failure **propagates** to a 503, deliberately unlike the event
+  trace's swallow-everything policy: a dropped ticket is a request the caller was
+  told we recorded and which then silently vanished.
+
 ## [Unreleased] — Durable interactive-session resume + actionable eviction (BRO-1630)
 
 ### Fixed
