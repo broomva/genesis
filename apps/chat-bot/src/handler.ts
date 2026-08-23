@@ -50,12 +50,27 @@ export interface HandlerOptions {
    *
    *  Defaults to true — Telegram's behavior is unchanged. */
   streaming?: boolean;
+  /** Chunk size for the buffered path. Defaults to CHUNK_TARGET; clamped to
+   *  WHATSAPP_TEXT_LIMIT by chunkForWhatsapp so a misconfiguration degrades to
+   *  "less readable" rather than "rejected by the transport". */
+  chunkTarget?: number;
 }
 
-/** WhatsApp's text body cap. Chunk below it so a long reply is delivered rather
- *  than rejected; 3900 leaves room for the continuation marker. */
+/** WhatsApp's text body cap — a hard protocol limit. A body above it is
+ *  REJECTED, so every chunk must stay under it regardless of what the
+ *  readability target below is set to. */
 export const WHATSAPP_TEXT_LIMIT = 4096;
-const CHUNK_TARGET = 3900;
+
+/** Default chunk size — sized to a PHONE SCREEN, not to the API cap.
+ *
+ *  This was 3900, which is what the transport accepts, not what a person can
+ *  read: ~600 words arriving as one balloon reads as a document dump rather
+ *  than a reply. The cap still governs what is *possible* (a chunk above
+ *  WHATSAPP_TEXT_LIMIT is rejected outright); this governs what is
+ *  *comfortable*. chunkForWhatsapp already prefers paragraph → line → space
+ *  boundaries, so a smaller target mostly means breaking at paragraphs that
+ *  were already there. */
+export const CHUNK_TARGET = 1000;
 
 /** Split a reply into WhatsApp-sized pieces, preferring paragraph then line
  *  breaks so chunks land on natural boundaries instead of mid-word.
@@ -65,18 +80,25 @@ const CHUNK_TARGET = 3900;
 export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): string[] {
   const body = text.trim();
   if (!body) return [];
-  if (body.length <= limit) return [body];
+  // Clamp to the transport cap. The target is a READABILITY preference and is
+  // configurable; the cap is a hard protocol limit. A caller that raises the
+  // target above it would otherwise emit chunks WhatsApp rejects outright —
+  // which surfaces as the reply silently not arriving, the exact failure mode
+  // this channel is least able to diagnose. A non-positive limit would loop
+  // forever, so it falls back to the default rather than hanging the turn.
+  const cap = limit > 0 ? Math.min(limit, WHATSAPP_TEXT_LIMIT) : CHUNK_TARGET;
+  if (body.length <= cap) return [body];
 
   const out: string[] = [];
   let rest = body;
-  while (rest.length > limit) {
-    const window = rest.slice(0, limit);
+  while (rest.length > cap) {
+    const window = rest.slice(0, cap);
     // Prefer a paragraph break, then a line break, then a space. `+ 1` keeps
     // the break character with the chunk being emitted.
     let cut = window.lastIndexOf("\n\n");
-    if (cut < limit * 0.5) cut = window.lastIndexOf("\n");
-    if (cut < limit * 0.5) cut = window.lastIndexOf(" ");
-    if (cut < limit * 0.5) cut = limit; // no good boundary — hard split
+    if (cut < cap * 0.5) cut = window.lastIndexOf("\n");
+    if (cut < cap * 0.5) cut = window.lastIndexOf(" ");
+    if (cut < cap * 0.5) cut = cap; // no good boundary — hard split
     out.push(rest.slice(0, cut).trim());
     rest = rest.slice(cut).trim();
   }
@@ -89,6 +111,80 @@ export async function drainStream(stream: AsyncIterable<string>): Promise<string
   let acc = "";
   for await (const piece of stream) acc += piece;
   return acc;
+}
+
+/** How often to re-arm the typing indicator, in ms.
+ *
+ *  WhatsApp dismisses a typing indicator after ~25 SECONDS or on our first
+ *  send, whichever comes first (Kapso, /docs/whatsapp/send-messages/mark-read).
+ *  A Genesis turn is 9s for a trivial command and 30s-to-minutes for real work,
+ *  so a SINGLE startTyping() — which is what this handler used to do — shows
+ *  typing for 25s and then nothing. Silence after a promise of activity reads
+ *  worse than silence alone: it looks like the bot died mid-thought.
+ *
+ *  20s re-arms inside the window with margin for a slow round trip. */
+export const TYPING_REARM_MS = 20_000;
+
+/** Keeps the channel's typing indicator alive for the duration of a turn.
+ *
+ *  Returns a stop function; calling it is mandatory (use try/finally) or the
+ *  interval outlives the turn and keeps re-arming an indicator for a
+ *  conversation that has already been answered.
+ *
+ *  Fires once immediately so the acknowledgment is instant rather than
+ *  `rearmMs` late — the first 20 seconds are exactly when the user is deciding
+ *  whether anything happened. Every call is best-effort: a channel with no
+ *  typing support (or a transient API failure) must never fail the turn, since
+ *  the indicator is a courtesy and the reply is the product. */
+export function keepTyping(thread: PostableThread, rearmMs: number = TYPING_REARM_MS): () => void {
+  if (!thread.startTyping) return () => {};
+  const fire = () => {
+    void thread.startTyping?.().catch(() => {});
+  };
+  fire();
+  const timer = setInterval(fire, rearmMs);
+  // Never let a courtesy indicator hold the process open at shutdown.
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return () => clearInterval(timer);
+}
+
+/** Lifecycle of one turn, as shown on the user's own inbound message. */
+export type TurnStatus = "working" | "done" | "failed";
+
+/** WhatsApp has no message edit, so a reply cannot be revised in place. A
+ *  REACTION is the one primitive that changes an already-delivered message's
+ *  appearance: sending a new emoji to the same message replaces this sender's
+ *  previous one, and sending none removes it (verified in
+ *  `@kapso/chat-adapter` 0.1.1 `dist`, whose `removeReaction` posts a reaction
+ *  payload with the emoji field omitted — the docs state neither).
+ *
+ *  So the user's own question becomes the progress indicator for the turn it
+ *  started, which is the only mutable surface this channel has. */
+export const TURN_STATUS_EMOJI: Record<TurnStatus, string> = {
+  working: "👀",
+  done: "✅",
+  failed: "⚠️",
+};
+
+/** Per-message side channel for turn status. Separate from PostableThread
+ *  because it is scoped to ONE inbound message, not to the conversation:
+ *  reacting to the wrong message is worse than not reacting at all. */
+export interface TurnSignals {
+  /** Replace the status marker on the message that started this turn. */
+  setStatus?(status: TurnStatus): Promise<void>;
+}
+
+/** True when a send failed because the 24-hour service window has closed.
+ *
+ *  Meta only permits free-form messages within 24h of the user's last inbound
+ *  message; outside it a send fails 422 and — because the failure IS the
+ *  inability to message the user — there is no way to tell them from inside the
+ *  channel. It must therefore be loud in the log, and distinguishable from an
+ *  ordinary dispatch failure, or the operator sees a bot that simply stopped
+ *  answering. */
+export function isOutsideServiceWindow(e: unknown): boolean {
+  const text = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  return /24-hour window|24 hour window|outside the 24/i.test(text);
 }
 
 /** Which Genesis workspace a thread's sessions are pinned to (BRO-2216).
@@ -283,14 +379,21 @@ export async function handleAgentMessage(
   thread: PostableThread,
   text: string,
   opts: HandlerOptions,
+  signals?: TurnSignals,
 ): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
 
-  // Control commands short-circuit (never reach the agent).
+  // Control commands short-circuit (never reach the agent). No status marker
+  // and no keep-alive: these answer in milliseconds, so a 👀 that is replaced
+  // by ✅ in the same tick is visual noise, not feedback.
   if (await handleControlCommand(thread, trimmed, opts).catch(() => false)) return;
 
-  await thread.startTyping?.().catch(() => {});
+  // Acknowledge BEFORE the agent starts. Both signals are best-effort and
+  // deliberately un-awaited-for-failure: the reply is the product, and a
+  // channel that cannot react must still get its answer.
+  await signals?.setStatus?.("working").catch(() => {});
+  const stopTyping = keepTyping(thread);
   try {
     const stream = genesisStream({
       baseUrl: opts.baseUrl,
@@ -304,20 +407,39 @@ export async function handleAgentMessage(
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
-      const chunks = chunkForWhatsapp(reply);
+      const chunks = chunkForWhatsapp(reply, opts.chunkTarget);
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
         // from the bot being down, which is the failure mode this whole channel
         // has to avoid.
         await thread.post("(the agent finished without producing any text)");
       } else {
+        // Stop the indicator before the first send. WhatsApp dismisses it on
+        // send anyway; re-arming between chunks would show "typing" after the
+        // answer has already begun arriving.
+        stopTyping();
         for (const chunk of chunks) await thread.post(chunk);
       }
     } else {
       await thread.post(stream);
     }
+    await signals?.setStatus?.("done").catch(() => {});
   } catch (e) {
+    if (isOutsideServiceWindow(e)) {
+      // Distinct from an ordinary dispatch failure, and deliberately not
+      // followed by a thread.post: the whole nature of this failure is that we
+      // CANNOT message the user. Posting would fail identically and bury the
+      // real cause under a second exception.
+      console.error(
+        `[genesis-bot] 24h service window CLOSED — the reply could not be delivered. WhatsApp only permits free-form messages within 24h of the user's last inbound message, and the sandbox number cannot send templates. The user saw NOTHING. thread=${thread.id}`,
+        e,
+      );
+      return;
+    }
     console.error("[genesis-bot] dispatch failed", e);
+    await signals?.setStatus?.("failed").catch(() => {});
     await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
+  } finally {
+    stopTyping();
   }
 }

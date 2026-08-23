@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CHUNK_TARGET,
   type PostableThread,
+  TURN_STATUS_EMOJI,
+  type TurnStatus,
+  WHATSAPP_TEXT_LIMIT,
   chunkForWhatsapp,
   drainStream,
   handleAgentMessage,
+  isOutsideServiceWindow,
+  keepTyping,
   tenantWorkspaceId,
   unregisteredTenants,
   workspaceDecisionFor,
@@ -346,5 +352,138 @@ describe("unregisteredTenants — every tenant, not just one (BRO-2224)", () => 
       "ws-wa-",
     );
     expect(viaDispatch).toEqual({ kind: "pin", workspaceId: viaCheck });
+  });
+});
+
+// ── UX layer (BRO-2256) ────────────────────────────────────────────────────
+
+describe("chunkForWhatsapp sizing", () => {
+  test("default target is phone-sized, not API-cap-sized", () => {
+    const chunks = chunkForWhatsapp("word ".repeat(600).trim());
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(CHUNK_TARGET);
+  });
+
+  test("a target above the transport cap is clamped, not obeyed", () => {
+    // Mutation guard: without the clamp this emits ONE 6000-char chunk, which
+    // WhatsApp rejects outright and the user never sees.
+    const chunks = chunkForWhatsapp("x".repeat(6000), 99_000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(WHATSAPP_TEXT_LIMIT);
+  });
+
+  test("a non-positive target falls back instead of looping forever", () => {
+    const chunks = chunkForWhatsapp("y".repeat(3000), 0);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(CHUNK_TARGET);
+  });
+});
+
+describe("keepTyping", () => {
+  test("fires immediately and re-arms until stopped", async () => {
+    const thread = mockThread("kapso:a:b");
+    const stop = keepTyping(thread, 5);
+    expect(thread.typingCount).toBe(1); // instant ack, not rearmMs late
+    await new Promise((r) => setTimeout(r, 32));
+    const during = thread.typingCount;
+    expect(during).toBeGreaterThan(1);
+    stop();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(thread.typingCount).toBe(during); // stop() actually stops
+  });
+
+  test("a channel without typing support is a no-op, not a throw", () => {
+    const bare: PostableThread = { id: "x", async post() {} };
+    expect(() => keepTyping(bare, 5)()).not.toThrow();
+  });
+});
+
+describe("isOutsideServiceWindow", () => {
+  test("recognises Meta's 24-hour window refusal", () => {
+    expect(
+      isOutsideServiceWindow(
+        new Error("Cannot send non-template messages outside the 24-hour window."),
+      ),
+    ).toBe(true);
+  });
+
+  test("does not swallow an ordinary dispatch failure", () => {
+    expect(isOutsideServiceWindow(new Error("ECONNREFUSED"))).toBe(false);
+  });
+});
+
+describe("turn status signals", () => {
+  function recorder() {
+    const seen: TurnStatus[] = [];
+    return {
+      seen,
+      signals: {
+        async setStatus(s: TurnStatus) {
+          seen.push(s);
+        },
+      },
+    };
+  }
+
+  test("marks working before the agent runs, done after it replies", async () => {
+    const thread = mockThread("kapso:a:b");
+    const r = recorder();
+    await handleAgentMessage(
+      thread,
+      "hello",
+      { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
+      r.signals,
+    );
+    expect(r.seen).toEqual(["working", "done"]);
+    expect(thread.posts).toEqual(["hi"]);
+  });
+
+  test("marks failed when the turn throws", async () => {
+    const thread = mockThread("kapso:a:b");
+    const r = recorder();
+    const boom = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    await handleAgentMessage(
+      thread,
+      "hello",
+      { baseUrl: "https://x", fetchImpl: boom, streaming: false },
+      r.signals,
+    );
+    expect(r.seen).toEqual(["working", "failed"]);
+  });
+
+  test("a closed 24h window is NOT reported as a normal failure", async () => {
+    // The user cannot be messaged at all in this state, so posting an apology
+    // would fail identically. It must stay silent to the thread and loud in the
+    // log — and must not claim the turn merely 'failed'.
+    const thread = mockThread("kapso:a:b");
+    const r = recorder();
+    const closed = (async () => {
+      throw new Error("Cannot send non-template messages outside the 24-hour window.");
+    }) as unknown as typeof fetch;
+    await handleAgentMessage(
+      thread,
+      "hello",
+      { baseUrl: "https://x", fetchImpl: closed, streaming: false },
+      r.signals,
+    );
+    expect(r.seen).toEqual(["working"]);
+    expect(thread.posts).toEqual([]);
+  });
+
+  test("a channel with no signals still completes the turn", async () => {
+    const thread = mockThread("tg-1");
+    await handleAgentMessage(thread, "hello", {
+      baseUrl: "https://x",
+      fetchImpl: okFetch("hi"),
+      streaming: false,
+    });
+    expect(thread.posts).toEqual(["hi"]);
+  });
+
+  test("every status maps to a distinct emoji", () => {
+    const emojis = Object.values(TURN_STATUS_EMOJI);
+    expect(new Set(emojis).size).toBe(emojis.length);
   });
 });
