@@ -433,7 +433,7 @@ if (inconclusive.length > 0) {
   // nondeterministically on identical config. That is a gap in the measurement,
   // not evidence the tenant escaped, and a reader must not have to guess which.
   console.error(
-    `\n${inconclusive.length} case(s) NOT MEASURED (probe never ran) — these establish nothing either way:`,
+    `\n${inconclusive.length} case(s) INCONCLUSIVE — these establish nothing either way.\nCauses differ: the probe may never have run (no execution proof in the reply), or a\nleak oracle could not read its target. The per-case output above distinguishes them:`,
   );
   for (const r of inconclusive) console.error(`  - ${r.c.name}`);
 }

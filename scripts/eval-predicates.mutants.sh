@@ -77,6 +77,15 @@ run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).tr
 # rather than the thing doing the work — a reader who assumed otherwise would be
 # wrong about where the safety lives.
 run_mutant "proof separator guard is redundant"       'if (sep < 0) return null;' 'if (sep < -1) return null;' SURVIVED
+run_mutant "sudo status 0 read as denied"              'return status !== "0";
+}
+
+/** `docker version`' 'return true;
+}
+
+/** `docker version`' KILLED
+run_mutant "listing decoded loosely (b64 guard off)"  'if (!/^[A-Za-z0-9+/=]+$/.test(t)) return null;' 'if (false) return null;' KILLED
+run_mutant "multiple markers: first wins again"       'if (found.length !== 1) return null;' 'if (found.length === 0) return null;' KILLED
 run_mutant "degenerate proof accepted"                 'if (expr.includes(product)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
