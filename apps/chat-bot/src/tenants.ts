@@ -14,6 +14,32 @@ import { type Principal, principalOf } from "./allowlist";
 
 export type TenantState = "pending" | "active" | "suspended";
 
+/** How much of the harness a tenant gets.
+ *
+ *  Both tiers keep the OS sandbox. The tier chooses the PERMISSION mode only,
+ *  because the two dials are independent and conflating them is what makes
+ *  "give them web access" read as "turn the cage off":
+ *
+ *    confined  `defaultMode: "default"` — every tool not pre-allowed fails
+ *              closed. Under `claude -p` there is no prompt to answer, so an
+ *              un-allowed tool is simply unavailable and the agent cannot say
+ *              how to grant it.
+ *    trusted   `defaultMode: "acceptEdits"` — the per-edit prompt is removed, which
+ *              removes the approval friction entirely. Deny rules still block
+ *              (they apply in EVERY mode) and the sandbox still confines the
+ *              filesystem to the tenant dir and egress to `domains`.
+ *
+ *  There is deliberately no tier that disables the sandbox. That would let a
+ *  tenant `cat ~/broomva/crm/*` and read the operator's gh/railway tokens,
+ *  because deny rules govern the file TOOLS and never Bash. */
+export type TenantPolicy = "confined" | "trusted";
+
+export const TENANT_POLICIES: readonly TenantPolicy[] = ["confined", "trusted"];
+
+/** The tier a record without an explicit policy runs at. Confined, so a
+ *  registry written before this field existed does not silently widen. */
+export const DEFAULT_TENANT_POLICY: TenantPolicy = "confined";
+
 export interface TenantRecord {
   /** Digits-only phone number. The registry key. */
   readonly id: string;
@@ -28,6 +54,13 @@ export interface TenantRecord {
   readonly suspendedAt?: string;
   readonly lastSeenAt?: string;
   readonly note?: string;
+  /** Permission tier. Absent means `DEFAULT_TENANT_POLICY`. */
+  readonly policy?: TenantPolicy;
+  /** Domains this tenant may reach, as approved one at a time. Feeds BOTH the
+   *  sandbox network allowlist (Bash: curl, npx, git) and the `WebFetch(domain:)`
+   *  permission rules (the in-process fetch tool), because those are two
+   *  separate egress paths and opening one does not open the other. */
+  readonly domains?: readonly string[];
 }
 
 /** What to do with an inbound message. */
@@ -105,6 +138,155 @@ export function approve(t: TenantRecord, now: string, note?: string): TenantReco
  *  that number look like a fresh request and re-acknowledge a rejected person. */
 export function suspend(t: TenantRecord, now: string, note?: string): TenantRecord {
   return { ...t, state: "suspended", suspendedAt: now, ...(note ? { note } : {}) };
+}
+
+// --- egress allowlist ------------------------------------------------------
+
+/** Hard cap on a tenant's approved domains. An unbounded list is a settings
+ *  file that grows until it is nobody's job to read, which is how an allowlist
+ *  stops being one. */
+export const MAX_TENANT_DOMAINS = 64;
+
+/** Egress every tenant gets, because without it the workspace cannot install
+ *  or run a skill and is a shell with no package manager. Deliberately the
+ *  toolchain and nothing else: no docs sites, no APIs, no model providers.
+ *  Everything past this is approved one domain at a time.
+ *
+ *  `github.com` is here with its eyes open. It is the skills/registry transport,
+ *  and it is also a place a tenant can PUSH to. An allowlist bounds where data
+ *  can go, never what can go there — the tenant's own workspace is exfiltratable
+ *  to any allowed host by design, and that was the accepted trade. */
+export const BASE_EGRESS_DOMAINS: readonly string[] = [
+  "skills.sh",
+  "*.skills.sh",
+  "registry.npmjs.org",
+  "github.com",
+  "codeload.github.com",
+  "objects.githubusercontent.com",
+  "raw.githubusercontent.com",
+];
+
+/** Every domain a tenant may reach: the shared toolchain plus its own approvals.
+ *  Sorted and de-duplicated so a settings file is stable across re-provisions
+ *  and a diff means a real policy change rather than a reordering. */
+export function egressDomainsFor(t: TenantRecord): string[] {
+  return [...new Set([...BASE_EGRESS_DOMAINS, ...(t.domains ?? [])])].sort();
+}
+
+/** The host a `WebFetch(domain:)` rule should name for an allowlist entry.
+ *  The sandbox understands `*.example.com`; the permission rule is matched on
+ *  the host itself, so the wildcard is stripped rather than passed through as a
+ *  literal that would match no hostname at all. */
+export function webFetchHost(domain: string): string {
+  return domain.startsWith("*.") ? domain.slice(2) : domain;
+}
+
+/** The `WebFetch(domain:)` rules for a tenant, DE-DUPLICATED.
+ *
+ *  Stripping the wildcard collapses entries: `*.skills.sh` and `skills.sh` are
+ *  two distinct sandbox rules and one permission rule. Mapping without a
+ *  de-dupe emitted `WebFetch(domain:skills.sh)` twice into every settings file
+ *  — harmless to the matcher, but it makes a security-relevant file look
+ *  hand-edited and it grows with each such pair. */
+export function webFetchRulesFor(t: TenantRecord): string[] {
+  return [...new Set(egressDomainsFor(t).map(webFetchHost))]
+    .sort()
+    .map((h) => `WebFetch(domain:${h})`);
+}
+
+/** A label: alphanumeric with interior hyphens, 1-63 chars, per RFC 1035. */
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Normalize an operator-proposed domain, or return undefined to REJECT it.
+ *
+ *  This string lands in a settings file that defines a security boundary, and
+ *  under the request-over-WhatsApp flow the text originates with the TENANT —
+ *  the operator only says yes. So it is validated as hostile input, not tidied:
+ *  a value we cannot parse is refused, never "cleaned up" into something that
+ *  parses but means something else.
+ *
+ *  Rejects, specifically:
+ *    - anything carrying a scheme, path, port, query, or userinfo, because
+ *      `evil.com/#.github.com` and `github.com:8443@evil.com` both read as a
+ *      trusted host to a human skimming an approval message;
+ *    - a wildcard covering a public suffix (`*`, `*.com`, `*.co.uk` is NOT
+ *      caught here — see below), which would open a whole TLD in one approval;
+ *    - bare hostnames with no dot, which match nothing useful and would let
+ *      `localhost` through.
+ *
+ *  It does NOT try to know the public-suffix list: `*.co.uk` has two labels
+ *  after the wildcard and is accepted. That is a real limit, and the reason the
+ *  approval stays a human decision rather than becoming automatic. */
+/** Special-use TLDs (RFC 6761 + RFC 7686). None of these reach the public internet;
+ *  `.local` in particular is mDNS and resolves on the LAN the box sits on. */
+const RESERVED_TLDS = new Set(["local", "localhost", "test", "invalid", "example", "onion"]);
+
+export function normalizeDomain(raw: string): string | undefined {
+  const d = raw.trim().toLowerCase();
+  if (d.length === 0 || d.length > 253) return undefined;
+  // Reject the delimiters that let one string look like two different hosts.
+  if (/[/\\:@?#\s,]/.test(d)) return undefined;
+
+  const wildcard = d.startsWith("*.");
+  const host = wildcard ? d.slice(2) : d;
+  if (host.length === 0) return undefined;
+  // A wildcard must leave a registrable name behind it. `*.com` is one label
+  // and would hand over every .com in a single yes.
+  const labels = host.split(".");
+  if (labels.length < 2) return undefined;
+  if (!labels.every((l) => LABEL.test(l))) return undefined;
+  // A TLD is alphabetic; this also rejects a bare IPv4, which would otherwise
+  // pass the label test and is never what an approval message means.
+  const tld = labels[labels.length - 1] ?? "";
+  if (!/^[a-z]{2,}$/.test(tld)) return undefined;
+  // RFC 6761 / RFC 7686 special-use names never route to the public internet, and
+  // `service.local` is mDNS: approving it puts LOCAL-NETWORK services on the tenant's
+  // egress allowlist, which is a confinement break rather than a web grant. This is a
+  // CLOSED, standardised set -- unlike the public-suffix problem below, where a
+  // partial list would be the same blocklist mistake this file keeps warning about.
+  if (RESERVED_TLDS.has(tld)) return undefined;
+  return d;
+}
+
+export class TenantDomainError extends Error {}
+
+/** Approve one domain for a tenant. Idempotent: re-approving is a no-op rather
+ *  than a duplicate, so the operator saying yes twice cannot grow the file. */
+export function allowDomain(t: TenantRecord, raw: string, now: string): TenantRecord {
+  const domain = normalizeDomain(raw);
+  if (domain === undefined) {
+    throw new TenantDomainError(`not a domain this can approve: ${JSON.stringify(raw)}`);
+  }
+  const current = t.domains ?? [];
+  if (current.includes(domain)) return t;
+  if (current.length >= MAX_TENANT_DOMAINS) {
+    throw new TenantDomainError(
+      `tenant ${t.id} already has ${current.length} domains (max ${MAX_TENANT_DOMAINS})`,
+    );
+  }
+  return { ...t, domains: [...current, domain].sort(), lastSeenAt: t.lastSeenAt ?? now };
+}
+
+/** Revoke a domain. Present because an allowlist you cannot shrink is one
+ *  nobody will risk growing. */
+export function denyDomain(t: TenantRecord, raw: string): TenantRecord {
+  const domain = normalizeDomain(raw);
+  if (domain === undefined) {
+    throw new TenantDomainError(`not a domain this can revoke: ${JSON.stringify(raw)}`);
+  }
+  const current = t.domains ?? [];
+  if (!current.includes(domain)) return t;
+  return { ...t, domains: current.filter((d) => d !== domain) };
+}
+
+/** Move a tenant between permission tiers. */
+export function setPolicy(t: TenantRecord, policy: TenantPolicy): TenantRecord {
+  return { ...t, policy };
+}
+
+/** The tier a record actually runs at. */
+export function policyOf(t: TenantRecord): TenantPolicy {
+  return t.policy ?? DEFAULT_TENANT_POLICY;
 }
 
 // --- rate limiting ---------------------------------------------------------

@@ -41,10 +41,17 @@ import {
   type HandlerOptions,
   handleAgentMessage,
   nativeCommandMenu,
+  parseCommand,
   tenantWorkspaceId,
   unregisteredTenants,
   workspaceDecisionFor,
 } from "./handler";
+import {
+  applyOperatorCommand,
+  isOperator,
+  isOperatorToken,
+  parseOperatorCommand,
+} from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
 import { webhookPort } from "./webhook-port";
@@ -153,7 +160,10 @@ async function admitThread(thread: {
   }
   hits.push(nowMs);
   rateHits.set(decision.tenant.id, hits);
-  tenantStore.put(decision.tenant); // stamps lastSeenAt
+  // Stamp ONLY lastSeenAt. `put(decision.tenant)` wrote the whole record from a
+  // snapshot read earlier in this request, so an operator approval arriving in
+  // between was reverted to `pending` by the very next message.
+  tenantStore.touchLastSeen(decision.tenant.id, new Date().toISOString());
   return true;
 }
 
@@ -286,7 +296,59 @@ function dispatchOptions(threadId: string): HandlerOptions | undefined {
 // every DM is handled, so a restart never strands a conversation.
 // WhatsApp threads are always DMs (the Kapso adapter reports isDM: true), so
 // this is the only path WhatsApp traffic takes.
+/** The principal allowed to change the registry from the channel itself.
+ *  Digits only. UNSET means nobody -- see `isOperator`, which fails closed. */
+const operatorPrincipal = process.env.GENESIS_WHATSAPP_OPERATOR?.trim();
+
+/** Handle an operator command. Returns true when it was one (and was handled).
+ *
+ *  Runs AFTER admit, so an unadmitted sender never learns this surface exists,
+ *  and the token check runs BEFORE the operator check so that a tenant typing
+ *  `/allow` gets the ordinary unknown-command path -- forwarded to the agent --
+ *  rather than a refusal that confirms the command is real. */
+async function maybeHandleOperator(
+  thread: { id: string; post: (t: string) => Promise<unknown> },
+  text: string,
+): Promise<boolean> {
+  const parsed = parseCommand(text);
+  if (parsed === undefined || !isOperatorToken(parsed.token)) return false;
+  if (!isOperator(thread.id, operatorPrincipal)) return false;
+  if (!tenantStore) {
+    await thread.post("No tenant registry is configured on this deployment.");
+    return true;
+  }
+  const cmd = parseOperatorCommand(parsed.token, parsed.args);
+  if (cmd === undefined) return false;
+  if ("error" in cmd) {
+    await thread.post(cmd.error);
+    return true;
+  }
+  const result = applyOperatorCommand(cmd, tenantStore, new Date().toISOString());
+  console.log(
+    `[genesis-bot] operator ${parsed.token} -> ${result.needsApply ? "registry changed" : "no change"}`,
+  );
+  await thread.post(result.reply);
+  return true;
+}
+
 chat.onDirectMessage(async (thread, message) => {
+  // OPERATOR COMMANDS RUN BEFORE ADMISSION, and the order is load-bearing.
+  //
+  // Admission-first deadlocked the registry at bootstrap: with no tenants yet, the
+  // operator's own first message creates a PENDING record, admitThread returns
+  // false, and every later message is stopped before maybeHandleOperator ever runs
+  // -- so the one person who can approve tenants could never issue /tapprove. The
+  // registry could only ever be seeded out-of-band.
+  //
+  // Safe because maybeHandleOperator authenticates on its own and does not lean on
+  // admission: it returns false unless the text parses as an operator command AND
+  // `isOperator(thread.id, operatorPrincipal)` matches. A non-operator sending
+  // "/tapprove" falls straight through to admitThread exactly as before, and so
+  // does the operator sending ordinary text.
+  //
+  // WhatsApp threads are always DMs, and `isOperator` only resolves kapso thread
+  // ids, so this is the only path where it can ever match.
+  if (await maybeHandleOperator(thread, message.text)) return;
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
