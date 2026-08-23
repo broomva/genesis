@@ -18,6 +18,7 @@ import {
   runCodex,
 } from "@genesis/runner";
 import { build } from "./server";
+import { createVoiceQueue, parseVoicePrincipals } from "./voice-queue";
 import { purgeCloneTmp } from "./workspace-provision";
 import { FsWorkspaceRepository } from "./workspace-repository-fs";
 import { discoverWorkspaces } from "./workspaces";
@@ -298,6 +299,29 @@ else if (requestedDefault === "codex" && !codexAvailable) {
   );
 }
 
+// Voice channel (BRO-2228). The surface in server.ts registers ONLY when a
+// secret is configured, so this is the switch that turns it on — without these
+// three lines `if (opts.voiceSecret)` never ran and the routes did not exist in
+// any real deploy, however green their tests were.
+const voiceSecret = process.env.GENESIS_VOICE_SECRET;
+// Built only when the channel is on: an unconfigured deploy must not create a
+// queue directory nothing will ever write to or drain.
+const voiceQueueDir = process.env.GENESIS_VOICE_QUEUE_DIR ?? join(defaultDataDir(), "voice");
+const voicePrincipals = voiceSecret
+  ? parseVoicePrincipals(process.env.GENESIS_VOICE_PRINCIPALS)
+  : [];
+const enqueueVoice = voiceSecret ? createVoiceQueue(voiceQueueDir) : undefined;
+if (voiceSecret) {
+  // An enabled channel with no principals still ANSWERS — every caller resolves
+  // unknown and can leave a message. That is a legitimate configuration, so this
+  // is a log line and not a refusal to boot; it is here because "nobody can get a
+  // follow-up" is otherwise indistinguishable from a working deploy.
+  console.log(
+    `[genesis] voice channel → /voice/* enabled (queue: ${join(voiceQueueDir, "queue.jsonl")}, ` +
+      `${voicePrincipals.length} principal(s) can receive follow-up)`,
+  );
+}
+
 const { app, websocket } = build({
   workspaceRoot,
   // Display name for the built-in default workspace (BRO-1672) — label the root
@@ -328,6 +352,10 @@ const { app, websocket } = build({
   // workspaces like ~/broomva (BRO-1512). Honored by both engines.
   noWorktree: process.env.GENESIS_NO_WORKTREE === "1",
   trace: printTrace, // per-event JSONL trace (BRO-1524/1620)
+  // Voice intake (BRO-2228). voiceSecret undefined → routes are not registered.
+  voiceSecret,
+  voicePrincipals,
+  enqueueVoice,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
