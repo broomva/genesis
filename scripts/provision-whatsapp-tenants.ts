@@ -32,6 +32,7 @@ import {
   policyOf,
   webFetchRulesFor,
 } from "../apps/chat-bot/src/tenants";
+import { denyRulesFor } from "./tenant-deny-rules";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -114,7 +115,24 @@ function settingsFor(dir: string, tenant: TenantRecord): string {
         // That dead end is what `trusted` exists to remove, and it is why the
         // tier is a permission dial ONLY: the sandbox below is unchanged by it,
         // so a trusted tenant is ungated inside the same cage, never outside it.
-        defaultMode: policy === "trusted" ? "bypassPermissions" : "default",
+        // `acceptEdits`, NOT `bypassPermissions` (BRO-2245 x BRO-2236).
+        //
+        // The tier is described as "a permission dial only... ungated inside the
+        // same cage, never outside it". `bypassPermissions` does not honour that:
+        // this file's own comment above says Read/Write/Edit/Glob/Grep run
+        // IN-PROCESS and are not covered by `sandbox.filesystem`, so for those tools
+        // the permission mode IS the cage. Bypass auto-approves every call except
+        // explicit deny rules, and the deny list is a blocklist -- anything unnamed
+        // is permitted.
+        //
+        // `acceptEdits` is the dial the tier actually wanted: it removes the
+        // per-edit prompt, which is the friction a trusted tenant is being spared,
+        // while deny rules and the gating of non-edit tools both stay in force.
+        //
+        // Revert to "bypassPermissions" if the tier is meant to be an escape hatch
+        // rather than a dial -- but then say so in tenants.ts, because the current
+        // wording promises a cage that bypass does not leave standing.
+        defaultMode: policy === "trusted" ? "acceptEdits" : "default",
         // This file used to say "Search, not fetch: grant WebFetch only with a
         // domain allow-list, and only for a reason." BRO-2245 is the reason and
         // this is that allow-list. The objection it recorded still stands and is
@@ -138,10 +156,24 @@ function settingsFor(dir: string, tenant: TenantRecord): string {
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
         deny: [
-          "Read(//home/agent/.ssh/**)",
-          "Read(//home/agent/.aws/**)",
-          "Read(//home/agent/.config/**)",
-          "Read(//home/agent/.claude/**)",
+          // Built BY CONSTRUCTION from HOME and a verb list, not written out by
+          // hand. Two defects motivated that, both found on this list:
+          //
+          // 1. HARDCODED HOME. `HOME` above is `GENESIS_TENANT_HOME ?? "/home/agent"`,
+          //    but every rule below used to spell `/home/agent` literally. The
+          //    sandbox denyRead IS derived from HOME, so pointing GENESIS_TENANT_HOME
+          //    anywhere else left the two layers guarding different directories --
+          //    and for Read/Glob/Grep this list is the WHOLE boundary.
+          //
+          // 2. READ/GREP ASYMMETRY. `.ssh`, `.aws`, `.config`, `.claude` and `*.env`
+          //    were denied for Read and NOT for Grep, while broomva/ and genesis/ were
+          //    denied for both. Grep returns matching CONTENT, so it is a read
+          //    primitive; a hand-maintained parallel list drifts the moment someone
+          //    adds a path to one column. Glob is included too: it does not return
+          //    content, but it enumerates what is there to ask for next.
+          //
+          // The cross-product cannot drift, which is the whole point.
+          ...denyRulesFor(HOME, dir),
           // The sandbox denyRead below covers Bash. It does NOT cover the
           // built-in file tools, which run inside the Claude Code process --
           // so for Read/Glob/Grep, THIS list is the whole boundary, and it
@@ -160,29 +192,28 @@ function settingsFor(dir: string, tenant: TenantRecord): string {
           // named-and-known ones. A sibling tenant cannot be denied by prefix
           // without denying the tenant's own directory, so that gap stays open
           // for the file-tool channel and is measured by the eval instead.
-          "Read(//home/agent/broomva/**)",
-          "Read(//home/agent/genesis/**)",
-          "Read(//home/agent/*.env)",
-          "Grep(//home/agent/broomva/**)",
-          "Grep(//home/agent/genesis/**)",
-          // NARROWED from `.claude/**` (BRO-2245). The whole directory was
-          // denied to stop the agent rewriting its own sandbox switches, but
-          // `.claude/skills/` lives there too, so the tenant could not install
-          // or author a skill -- the thing the workspace is for.
+          // CONFLICT RESOLVED TOWARD main's HARDENING (BRO-2245 x BRO-2236).
           //
-          // Only these two files can change what the agent is allowed to do, so
-          // only these two are denied. `skills/`, `agents/` and `commands/` are
-          // prompt-level content: a skill cannot register a hook (hooks are
-          // declared in settings.json, which stays denied), and anything a
-          // command could tell the agent to do it can already be told inline.
+          // This PR narrowed the tenant's `.claude/**` write-deny to just
+          // settings.json + settings.local.json so a tenant could author a skill.
+          // The justification was that `skills/`, `agents/` and `commands/` are
+          // "prompt-level content". That is not true for two of the three:
+          // `allowed-tools:` frontmatter is installed by the CLI as an
+          // `allowed_tools` PERMISSION LAYER, and `.claude/agents/*.md` carries
+          // `permissionMode` and `tools`. A command file can grant tool permissions
+          // that inline text cannot -- at the DEFAULT confined tier, no `trusted`
+          // needed.
           //
-          // Belt and braces, not the only control: both files are also written
-          // root-owned 0444, so Bash cannot edit them either -- and Bash is not
-          // covered by deny rules at all.
-          `Edit(//${dir.replace(/^\//, "")}/.claude/settings.json)`,
-          `Write(//${dir.replace(/^\//, "")}/.claude/settings.json)`,
-          `Edit(//${dir.replace(/^\//, "")}/.claude/settings.local.json)`,
-          `Write(//${dir.replace(/^\//, "")}/.claude/settings.local.json)`,
+          // I did NOT carve out `.claude/skills/**` to preserve the feature, even
+          // though that is the obvious compromise. I could not verify that skill
+          // frontmatter cannot also carry tool permissions, and carving out a path
+          // on an unverified premise about frontmatter is precisely the move that
+          // produced this defect. Re-narrowing needs evidence, not symmetry.
+          //
+          // The tenant-authored-skill capability therefore needs a different
+          // mechanism: skills installed BY THE PROVISIONER (root-owned, like the
+          // settings files), or a skills directory outside `.claude/`. Revert this
+          // hunk to restore the previous behaviour if that trade is wanted.
         ],
       },
       sandbox: {

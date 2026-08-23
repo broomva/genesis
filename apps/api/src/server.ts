@@ -557,6 +557,7 @@ export function build(opts: BuildOpts) {
           effort: incoming.effort,
           engine: incoming.engine,
           workspaceId: incoming.workspaceId,
+          channelQualified: incoming.channelQualified,
           worktree: incoming.worktree,
           // Multimodal attachments (BRO-1706) → runner materializes into the cwd.
           attachments: incoming.attachments,

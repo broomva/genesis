@@ -24,7 +24,7 @@ export type TenantState = "pending" | "active" | "suspended";
  *              closed. Under `claude -p` there is no prompt to answer, so an
  *              un-allowed tool is simply unavailable and the agent cannot say
  *              how to grant it.
- *    trusted   `defaultMode: "bypassPermissions"` — tools are ungated, which
+ *    trusted   `defaultMode: "acceptEdits"` — the per-edit prompt is removed, which
  *              removes the approval friction entirely. Deny rules still block
  *              (they apply in EVERY mode) and the sandbox still confines the
  *              filesystem to the tenant dir and egress to `domains`.
