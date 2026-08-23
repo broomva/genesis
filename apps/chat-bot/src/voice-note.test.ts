@@ -7,6 +7,7 @@ import {
   findVoiceNote,
   isAudio,
   resolveVoiceNote,
+  textToDispatch,
 } from "./voice-note";
 
 const audio = (over: Partial<AudioAttachment> = {}): AudioAttachment => ({
@@ -183,5 +184,75 @@ describe("resolveVoiceNote — every path answers, none is silent", () => {
         expect(r.reason.trim().length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("textToDispatch — the refusal actually reaches the sender", () => {
+  function thread() {
+    const posts: string[] = [];
+    return {
+      posts,
+      t: {
+        id: "kapso:a:b",
+        async post(c: string) {
+          posts.push(c);
+        },
+      },
+    };
+  }
+  const quiet = { info: () => {}, warn: () => {} };
+
+  test("a voice note with NO backend is ANSWERED, not dropped", async () => {
+    // The claim this whole change rests on. Previously assertable only by
+    // grepping index.ts for a substring — a no-op that still mentioned
+    // `outcome.reply` SURVIVED that check.
+    const { posts, t } = thread();
+    const out = await textToDispatch(t, { attachments: [audio()] }, undefined, quiet);
+    expect(out).toBeUndefined(); // nothing dispatched to the agent
+    expect(posts).toEqual([NO_TRANSCRIBER_REPLY]); // but the sender was told
+  });
+
+  test("a transcribed note dispatches its text and posts NOTHING", async () => {
+    const { posts, t } = thread();
+    const out = await textToDispatch(
+      t,
+      { attachments: [audio()] },
+      saying("deploy status please"),
+      quiet,
+    );
+    expect(out).toBe("deploy status please");
+    expect(posts).toEqual([]); // the agent answers; no interstitial noise
+  });
+
+  test("typed text WINS over an attached voice note", async () => {
+    const { posts, t } = thread();
+    const out = await textToDispatch(
+      t,
+      { text: "typed wins", attachments: [audio()] },
+      saying("spoken loses"),
+      quiet,
+    );
+    expect(out).toBe("typed wins");
+    expect(posts).toEqual([]);
+  });
+
+  test("an ordinary empty message is still a no-op, with no reply", async () => {
+    // Polarity partner: the module must not start answering every blank event.
+    const { posts, t } = thread();
+    expect(await textToDispatch(t, { text: "   " }, undefined, quiet)).toBeUndefined();
+    expect(
+      await textToDispatch(t, { attachments: [{ type: "image" }] }, undefined, quiet),
+    ).toBeUndefined();
+    expect(posts).toEqual([]);
+  });
+
+  test("a failing post does not throw the turn", async () => {
+    const t = {
+      id: "kapso:a:b",
+      async post() {
+        throw new Error("channel down");
+      },
+    };
+    expect(await textToDispatch(t, { attachments: [audio()] }, undefined, quiet)).toBeUndefined();
   });
 });

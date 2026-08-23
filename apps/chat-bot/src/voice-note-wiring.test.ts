@@ -12,7 +12,7 @@ const index = await Bun.file(new URL("./index.ts", import.meta.url)).text();
 describe("voice notes are reachable from the entrypoint", () => {
   test("the resolver is imported", () => {
     expect(index).toContain('from "./voice-note"');
-    expect(index).toMatch(/findVoiceNote|resolveVoiceNote/);
+    expect(index).toMatch(/textToDispatch/);
   });
 
   test("EVERY dispatch site goes through textToDispatch, not message.text", () => {
@@ -26,13 +26,17 @@ describe("voice notes are reachable from the entrypoint", () => {
     }
   });
 
-  test("a refusal is POSTED, never merely logged", () => {
-    // The whole point of the module is that no path is silent. If the entrypoint
-    // logged the reason and returned, the sender would still see nothing.
-    expect(index).toMatch(/outcome\.reply|\.post\(outcome/);
-  });
+  // NOTE: "a refusal is actually posted" is deliberately NOT asserted here.
+  // It was, by grepping this file for a substring — and the mutation sweep
+  // showed that a no-op still mentioning `outcome.reply` SURVIVED it. The
+  // behaviour moved into voice-note.ts precisely so a real test could drive it
+  // with a recording thread; see "the refusal actually reaches the sender".
+  // Keeping a grep alongside that real test would be a weaker second gate.
 
-  test("the transcriber binding exists so a backend can be plugged in", () => {
+  test("the transcriber binding exists and is PASSED, not just declared", () => {
+    // BRO-2228's defect exactly: options declared on a surface and supplied by
+    // nothing, so the branch behind them never ran in any deploy.
     expect(index).toMatch(/transcriber(\s*:\s*Transcriber\s*\|\s*undefined)?\s*=/);
+    expect(index).toContain("textToDispatch(thread, message, transcriber)");
   });
 });

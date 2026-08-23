@@ -160,3 +160,57 @@ async function fetchAudio(a: AudioAttachment): Promise<Buffer> {
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
+
+/** The minimum a thread must do for a refusal to be delivered. */
+export interface AnswerableThread {
+  readonly id: string;
+  post(content: string): Promise<unknown>;
+}
+
+/** What an inbound message looks like to this module. */
+export interface IncomingMessage {
+  readonly text?: string;
+  readonly attachments?: readonly AudioAttachment[];
+}
+
+/** Resolve the text to dispatch for an inbound message, ANSWERING the sender
+ *  when there is none.
+ *
+ *  Lives here rather than in the entrypoint so the guarantee is testable. The
+ *  mutation sweep proved why: with this logic inline in index.ts, the only
+ *  available assertion was a grep over the source, and replacing the real
+ *  `thread.post(...)` with a no-op that still mentioned `outcome.reply`
+ *  SURVIVED. A claim this change is built on cannot rest on a substring match.
+ *
+ *  Returns undefined only when there is nothing to say AND nothing to dispatch
+ *  (an ordinary empty message) or when the sender has already been answered —
+ *  never because something was quietly discarded.
+ *
+ *  Typed text WINS over audio when a message carries both: the typed words are
+ *  the higher-confidence signal, and transcription is the lossy path. */
+export async function textToDispatch(
+  thread: AnswerableThread,
+  message: IncomingMessage,
+  transcriber: Transcriber | undefined,
+  log: { info(m: string): void; warn(m: string): void } = {
+    info: (m) => console.log(m),
+    warn: (m) => console.warn(m),
+  },
+): Promise<string | undefined> {
+  const typed = message.text?.trim();
+  if (typed) return typed;
+
+  const note = findVoiceNote(message.attachments ?? []);
+  if (!note) return undefined;
+
+  const outcome = await resolveVoiceNote(note, transcriber);
+  if (outcome.kind === "text") {
+    log.info(`[genesis-bot] transcribed a voice note for ${thread.id}`);
+    return outcome.text;
+  }
+  log.warn(`[genesis-bot] voice note not dispatched for ${thread.id}: ${outcome.reason}`);
+  await thread
+    .post(outcome.reply)
+    .catch((e) => log.warn(`[genesis-bot] could not answer a voice note: ${e}`));
+  return undefined;
+}
