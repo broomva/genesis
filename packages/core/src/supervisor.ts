@@ -42,8 +42,22 @@ export interface TurnOptions {
   engine?: string;
   /** Requested workspace (BRO-1627) — honored only at SESSION CREATION (a
    *  thread's first turn, when the session row is minted); ignored after.
-   *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`. */
+   *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`.
+   *  EXCEPTION: see `channelQualified`, which turns both of those leniencies off. */
   workspaceId?: string;
+  /** BRO-2236 / BRO-2241 — this turn arrives from a PUBLIC CHANNEL (WhatsApp), where
+   *  `workspaceId` names a tenant rather than expressing a human's preference.
+   *
+   *  The two leniencies above are correct for a human picking a workspace in the web
+   *  UI and dangerous for a channel: "unregistered → default" hands an unknown tenant
+   *  the broadest directory on the box, and "sticky, ignored after" pins a row minted
+   *  before its channel had a confined workspace to whatever it was bound to then.
+   *  Both were measured live, not theorised.
+   *
+   *  Set true and BOTH become refusals. The caller decides, because only the caller
+   *  knows the request came off a channel — core cannot sniff it from the id without
+   *  copying the `GENESIS_WHATSAPP_WORKSPACE_PREFIX` convention into a second place. */
+  channelQualified?: boolean;
   /** Requested worktree posture (BRO-1656) — `true` = cut a per-session worktree,
    *  `false` = run at the workspace root. Honored only on a thread's FIRST turn
    *  (sticky), and only when the workspace ALLOWS a worktree (a nested-repo
@@ -240,6 +254,66 @@ export function sanitizeTitle(raw: string | undefined): string | undefined {
   return chars.length > 60 ? `${chars.slice(0, 60).join("").trimEnd()}…` : t;
 }
 
+/** Agent CLI args for a workspace, hardened when it serves an untrusted principal.
+ *
+ *  `--strict-mcp-config` drops every inherited MCP server. It is the ONLY control
+ *  that reaches them: MCP servers are separate processes that run OUTSIDE the
+ *  filesystem sandbox by documented design, so no amount of path confinement
+ *  touches them. Measured on the VPS — without the flag a tenant session carries
+ *  mcp__railway__set_variables / update_service / whoami plus the account's Gmail,
+ *  Drive and Calendar connectors; with it, the session reports NONE.
+ *
+ *  Appended AFTER the operator's args, never merged into them: the flag is
+ *  boolean, so a later occurrence can only add it. There is deliberately no way
+ *  for configuration to remove it from a confined workspace.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function hardenedExtraArgs(
+  workspace: { confined?: boolean },
+  extraArgs?: string[],
+): string[] | undefined {
+  if (!workspace.confined) return extraArgs;
+  return [...(extraArgs ?? []), "--strict-mcp-config"];
+}
+
+/** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
+ *
+ *  `hardenedExtraArgs` above decides whether a turn is hardened. These decide
+ *  whether the turn is allowed to happen at all, and they exist because hardening
+ *  silently degrades: a workspace that arrives with `confined: undefined` gets the
+ *  caller's args back unchanged, so an unconfined tenant looks exactly like a
+ *  workspace that was never meant to be confined.
+ *
+ *  A CHANNEL-QUALIFIED request is one where the caller named a workspace. A public
+ *  channel (WhatsApp) always names one; a human picking from the web UI also names
+ *  one. In both cases "the id you named is not registered" must refuse rather than
+ *  fall back to the default workspace, because the default is the broadest
+ *  directory on the box.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function bindRefusal(
+  requested: string | undefined,
+  isRegistered: (id: string) => boolean,
+): string | undefined {
+  if (requested === undefined) return undefined; // no claim made -> default is fine
+  if (isRegistered(requested)) return undefined;
+  return `Workspace ${requested} is not registered on this host, so this request cannot be served. It will NOT fall back to the default workspace.`;
+}
+
+/** BRO-2241 — an existing session's binding is sticky, so a row created before its
+ *  channel had a confined workspace keeps pointing at whatever it was bound to,
+ *  forever, and `resolve()` never looks at the caller's id again. Measured live:
+ *  three sandbox-number rows still bound to `ws-orchestrator`, which carries no
+ *  `confined` field at all. Refuse rather than silently serve the stale binding. */
+export function rebindRefusal(
+  existingWorkspaceId: string,
+  requested: string | undefined,
+): string | undefined {
+  if (requested === undefined) return undefined;
+  if (existingWorkspaceId === requested) return undefined;
+  return `This thread is bound to workspace ${existingWorkspaceId}, but the request names ${requested}. A binding is not migrated silently. Start a new thread, or re-bind it deliberately.`;
+}
+
 export class Supervisor {
   private readonly store: Store;
   private readonly runners: Record<string, RunnerFn>;
@@ -383,6 +457,25 @@ export class Supervisor {
     );
   }
 
+  /** Re-read the workspace registry from its source (BRO-2230).
+   *
+   *  The registry is an in-memory Map hydrated at boot and invalidated only by
+   *  mutations made THROUGH this supervisor. A manifest written directly to the
+   *  registry directory — which is how tenant workspaces are provisioned, as
+   *  root, out of band — is therefore invisible until the process restarts.
+   *
+   *  Measured consequence of not having this: after provisioning a new tenant,
+   *  genesis-bot asked the api whether the workspace existed, was told no, and
+   *  refused to serve WhatsApp AT ALL, crash-looping and taking the channel down
+   *  for every EXISTING tenant until the api was restarted too. At one tenant
+   *  that is an annoyance; at ten it is an outage per onboarding.
+   *
+   *  Serialized through the same chain as every other refresh, so a reload
+   *  racing a register cannot install a stale snapshot. */
+  reloadWorkspaces(): Promise<void> {
+    return this.refreshRegistry();
+  }
+
   /** Serialized registry refresh (CodeRabbit/Forge #2). Chains the reload onto the
    *  current hydration so two concurrent runtime mutations can't run overlapping
    *  `loadRegistry`s and have the SLOWER one overwrite the cache with a stale
@@ -435,10 +528,27 @@ export class Supervisor {
   /** chat-id/thread → Session. A NEW thread binds the requested workspace (BRO-1627)
    *  if it's registered, else the default; an existing thread is returned unchanged
    *  (the binding is sticky from session creation — switching = a new thread). */
-  async resolve(threadId: string, workspaceId?: string): Promise<Session> {
+  async resolve(
+    threadId: string,
+    workspaceId?: string,
+    channelQualified?: boolean,
+  ): Promise<Session> {
     await this.ensureWorkspace();
     const existing = await this.store.findSessionByThread(threadId);
-    if (existing) return existing;
+    if (existing) {
+      // BRO-2241: sticky is right for a human switching workspaces mid-thread, and
+      // wrong for a channel, where a stale binding can point at an UNCONFINED
+      // workspace the tenant was never meant to reach.
+      const stale = channelQualified ? rebindRefusal(existing.workspaceId, workspaceId) : undefined;
+      if (stale) throw new Error(stale);
+      return existing;
+    }
+    // BRO-2236: a named-but-unregistered id falls through to the default workspace,
+    // which on a public channel is an escalation rather than a convenience.
+    const refusal = channelQualified
+      ? bindRefusal(workspaceId, (id) => this.workspaceRegistry.has(id))
+      : undefined;
+    if (refusal) throw new Error(refusal);
     // Validate the requested id against the live registry at bind time (mirror the
     // engine `this.runners[requested] ? …` discipline); unknown → default.
     const bound =
@@ -487,7 +597,7 @@ export class Supervisor {
     onState?: (state: RunState, event: AgentEvent) => void,
     turnOpts?: TurnOptions,
   ): Promise<DispatchResult> {
-    const session = await this.resolve(threadId, turnOpts?.workspaceId);
+    const session = await this.resolve(threadId, turnOpts?.workspaceId, turnOpts?.channelQualified);
     // Resolve the bound workspace registry-FIRST (BRO-1627) — the registry carries
     // the richer noWorktree/isGitRepo the DB row does NOT. A thread that already RAN
     // under a workspace no longer in the registry can't be safely resumed (P20 S1):
@@ -601,7 +711,7 @@ export class Supervisor {
         cwd: workspace.rootPath,
         resumeSessionId: session.agentSessionId,
         host: lease.host,
-        extraArgs: this.extraArgs,
+        extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
         // Per-turn model/effort (BRO-1573) override the constructor defaults.
         model: turnOpts?.model,
         effort: turnOpts?.effort,
@@ -744,8 +854,20 @@ export class Supervisor {
         // Deliberately DO NOT forward `this.extraArgs` (P20/CodeRabbit): those carry
         // the real agent's permission flags (e.g. --dangerously-skip-permissions). The
         // title prompt inlines UNTRUSTED user/assistant text, so a prompt injection must
-        // not be able to escalate into tool/file access here. Default permissions +
-        // the "do not use any tools" instruction keep this a pure text completion.
+        // not be able to escalate into tool/file access here.
+        //
+        // But NOT forwarding them also meant not forwarding `--strict-mcp-config`, so
+        // this spawn inherited the OPERATOR's MCP servers -- Gmail, Drive, Calendar,
+        // Railway -- inside a turn whose prompt is written by a tenant. The mitigation
+        // in place was "default permissions + a 'do not use any tools' instruction",
+        // and an instruction is precisely what a prompt injection overrides. A
+        // confined workspace must be confined on every spawn it causes, not only the
+        // one the operator is thinking about.
+        //
+        // `hardenedExtraArgs(workspace)` with no second argument yields exactly
+        // ["--strict-mcp-config"] when confined and undefined otherwise, which adds
+        // the boundary without reintroducing any permission flag.
+        extraArgs: hardenedExtraArgs(workspace),
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);

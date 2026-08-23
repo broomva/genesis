@@ -61,6 +61,7 @@ export class FsWorkspaceRepository implements WorkspaceRepository {
       rootPath: raw.rootPath,
       ...(typeof raw.isGitRepo === "boolean" ? { isGitRepo: raw.isGitRepo } : {}),
       ...(typeof raw.noWorktree === "boolean" ? { noWorktree: raw.noWorktree } : {}),
+      ...(typeof raw.confined === "boolean" ? { confined: raw.confined } : {}),
     };
   }
 

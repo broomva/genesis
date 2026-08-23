@@ -18,6 +18,21 @@ export interface Workspace {
    *  global (noWorktree). Lives in the boot registry only; NOT persisted to the
    *  DB (recomputed every boot, so it can never go stale). */
   noWorktree?: boolean;
+  /** This workspace serves an UNTRUSTED principal (BRO-2224) — a public channel
+   *  tenant rather than the operator. The agent spawn is hardened for it.
+   *
+   *  Today that means `--strict-mcp-config`, which drops every inherited MCP
+   *  server. Measured on the VPS: without it a tenant session carries
+   *  mcp__railway__set_variables / update_service / whoami plus the account's
+   *  Gmail, Drive and Calendar connectors; with it the session reports NONE.
+   *  MCP servers run OUTSIDE the filesystem sandbox by documented design, so no
+   *  amount of path confinement reaches them — this flag is the only thing that
+   *  does.
+   *
+   *  A PROPERTY OF THE WORKSPACE, not of the request: the client picks a
+   *  workspaceId, so a request-level flag would let the caller choose to be
+   *  unconfined. Set from the manifest, server-side, at provisioning time. */
+  confined?: boolean;
 }
 
 export interface Session {

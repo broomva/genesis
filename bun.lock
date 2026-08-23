@@ -6,6 +6,7 @@
       "name": "genesis",
       "devDependencies": {
         "@biomejs/biome": "^1.9.4",
+        "@types/bun": "^1.4.0",
         "turbo": "^2.3.3",
         "typescript": "^5.7.2",
       },
@@ -32,6 +33,7 @@
       "dependencies": {
         "@chat-adapter/state-memory": "4.30.0",
         "@chat-adapter/telegram": "4.30.0",
+        "@kapso/chat-adapter": "0.1.1",
         "chat": "4.30.0",
       },
       "devDependencies": {
@@ -401,6 +403,10 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
+
+    "@kapso/chat-adapter": ["@kapso/chat-adapter@0.1.1", "", { "dependencies": { "@chat-adapter/shared": "^4.29.0", "@kapso/whatsapp-cloud-api": "^0.2.1" }, "peerDependencies": { "chat": "^4.29.0" } }, "sha512-4QAqB4ADI7k1bbvHdjIB0r3qrBHahtET1IeJHYXc8ND+3uF0OmCK/5hRoNrKYhCzMMPHESK35t6wVkc+zWcJyw=="],
+
+    "@kapso/whatsapp-cloud-api": ["@kapso/whatsapp-cloud-api@0.2.3", "", { "dependencies": { "zod": "^4.1.11" } }, "sha512-qYZbxBvX6kX7I7dI0PX1W6TWUYQkJKXnf7UqmeWlYALIgsiP5CvFvH45jsWrdjdUPwK1emsyIuHKReDBd7j/Sg=="],
 
     "@levischuck/tiny-cbor": ["@levischuck/tiny-cbor@0.2.11", "", {}, "sha512-llBRm4dT4Z89aRsm6u2oEZ8tfwL/2l6BwpZ7JcyieouniDECM5AqNgr/y08zalEIvW3RSK4upYyybDcmjXqAow=="],
 
@@ -1799,6 +1805,8 @@
     "@dotenvx/dotenvx/execa": ["execa@5.1.1", "", { "dependencies": { "cross-spawn": "^7.0.3", "get-stream": "^6.0.0", "human-signals": "^2.1.0", "is-stream": "^2.0.0", "merge-stream": "^2.0.0", "npm-run-path": "^4.0.1", "onetime": "^5.1.2", "signal-exit": "^3.0.3", "strip-final-newline": "^2.0.0" } }, "sha512-8uSpZZocAZRBAPIEINJj3Lo9HyGitllczc27Eh5YYojjMFMn8yHMDMaUHE2Jqfq05D/wucwI4JGURyXt1vchyg=="],
 
     "@dotenvx/dotenvx/open": ["open@8.4.2", "", { "dependencies": { "define-lazy-prop": "^2.0.0", "is-docker": "^2.1.1", "is-wsl": "^2.2.0" } }, "sha512-7x81NCL719oNbsq/3mh+hVrAWmFuEYUqrq/Iw3kUzH8ReypT9QQ0BLoJS7/G9k6N81XjW4qHWtjWwe/9eLy1EQ=="],
+
+    "@kapso/whatsapp-cloud-api/zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 
     "@modelcontextprotocol/sdk/zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
 

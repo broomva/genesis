@@ -142,3 +142,29 @@ describe("genesisStream", () => {
     ).rejects.toThrow("HTTP 503");
   });
 });
+
+describe("buildRequestBody — workspace pinning (BRO-2216)", () => {
+  test("omits workspaceId entirely when unset", () => {
+    const body = buildRequestBody("t1", "hi");
+    expect("workspaceId" in body).toBe(false);
+  });
+
+  test("includes workspaceId when pinned", () => {
+    expect(buildRequestBody("t1", "hi", "ws-orchestrator")).toEqual({
+      id: "t1",
+      messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }],
+      workspaceId: "ws-orchestrator",
+      // BRO-2236/BRO-2241: a pin is by definition a channel naming a tenant, so it
+      // must travel with the flag that makes the engine REFUSE an unregistered or
+      // re-bound id instead of falling back to the default workspace. Asserted
+      // rather than ignored: silently dropping this re-opens the escalation.
+      channelQualified: true,
+    });
+  });
+
+  test("a blank workspaceId is omitted, not sent empty", () => {
+    // "" would fail the engine's charset guard and be dropped there anyway, but
+    // sending it at all misreports intent as "pin me to nothing".
+    expect("workspaceId" in buildRequestBody("t1", "hi", "")).toBe(false);
+  });
+});
