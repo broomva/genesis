@@ -108,6 +108,51 @@ describe("E2E — failure 2: api UP, stream opens then goes silent (18:5x->)", (
   }, 15_000);
 });
 
+describe("E2E — a stall actually CLOSES the connection", () => {
+  // The property that matters operationally. Ending the generator is not enough:
+  // a generator suspended on a never-settling await cannot run its own cleanup, so
+  // without the AbortController the request stays open and the socket leaks. A
+  // hung dispatch holding its connection is what exhausted the host on 2026-08-23.
+  test("the SERVER observes the request being aborted", async () => {
+    let aborted = false;
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        req.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('data: {"type":"start"}\n\n'));
+          },
+        });
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+
+    const ac = new AbortController();
+    const e = await failureOf(() =>
+      drain(
+        withStallTimeout(
+          genesisStream({
+            baseUrl: `http://127.0.0.1:${server.port}`,
+            threadId: "t",
+            text: "hi",
+            signal: ac.signal,
+          }),
+          150,
+          { onStall: () => ac.abort() },
+        ),
+      ),
+    );
+    expect(classifyDispatchFailure(e)).toBe("timeout");
+    // Give the abort a tick to reach the server before asserting.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(aborted).toBe(true);
+    server.stop(true);
+  }, 15_000);
+});
+
 describe("E2E — the two incident failures are DISTINGUISHABLE", () => {
   test("different class AND different tenant-visible message", async () => {
     const down = await failureOf(() =>

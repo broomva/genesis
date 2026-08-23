@@ -41,13 +41,23 @@ export const DEFAULT_STALL_MS = 5 * 60 * 1000;
 export async function* withStallTimeout<T>(
   src: AsyncGenerator<T>,
   ms: number = DEFAULT_STALL_MS,
-  timers: {
+  opts: {
+    /** Invoked BEFORE the stall error propagates. This is where the caller aborts
+     *  the underlying request.
+     *
+     *  Tearing down via the generator alone is not enough, and that is the whole
+     *  reason this hook exists: `src.return()` on a generator suspended inside an
+     *  `await` that never settles is QUEUED, not run, so the response body reader
+     *  is never released and the socket stays open. A hung dispatch that keeps its
+     *  connection is precisely what exhausted the host on 2026-08-23. Only
+     *  aborting the fetch itself actually closes it. */
+    onStall?: () => void;
     setTimeout?: (fn: () => void, ms: number) => unknown;
     clearTimeout?: (h: unknown) => void;
   } = {},
 ): AsyncGenerator<T> {
-  const set = timers.setTimeout ?? ((fn, d) => setTimeout(fn, d));
-  const clear = timers.clearTimeout ?? ((h) => clearTimeout(h as never));
+  const set = opts.setTimeout ?? ((fn, d) => setTimeout(fn, d));
+  const clear = opts.clearTimeout ?? ((h) => clearTimeout(h as never));
 
   while (true) {
     let handle: unknown;
@@ -59,7 +69,14 @@ export async function* withStallTimeout<T>(
     try {
       result = await Promise.race([src.next(), stalled]);
     } catch (err) {
-      // Tear the source down, but NEVER await it.
+      // Abort the underlying request FIRST — this is what actually closes the
+      // socket. Guarded: a throwing onStall must not replace the stall error.
+      try {
+        opts.onStall?.();
+      } catch {
+        // Deliberately swallowed — see above.
+      }
+      // Then tear the generator down, but NEVER await it.
       //
       // A generator suspended on a promise that never settles cannot resume, so
       // its `return()` never settles either — awaiting it hangs forever, which is

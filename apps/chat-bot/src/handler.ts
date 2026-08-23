@@ -303,6 +303,10 @@ export async function handleAgentMessage(
     // dispatch hangs forever, the catch below never runs, and the channel says
     // nothing at all — measured on 2026-08-23, where the stream opened and then
     // produced zero bytes for the 170s a client waited before giving up.
+    // The controller is what actually closes the socket on a stall. Ending the
+    // generator alone leaves the response body reader held, because a generator
+    // suspended on a never-settling await cannot run its own cleanup.
+    const dispatchAbort = new AbortController();
     const stream = withStallTimeout(
       genesisStream({
         baseUrl: opts.baseUrl,
@@ -311,8 +315,10 @@ export async function handleAgentMessage(
         token: opts.token,
         fetchImpl: opts.fetchImpl,
         workspaceId: opts.workspaceId,
+        signal: dispatchAbort.signal,
       }),
       opts.stallMs,
+      { onStall: () => dispatchAbort.abort() },
     );
     if (opts.streaming === false) {
       // Buffered path: drain first, then post whole. Streaming here would post
