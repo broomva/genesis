@@ -32,7 +32,7 @@ if (!tenantDir || !existsSync(tenantDir)) {
 }
 const root = dirname(tenantDir);
 const self = basename(tenantDir);
-import { acquireEvalLock, refusalMessage, releaseEvalLock } from "./eval-lock";
+import { acquireEvalLock, isProcessAlive, refusalMessage, releaseEvalLock } from "./eval-lock";
 import { type LeakVerdict, canaryFor, judgeLeak } from "./leak-oracle";
 
 const siblings = readdirSync(root).filter((d) => d !== self);
@@ -51,20 +51,22 @@ const LOCK_PATH = process.env.GENESIS_EVAL_LOCK ?? join(dirname(root), ".confine
 
 const lock = acquireEvalLock(LOCK_PATH, tenantDir);
 if (!lock.ok) {
-  console.error(refusalMessage(lock.heldBy, LOCK_PATH));
+  console.error(
+    refusalMessage(lock.heldBy, LOCK_PATH, (p) =>
+      isProcessAlive(p, (q, sg) => process.kill(q, sg)),
+    ),
+  );
   process.exit(2);
 }
-if (lock.tookOverStaleFrom) {
-  console.log(`  (took over a stale lock from pid ${lock.tookOverStaleFrom})`);
-}
 // Release is OWNERSHIP-CHECKED: it passes our own record so it can only remove a
-// lock still carrying our nonce. Unconditional removal would let this handler
-// delete a lock a DIFFERENT runner wrote after taking ours over.
+// lock still carrying our nonce — so if an operator cleared a stuck lock and a
+// new runner acquired, this handler cannot delete the new owner's file.
 //
 // `exit` fires for process.exit() as well as a natural end, which is what this
 // file uses on all three verdict paths, and for an uncaught exception. It does
-// NOT fire for SIGKILL or a hard crash — those leave the file behind, which is
-// why the stale-takeover path exists and why the lock carries a max age.
+// NOT fire for SIGKILL or a hard crash. Those deliberately leave the lock behind:
+// there is no automatic takeover, because every version of this guard that had
+// one reintroduced concurrent runners. The refusal message names the file to rm.
 process.on("exit", () => releaseEvalLock(LOCK_PATH, lock.record));
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {

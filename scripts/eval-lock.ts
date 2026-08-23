@@ -2,48 +2,68 @@
 //
 // WHY THIS EXISTS. On 2026-08-23 two confinement evals were started concurrently
 // on srv1692698 alongside live probe traffic. Each eval spawns a series of real
-// `claude` sessions against the deployed box; the host went to load ~15 and then
-// stopped scheduling userspace — sshd completed key exchange but never returned
-// a shell, genesis-api went 200@20s -> 200@25s -> nothing, and the WhatsApp
-// channel stopped answering for two real tenants. Recovery needed a console
-// reboot because every remote lever was already unreachable.
+// `claude` sessions against the deployed box; the host stopped scheduling
+// userspace, the WhatsApp channel went silent for two real tenants, and recovery
+// needed console access because every remote lever was already unreachable.
 //
-// WHAT IT DOES AND DOES NOT CLAIM. It bounds concurrent EVALS to one. It does
-// NOT control tenant traffic or operator probes, which were also present during
-// the incident, and the resource that actually ran out was never captured (there
-// was no shell to capture it with). So this removes one contributor to a
-// multi-source overload; it is not a proof against recurrence.
+// WHAT IT CLAIMS. At most one eval process holds this path at a time. That is the
+// whole contract.
+//
+// WHAT IT DOES NOT CLAIM. It does not bound tenant traffic or operator probes,
+// which were also present during the incident, and the resource that actually ran
+// out was never captured. It removes one contributor; it is not a proof against
+// recurrence.
+//
+// ── THE DESIGN, AND WHY IT IS THIS SMALL ────────────────────────────────────
+//
+// Two earlier versions were rejected by cross-model review, and the second
+// rejection is the instructive one.
+//
+// v1 read the path and then wrote it — a read-then-write TOCTOU. Two runners both
+// observe "no lock", both write, both proceed.
+//
+// v2 fixed that with an O_EXCL create but kept a STALE-TAKEOVER path: if the
+// recorded pid was dead, unlink the file and retry. That reintroduced races at a
+// different layer, and they are not hypothetical:
+//   - A and B both read a stale record. A unlinks and creates. B then unlinks
+//     A's FRESH lock and creates its own. Both return acquired.
+//   - Release read the record, confirmed the nonce, then unlinked — between those
+//     two steps a takeover could replace the file, so release deleted the NEW
+//     owner's lock.
+//   - O_EXCL publishes the inode before the body is written, so a contender could
+//     read a partial record, judge it corrupt, and unlink an ACTIVE writer's lock.
+//   - A max-age expiry, added to bound pid reuse, steals from any eval that
+//     legitimately runs longer than the age.
+//
+// Every one of those lives in the takeover path. Node and Bun expose no `flock`,
+// so there is no kernel-held lock available here to make takeover atomic. So the
+// takeover path is GONE rather than patched: this file no longer decides
+// anything from the lock's CONTENTS.
+//
+// The single ordering point is `writeFileSync(path, body, { flag: "wx" })`, which
+// Bun maps to O_CREAT|O_EXCL. Exactly one racer creates the file; every other gets
+// EEXIST from the kernel. The file is read ONLY to tell an operator who holds it,
+// and a read that fails or returns nonsense changes no decision.
+//
+// THE COST, STATED PLAINLY. A crashed or SIGKILLed eval leaves the lock behind and
+// the next run refuses until someone removes it. That is a deliberate trade: a
+// stuck lock is loud, visible, and fixed by one `rm`, whereas an automatic
+// takeover is exactly the machinery that kept reintroducing concurrent runners —
+// the failure this guard exists to prevent. The refusal message says so and names
+// the file.
 //
 // EXIT SEMANTICS. Refusing exits 2, matching the file this guards:
 // confinement-eval.ts already uses 2 for INVALID, on the rule that a run which
 // could not measure is not a run that passed. A concurrent run cannot produce a
-// trustworthy verdict either — it perturbs the very box it is measuring — so it
-// belongs in the same bucket, NOT in the exit-1 "boundary failed" bucket.
-//
-// MUTUAL EXCLUSION IS THE `wx` CREATE, NOT THE READ.
-// The first version of this file read the path and then wrote it, which is a
-// read-then-write TOCTOU: two runners both observe "no lock", both write, both
-// proceed — failing at exactly the job it was added to do. Cross-model review
-// and CodeRabbit independently flagged it.
-//
-// The only ordering point now is `writeFileSync(path, body, { flag: "wx" })`,
-// which Bun maps to O_CREAT|O_EXCL: exactly one racer creates the file and every
-// other gets EEXIST from the kernel. Reads exist only to REPORT who holds it and
-// to judge staleness; no read decides whether we may proceed.
-//
-// The steal path is race-safe for the same reason. Two runners may both judge a
-// lock stale and both unlink it, but they must then both re-enter the `wx`
-// create, where exactly one still wins. Unlink is best-effort on purpose.
+// trustworthy verdict either — it perturbs the very box it is measuring.
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
-/** Recorded holder of the lock.
+/** Recorded holder. Purely informational: nothing in acquisition reads it.
  *
- *  `nonce` is what makes release ownership-checked. pid alone cannot do it: a
- *  runner that stole a stale lock and a runner that later exits could both be
- *  "pid N" across a reuse, and the earlier version's unconditional unlink let
- *  ANY runner delete a lock a DIFFERENT runner was holding — reopening the gate
- *  while that runner was still going. */
+ *  `nonce` is load-bearing in exactly one place — release. If an operator clears
+ *  a stuck lock while its owner is somehow still alive and a new runner acquires,
+ *  the old owner's exit handler must not delete the new owner's file. */
 export interface LockRecord {
   readonly pid: number;
   readonly startedAt: string;
@@ -52,23 +72,44 @@ export interface LockRecord {
 }
 
 export type LockOutcome =
-  | { readonly ok: true; readonly record: LockRecord; readonly tookOverStaleFrom?: number }
+  | { readonly ok: true; readonly record: LockRecord }
   | { readonly ok: false; readonly heldBy: LockRecord | null };
 
-/** A lock older than this is treated as abandoned even if its pid answers.
+/** Read a file, or null. Tolerates concurrent removal.
  *
- *  This is the PID-REUSE mitigation, and it is a heuristic, not a proof: a pid
- *  can be recycled by an unrelated long-lived process, which would otherwise
- *  block every future eval forever with no way to tell from the outside. A
- *  confinement eval is minutes of work, so hours is far outside its envelope. */
-export const DEFAULT_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+ *  `existsSync` followed by `readFileSync` is itself a TOCTOU — the file can go
+ *  away in between and throw ENOENT. Catching is the whole check. */
+function readOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
 
-/** True when a process with this pid exists and we may signal it.
+/** Parse a holder record for REPORTING only.
  *
- *  `process.kill(pid, 0)` sends no signal and performs only the existence and
- *  permission check. EPERM means the process EXISTS but belongs to another user
- *  — that must count as alive, because treating it as dead is how a guard hands
- *  out a lock that is still held. Only ESRCH means "no such process". */
+ *  Returns null for absent, unparseable, or partially-written content. Because no
+ *  acquisition decision consults this, a partial read is harmless here — under
+ *  the v2 design the same null was a way in. */
+export function parseRecord(raw: string | null): LockRecord | null {
+  if (raw === null) return null;
+  try {
+    const r = JSON.parse(raw) as LockRecord;
+    return typeof r?.pid === "number" && typeof r?.nonce === "string" ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Advisory only: is the recorded pid currently running?
+ *
+ *  Shown to a human deciding whether a stuck lock is safe to remove. It is NOT
+ *  consulted by `acquireEvalLock` — that is the v2 mistake, and pid reuse makes
+ *  the answer unreliable in exactly the case where it would matter most.
+ *
+ *  EPERM means the process EXISTS but belongs to another user, so it counts as
+ *  alive; only ESRCH means "no such process". */
 export function isProcessAlive(pid: number, kill: (p: number, s: number) => void): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -79,50 +120,18 @@ export function isProcessAlive(pid: number, kill: (p: number, s: number) => void
   }
 }
 
-function parseRecord(raw: string | null): LockRecord | null {
-  if (raw === null) return null;
-  try {
-    const r = JSON.parse(raw) as LockRecord;
-    return typeof r?.pid === "number" ? r : null;
-  } catch {
-    // Unparseable: a crashed writer, or a partial read of a file another runner
-    // is mid-write on. Either way it names no holder we can honour.
-    return null;
-  }
-}
-
-/** Should an EXISTING lock stop us? Reporting only — it never grants the lock.
- *
- *  A record we cannot parse returns `false` (do not honour). That is safe here
- *  ONLY because the caller must still win the `wx` create afterwards; under the
- *  old read-then-write design the same answer would have been a way in. */
-export function shouldYieldTo(
-  record: LockRecord | null,
-  alive: (pid: number) => boolean,
-  nowMs: number,
-  maxAgeMs: number = DEFAULT_MAX_AGE_MS,
-): boolean {
-  if (record === null) return false;
-  if (!alive(record.pid)) return false;
-  const started = Date.parse(record.startedAt);
-  // An unparseable timestamp must not silently expire a LIVE holder.
-  if (Number.isNaN(started)) return true;
-  return nowMs - started < maxAgeMs;
-}
-
 export interface LockDeps {
   readFile?: (p: string) => string | null;
   /** MUST create exclusively and throw EEXIST if the path exists. */
   createExclusive?: (p: string, body: string) => void;
-  remove?: (p: string) => void;
-  kill?: (p: number, s: number) => void;
+  /** Returns whether a file was actually removed. */
+  remove?: (p: string) => boolean;
   pid?: number;
   now?: () => Date;
   nonce?: () => string;
-  maxAgeMs?: number;
 }
 
-/** Acquire the lock, or report who holds it.
+/** Acquire, or report who holds it. One create attempt: no retry, no takeover.
  *
  *  Callers that get `ok: false` must NOT proceed. Callers that get `ok: true`
  *  must pass the returned record to `releaseEvalLock`. */
@@ -131,105 +140,93 @@ export function acquireEvalLock(
   tenantDir: string,
   deps: LockDeps = {},
 ): LockOutcome {
-  const readFile =
-    deps.readFile ?? ((p: string) => (existsSync(p) ? readFileSync(p, "utf8") : null));
+  const readFile = deps.readFile ?? readOrNull;
   const createExclusive =
     deps.createExclusive ??
     ((p: string, body: string) => writeFileSync(p, body, { flag: "wx", mode: 0o644 }));
-  const remove =
-    deps.remove ??
-    ((p: string) => {
-      try {
-        unlinkSync(p);
-      } catch {
-        // Another racer removed it first; the wx create below still decides.
-      }
-    });
-  const kill = deps.kill ?? ((p: number, s: number) => process.kill(p, s));
   const pid = deps.pid ?? process.pid;
   const now = deps.now ?? (() => new Date());
   const nonce = deps.nonce ?? (() => crypto.randomUUID());
-  const maxAgeMs = deps.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
 
-  let tookOverStaleFrom: number | undefined;
+  const record: LockRecord = {
+    pid,
+    startedAt: now().toISOString(),
+    tenantDir,
+    nonce: nonce(),
+  };
 
-  // Bounded: each attempt either wins the create, yields, or removes one stale
-  // file. Without a bound, two runners repeatedly stealing from each other could
-  // spin. Three is enough for the real cases (free / stale / stale-then-taken).
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const record: LockRecord = {
-      pid,
-      startedAt: now().toISOString(),
-      tenantDir,
-      nonce: nonce(),
-    };
-    try {
-      createExclusive(lockPath, `${JSON.stringify(record, null, 2)}\n`);
-      return tookOverStaleFrom === undefined
-        ? { ok: true, record }
-        : { ok: true, record, tookOverStaleFrom };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
-    }
-
-    const held = parseRecord(readFile(lockPath));
-    if (shouldYieldTo(held, (p) => isProcessAlive(p, kill), now().getTime(), maxAgeMs)) {
-      return { ok: false, heldBy: held };
-    }
-    tookOverStaleFrom = held?.pid ?? 0;
-    remove(lockPath);
+  try {
+    createExclusive(lockPath, `${JSON.stringify(record, null, 2)}\n`);
+    return { ok: true, record };
+  } catch (err) {
+    // Only EEXIST means "someone else holds it". Anything else — ENOSPC, EACCES,
+    // a read-only mount — must propagate: swallowing it would let a run proceed
+    // believing it holds a lock that was never created.
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    return { ok: false, heldBy: parseRecord(readFile(lockPath)) };
   }
-
-  // Lost every race to a live competitor: correct outcome, not an error.
-  return { ok: false, heldBy: parseRecord(readFile(lockPath)) };
 }
 
-/** Release ONLY if the lock still names us.
+/** Release, but only if the lock still names us.
  *
- *  Unconditional unlink was a real defect in the first version: a runner that
- *  had taken over a stale lock could later have its own lock deleted by the
- *  earlier runner's exit handler, reopening the gate mid-run. Returns whether a
- *  file was actually removed, so a caller can log a surprising answer. */
+ *  Returns whether a file was actually removed — including `false` when the
+ *  unlink itself failed, so the return value never overstates what happened. */
 export function releaseEvalLock(
   lockPath: string,
   record: LockRecord | null,
   deps: Pick<LockDeps, "readFile" | "remove"> = {},
 ): boolean {
   if (!record) return false;
-  const readFile =
-    deps.readFile ?? ((p: string) => (existsSync(p) ? readFileSync(p, "utf8") : null));
+  const readFile = deps.readFile ?? readOrNull;
   const remove =
     deps.remove ??
     ((p: string) => {
       try {
         unlinkSync(p);
+        return true;
       } catch {
         // Best effort: a failed unlink must not turn a completed eval into a
-        // failed one. A leftover file is handled by the stale path next run.
+        // failed one. It is reported, not thrown.
+        return false;
       }
     });
 
   const held = parseRecord(readFile(lockPath));
   if (held?.nonce !== record.nonce) return false;
-  remove(lockPath);
-  return true;
+  return remove(lockPath);
 }
 
-/** Operator-facing refusal text. Kept here so the message and the exit code that
- *  carries it stay in one place. */
-export function refusalMessage(held: LockRecord | null, lockPath: string): string {
-  const who = held
-    ? `another run is already in progress (pid ${held.pid}, started ${held.startedAt}).\n  tenant: ${held.tenantDir}`
-    : "another run holds the lock (its record was unreadable).";
-  return [
-    `confinement eval REFUSED: ${who}`,
-    `  lock:   ${lockPath}`,
+/** Operator-facing refusal text. Kept beside the code so the message and the exit
+ *  code that carries it cannot drift apart. */
+export function refusalMessage(
+  held: LockRecord | null,
+  lockPath: string,
+  alive?: (pid: number) => boolean,
+): string {
+  const lines = ["confinement eval REFUSED: another run holds the lock.", `  lock:   ${lockPath}`];
+  if (held) {
+    lines.push(
+      `  pid:    ${held.pid}`,
+      `  since:  ${held.startedAt}`,
+      `  tenant: ${held.tenantDir}`,
+    );
+    if (alive) {
+      lines.push(
+        alive(held.pid)
+          ? "  status: that pid is currently RUNNING — wait for it."
+          : "  status: that pid is NOT running. The run probably crashed; see below.",
+      );
+    }
+  } else {
+    lines.push("  (the holder's record was unreadable — it may be mid-write.)");
+  }
+  lines.push(
     "",
-    "On 2026-08-23 two concurrent evals ran alongside live probe traffic and this host",
-    "stopped scheduling userspace; it needed a console reboot. The exhausted resource was",
-    "never captured, so concurrency is a contributor rather than a proven sole cause —",
-    "this guard removes the one contributor it can.",
+    "There is no automatic takeover, on purpose: every version of this guard that",
+    "reclaimed a stale lock automatically reintroduced concurrent runners, which is",
+    "the failure it exists to prevent. A stuck lock is loud and one `rm` fixes it.",
     "",
-    "Wait for the running eval, or if you are certain it is dead, remove the lock file.",
-  ].join("\n");
+    `If you are certain no eval is running:  rm ${lockPath}`,
+  );
+  return lines.join("\n");
 }

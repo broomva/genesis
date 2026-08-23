@@ -74,10 +74,10 @@ echo
 run_mutant "wx -> w (drops O_EXCL)"        '{ flag: "wx", mode: 0o644 }'        '{ flag: "w", mode: 0o644 }'         KILLED
 run_mutant "EPERM read as dead"            '=== "EPERM"'                        '=== "ESRCH"'                        KILLED
 run_mutant "release ignores ownership"     'if (held?.nonce !== record.nonce) return false;' 'if (false) return false;' KILLED
-run_mutant "never yields to a live holder" 'if (!alive(record.pid)) return false;' 'if (alive(record.pid)) return false;' KILLED
-run_mutant "max-age disabled (pid reuse)"  'return nowMs - started < maxAgeMs;'  'return true;'                       KILLED
+run_mutant "EEXIST swallowed as acquired" 'if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;' 'if (false) throw err;' KILLED
+run_mutant "parseRecord accepts junk"      'typeof r?.pid === "number" && typeof r?.nonce === "string"' 'true' KILLED
 # Control: prose no assertion reads. Must SURVIVE, or the harness is just red.
-run_mutant "CONTROL: unasserted prose"     'Wait for the running eval'          'Please wait for the running eval'   SURVIVED
+run_mutant "CONTROL: unasserted prose"     'There is no automatic takeover'     'There is no auto takeover'          SURVIVED
 
 echo
 after=$(git -c core.fsmonitor=false status --porcelain -- "$FILE" "$TESTS" | wc -l | tr -d ' ')
