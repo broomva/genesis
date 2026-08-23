@@ -21,6 +21,25 @@ export const anchor = (p: string): string => p.replace(/^\/+/, "");
  *  only `broomva/` and `genesis/`, so grepping the operator's keys was never denied. */
 export const READ_VERBS = ["Read", "Grep", "Glob"] as const;
 
+/** Every file-tool verb that can MODIFY a path.
+ *
+ *  Closing the read asymmetry was not enough, and this is the half that turns
+ *  disclosure into execution. The list protected the operator's home against
+ *  READING and not against WRITING, and the worst paths are worse to write than to
+ *  read:
+ *
+ *   - `~/.claude/**` — user-scope settings merge into EVERY Claude Code session on
+ *     the box. A `SessionStart` hook there is arbitrary execution as `agent`, who
+ *     holds NOPASSWD:ALL. The file is owned by uid agent, so nothing at the OS layer
+ *     stops the write either.
+ *   - `~/genesis/**` — the provisioner the operator later runs under sudo.
+ *   - `~/.ssh/**`, `~/.aws/**` — appending an authorized_key is as good as reading one.
+ *
+ *  The tenant's own directory is NOT under any protected glob (tenant dirs live at
+ *  RUNTIME_ROOT/<id>, i.e. ~/orchestrator-workspaces/<id>), so denying writes here
+ *  costs a tenant nothing it is entitled to. */
+export const WRITE_VERBS = ["Edit", "Write", "NotebookEdit"] as const;
+
 /** Paths under the operator's HOME a tenant must never observe.
  *
  *  Still a blocklist, with the weakness the provisioner already names: anything
@@ -45,7 +64,7 @@ export const PROTECTED_HOME_GLOBS = [
 export function denyRulesFor(home: string, tenantDir: string): string[] {
   return [
     ...PROTECTED_HOME_GLOBS.flatMap((g) =>
-      READ_VERBS.map((verb) => `${verb}(//${anchor(home)}/${g})`),
+      [...READ_VERBS, ...WRITE_VERBS].map((verb) => `${verb}(//${anchor(home)}/${g})`),
     ),
     // The tenant may not rewrite its OWN confinement settings.
     `Edit(//${anchor(tenantDir)}/.claude/**)`,

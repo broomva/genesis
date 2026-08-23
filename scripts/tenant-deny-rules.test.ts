@@ -20,6 +20,33 @@ describe("denyRulesFor — the file-tool boundary (BRO-2236)", () => {
     }
   });
 
+  test("the operator's home is protected against WRITING, not only reading", () => {
+    // The read asymmetry was only half of it. ~/.claude/** merges into EVERY Claude
+    // Code session on the box, so a SessionStart hook written there executes as
+    // `agent`, who holds NOPASSWD:ALL — and the file is owned by agent, so the OS
+    // layer does not stop it either. Reading these paths is disclosure; writing them
+    // is execution.
+    const rules = denyRulesFor(HOME, DIR);
+    for (const g of [".claude/**", "genesis/**", ".ssh/**", ".aws/**"]) {
+      for (const verb of ["Edit", "Write", "NotebookEdit"]) {
+        expect(rules).toContain(`${verb}(//home/agent/${g})`);
+      }
+    }
+  });
+
+  test("denying writes to HOME does not deny the tenant its OWN directory", () => {
+    // POSITIVE CONTROL for the rule above: a tenant that cannot write its own
+    // workspace is useless, and a deny list that broke that would still pass every
+    // assertion in the previous test.
+    const rules = denyRulesFor(HOME, DIR);
+    const ownDirWrites = rules.filter(
+      (r) => /^(Edit|Write|NotebookEdit)\(/.test(r) && r.includes(`${DIR.slice(1)}/`),
+    );
+    // The ONLY writes denied inside the tenant dir are its own .claude settings.
+    expect(ownDirWrites.every((r) => r.includes("/.claude/**"))).toBe(true);
+    expect(ownDirWrites.length).toBe(2);
+  });
+
   test("the rules FOLLOW home — they are not hardcoded to /home/agent", () => {
     // The sandbox denyRead layer is derived from HOME. These rules were literals, so
     // pointing GENESIS_TENANT_HOME elsewhere left the two layers guarding different
