@@ -1109,6 +1109,62 @@ describe("title generation (BRO-1665)", () => {
     expect((await store.findSessionByThread("tt"))?.title).toBe("Consensus Algorithms");
   });
 
+  /**
+   * The title spawn deliberately does not forward `this.extraArgs`, because those
+   * carry permission flags and the title prompt inlines untrusted tenant text.
+   * That same omission meant it did not forward `--strict-mcp-config` either, so
+   * the spawn inherited the OPERATOR's MCP servers on a turn a tenant wrote.
+   *
+   * Asserted as a PAIR. "confined gets the flag" alone would also pass if the flag
+   * were added unconditionally, which would silently confine the operator's own
+   * threads; and neither case may reintroduce a permission flag.
+   */
+  test("the title spawn is MCP-confined when the workspace is, and not otherwise", async () => {
+    async function argsForTitleSpawn(confined: boolean): Promise<string[] | undefined> {
+      const store = new InMemoryStore();
+      let seen: string[] | undefined;
+      let called = false;
+      const capturing = async (o: { extraArgs?: string[] }): Promise<RunResult> => {
+        called = true;
+        seen = o.extraArgs;
+        return {
+          state: { phase: "done", sessionId: "s", lastText: "A Title", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      };
+      const workspace = { ...ws, confined };
+      const sup = new Supervisor({
+        defaultWorkspace: workspace,
+        store,
+        run: capturing,
+        // The real agent's flags. The title spawn must never echo these back.
+        extraArgs: ["--dangerously-skip-permissions"],
+      });
+      await sup.dispatch("t-mcp", "some question", undefined, {});
+      seen = undefined;
+      called = false;
+      await (
+        sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+      ).generateTitleAsync("t-mcp", "some question", "a reply");
+      // A spawn that never happened would report `undefined` and read as a pass.
+      expect(called).toBe(true);
+      return seen;
+    }
+
+    const confined = await argsForTitleSpawn(true);
+    expect(confined).toEqual(["--strict-mcp-config"]);
+
+    const open = await argsForTitleSpawn(false);
+    expect(open ?? []).not.toContain("--strict-mcp-config");
+
+    // Neither polarity may leak the operator's permission flags into a prompt
+    // that inlines tenant-authored text.
+    for (const got of [confined, open]) {
+      expect(got ?? []).not.toContain("--dangerously-skip-permissions");
+    }
+  });
+
   test("generateTitleAsync does NOT clobber a user-renamed title", async () => {
     const store = new InMemoryStore();
     const titleRunner = async (): Promise<RunResult> => ({
