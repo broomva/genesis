@@ -10,10 +10,14 @@
 // ROUTING HINT and never an authorization claim. What makes that safe is the
 // delivery direction: results go to the number ON FILE, not to whoever is on
 // the line. A spoofer causes the answer to be sent to the real owner's
-// WhatsApp — they gain nothing and the owner sees an unrequested reply, which
-// is a detection, not a breach. Any capability that does NOT have that property
-// (acting on the caller's behalf, reading their data aloud) must not be added
-// here without a second factor.
+// WhatsApp — the owner sees an unrequested reply, which is a detection, not a
+// breach. Stated precisely, because an earlier version of this header said a
+// spoofer gains "nothing": they gain exactly ONE bit, whether the number they
+// guessed is in the principal set, which is the minimum the agent needs to choose
+// between taking a message and offering a follow-up. What they must never gain is
+// anything UNBOUNDED (a name, the account's data) or any action on their behalf.
+// Any capability that does NOT have that property must not be added here without
+// a second factor.
 
 import { createHash, timingSafeEqual } from "node:crypto";
 
@@ -135,7 +139,7 @@ export class VoiceValidationError extends Error {}
 /** Build a ticket from a tool call. Throws VoiceValidationError on input the
  *  agent should be told to fix; its message is SAFE to return to the caller. */
 export function buildTicket(
-  input: { callerId?: string; request?: string; conversationId?: string },
+  input: { callerId?: unknown; request?: unknown; conversationId?: unknown },
   principals: readonly DeliverablePrincipal[],
   now: string,
   id: string,
@@ -143,7 +147,11 @@ export function buildTicket(
   // Validate BEFORE clamping: clampRequest calls .trim(), which throws on a
   // non-string and turns a malformed tool call into a 500 mid-phone-call.
   const rawRequest = asString(input.request, "request", MAX_REQUEST_CHARS * 4);
-  const callerId = asString(input.callerId, "callerId", MAX_CALLER_ID_CHARS);
+  // readCallerId, NOT asString directly: round 2 claimed both routes shared one
+  // boundary while this called the generic helper and only identify called the
+  // named one — two semantic boundaries for one field, which is how they drifted
+  // in the first place. (P20 Strata A, round 3.)
+  const callerId = readCallerId(input.callerId);
   const conversationId = asString(
     input.conversationId,
     "conversationId",

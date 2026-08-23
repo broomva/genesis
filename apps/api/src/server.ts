@@ -94,11 +94,23 @@ export interface BuildOpts {
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
-  /** The channel a queued answer will actually be delivered over. UNDEFINED —
-   *  the default — means no delivery leg is wired, and /voice/request then tells
-   *  every caller a message was taken rather than promising a follow-up nothing
-   *  can make. Set only once a consumer genuinely drains the queue. */
-  voiceDelivery?: "whatsapp";
+  /** The delivery leg itself — NOT a flag asserting one exists.
+   *
+   *  Round 2 made this `voiceDelivery?: "whatsapp"` read from an env var, and
+   *  round 3 rejected that correctly: a string an operator sets is an assertion,
+   *  and `GENESIS_VOICE_DELIVERY=whatsapp` re-enabled the impossible promise from
+   *  a config file while the repo still contained no consumer. A comment warning
+   *  against that does not enforce it.
+   *
+   *  So the capability is now the CONSUMER. `deliver` is the function that
+   *  actually sends a queued answer; there is no way to claim the channel without
+   *  supplying one, because the claim and the mechanism are the same value. Until
+   *  a consumer exists (scope item 4, blocked on #107) nothing can construct this,
+   *  and both routes therefore tell callers a message was taken. */
+  voiceDelivery?: {
+    readonly channel: "whatsapp";
+    readonly deliver: (ticket: VoiceTicket, answer: string) => Promise<void>;
+  };
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
@@ -244,7 +256,9 @@ export function build(opts: BuildOpts) {
     // are strangers and the agent's correct move for them is to take a message.
     app.post("/voice/identify", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      const body = (await c.req.json().catch(() => ({}))) as { callerId?: unknown };
+      // `?? {}` because a literal `null` body is VALID json, so .catch() never
+      // fires and the dereference below became a 500 on both routes.
+      const body = ((await c.req.json().catch(() => ({}))) ?? {}) as { callerId?: unknown };
       // SAME validation boundary as /voice/request. Round 1 hardened buildTicket
       // and left this route casting raw JSON, so the two disagreed about what a
       // callerId may be: `42` was a 500 here and a 400 there.
@@ -288,10 +302,10 @@ export function build(opts: BuildOpts) {
     // rather than dangerous.
     app.post("/voice/request", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      const body = (await c.req.json().catch(() => ({}))) as {
-        callerId?: string;
-        request?: string;
-        conversationId?: string;
+      const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {
+        callerId?: unknown;
+        request?: unknown;
+        conversationId?: unknown;
       };
       let ticket: VoiceTicket;
       try {
@@ -317,7 +331,7 @@ export function build(opts: BuildOpts) {
         // consumer drains the queue and sends, `voiceDelivery` is undefined and
         // every caller correctly hears that a message was taken. (P20 Strata A,
         // round 1; the delivery leg is BRO-2228 scope item 4, blocked on #107.)
-        followUp: ticket.deliverTo && opts.voiceDelivery ? opts.voiceDelivery : "none",
+        followUp: ticket.deliverTo && opts.voiceDelivery ? opts.voiceDelivery.channel : "none",
       });
     });
   }

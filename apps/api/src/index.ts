@@ -311,12 +311,13 @@ const voicePrincipals = voiceSecret
   ? parseVoicePrincipals(process.env.GENESIS_VOICE_PRINCIPALS)
   : [];
 const enqueueVoice = voiceSecret ? createVoiceQueue(voiceQueueDir) : undefined;
-// What a queued answer will actually be delivered over. Deliberately opt-IN and
-// deliberately still off: nothing drains the queue yet (BRO-2228 scope item 4,
-// blocked on #107), and until something does, promising a caller a WhatsApp
-// follow-up would be a promise the system cannot keep. Set
-// GENESIS_VOICE_DELIVERY=whatsapp only once a consumer genuinely sends.
-const voiceDelivery = process.env.GENESIS_VOICE_DELIVERY === "whatsapp" ? "whatsapp" : undefined;
+// The delivery leg. There is deliberately NO env var here: build() takes the
+// sending function itself, so the capability cannot be claimed without the
+// mechanism. Nothing drains the queue yet (scope item 4, blocked on #107), so
+// this is undefined and both routes correctly tell callers a message was taken.
+// When the consumer lands it is passed here — and that same act is what makes
+// the promise true, rather than a flag asserting it already is.
+const voiceDelivery = undefined;
 if (voiceSecret) {
   // An enabled channel with no principals still ANSWERS — every caller resolves
   // unknown and can leave a message. That is a legitimate configuration, so this
@@ -325,7 +326,7 @@ if (voiceSecret) {
   console.log(
     `[genesis] voice channel → /voice/* enabled (queue: ${join(voiceQueueDir, "queue.jsonl")}, ` +
       `${voicePrincipals.length} principal(s) can receive follow-up, ` +
-      `delivery: ${voiceDelivery ?? "NONE — callers are told a message was taken"})`,
+      `delivery: ${voiceDelivery ? "wired" : "NONE — callers are told a message was taken"})`,
   );
 }
 

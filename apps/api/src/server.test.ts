@@ -97,7 +97,10 @@ describe("voice routes (BRO-2228)", () => {
       workspaceRoot: "/tmp",
       voiceSecret: SECRET,
       voicePrincipals: PRINCIPALS,
-      voiceDelivery: "whatsapp",
+      // The capability IS the consumer: there is no way to claim the channel
+      // without supplying the function that sends. Tests pass a stub; production
+      // passes nothing until #107 lands, which is why callers hear "none".
+      voiceDelivery: { channel: "whatsapp", deliver: async () => {} },
       enqueueVoice: (t: unknown) => {
         enqueued.push(t);
       },
@@ -159,9 +162,11 @@ describe("voice routes (BRO-2228)", () => {
 
   test("SECURITY: identify NEVER discloses the principal's name (P20 round 1)", async () => {
     // Caller id is spoofable, so anything this route returns is returned to
-    // whoever guessed the number. `known` echoes back a claim the caller already
-    // made; a NAME is information they did not have and did not prove a right
-    // to. The original response included it.
+    // whoever guessed the number. `known` is ONE bit — set membership — which the
+    // agent cannot answer without; calling it a mere echo of the caller's own
+    // claim understated it, and this comment previously did. A NAME is unbounded
+    // information they did not have and did not prove a right to. The original
+    // response included it.
     const { app } = voiceApp();
     const res = await post(app as never, "/voice/identify", { callerId: "573017758620" }, SECRET);
     const body = (await res.json()) as Record<string, unknown>;
@@ -226,9 +231,35 @@ describe("voice routes (BRO-2228)", () => {
     // The round-1 failure was a fix landing on one route. This asserts the two
     // in one place so a future divergence fails here rather than in production.
     const { app } = voiceApp();
+    // Round 3: one non-string case would not catch max-length or null-body drift.
+    const rejected: Array<{ label: string; body: unknown }> = [
+      { label: "non-string", body: { callerId: 42, request: "hi" } },
+      { label: "over-length", body: { callerId: "9".repeat(1000), request: "hi" } },
+    ];
     for (const path of ["/voice/identify", "/voice/request"]) {
-      const res = await post(app as never, path, { callerId: 42, request: "hi" }, SECRET);
-      expect(res.status).toBe(400);
+      for (const c of rejected) {
+        const res = await post(app as never, path, c.body, SECRET);
+        expect({ path, case: c.label, status: res.status }).toEqual({
+          path,
+          case: c.label,
+          status: 400,
+        });
+      }
+      // A literal `null` body is valid JSON, and round 3 measured a 500 on both
+      // routes. They are NOT required to agree on the status — identify treats an
+      // absent caller as a normal unknown (200), request requires a request field
+      // (400) — but neither may 500, which is the invariant that was broken.
+      const nullBody = await post(app as never, path, null, SECRET);
+      expect({ path, status: nullBody.status }).not.toEqual({ path, status: 500 });
+      expect(nullBody.status).toBeLessThan(500);
+      // ...and both must ACCEPT the same human spelling of a valid number.
+      const ok = await post(
+        app as never,
+        path,
+        { callerId: "+57 301 775 8620", request: "hi" },
+        SECRET,
+      );
+      expect({ path, status: ok.status }).toEqual({ path, status: 200 });
     }
   });
 
@@ -257,9 +288,14 @@ describe("voice routes (BRO-2228)", () => {
     ).toThrow(/enqueueVoice/);
   });
 
-  test("a retried tool call collapses onto ONE ticket id (idempotency)", async () => {
-    // A lost response makes the provider retry; a fresh UUID per attempt turned
-    // one caller request into N agent runs and N WhatsApp messages.
+  test("a retried tool call yields a STABLE ticket id (not yet idempotency)", async () => {
+    // Named for what it proves. A fresh UUID per attempt turned one caller
+    // request into N tickets; the id is now stable across retries, which is the
+    // groundwork a consumer needs to collapse them. It does NOT dedupe: the second
+    // record really is appended and nothing removes it until a consumer exists. An
+    // earlier version asserted two records while its own comment claimed "the
+    // delivery leg dedupes on id" — a component this tree does not contain.
+    // (P20 Strata A, round 3.)
     const { app, enqueued } = voiceApp();
     const body = {
       callerId: "573017758620",
@@ -273,7 +309,7 @@ describe("voice routes (BRO-2228)", () => {
       ticketId: string;
     };
     expect(a.ticketId).toBe(b.ticketId);
-    expect(enqueued).toHaveLength(2); // appended twice; the delivery leg dedupes on id
+    expect(enqueued).toHaveLength(2); // appended twice — dedupe arrives WITH the consumer
   });
 
   test("a non-string field is a caller-safe 400, never a 500", async () => {

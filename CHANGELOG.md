@@ -32,7 +32,17 @@
 - Caller ID is treated as a **routing hint, never an authorization claim**. It is
   spoofable; safety comes from delivering only to the number on file, so a spoofer
   causes the real owner to receive an unrequested reply — a detection, not a
-  breach. Any capability without that property needs a second factor.
+  breach. Stated precisely: a spoofer does learn ONE bit — whether the guessed
+  number is in the principal set — which is the minimum the agent needs to choose
+  between taking a message and offering a follow-up. What they must never gain is
+  anything unbounded (a name, the account's data) or any action on their behalf.
+  `/voice/identify` returned the principal's **name** and no longer does.
+- **The delivery channel is the consumer, not a flag.** `build()` takes the
+  function that sends, so no configuration can claim a follow-up channel with no
+  mechanism behind it. There is deliberately no env var: an earlier design had
+  one, and `GENESIS_VOICE_DELIVERY=whatsapp` re-enabled the impossible promise
+  from a config file while the repo contained no consumer. Until that consumer
+  lands, both routes tell every caller a message was taken.
 - An enqueue failure **propagates** to a 503, deliberately unlike the event
   trace's swallow-everything policy: a dropped ticket is a follow-up promised
   aloud on a call and then silently never delivered.

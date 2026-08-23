@@ -53,11 +53,14 @@ describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
     expect(src).toMatch(/const\s+voicePrincipals\s*=[^;]*parseVoicePrincipals\(/);
   });
 
-  test("delivery stays OPT-IN: index.ts must not hardcode a delivery channel", () => {
-    // Turning this on without a consumer draining the queue re-creates the
-    // blocker: a caller told "I'll message you on WhatsApp" and nothing sends.
+  test("delivery cannot be claimed from configuration", () => {
+    // Round 3 rejected the env-var design: a string an operator sets is an
+    // assertion, so GENESIS_VOICE_DELIVERY=whatsapp re-enabled the impossible
+    // promise from a config file while no consumer existed. The capability is now
+    // the consumer function itself, so there must be NO env var and no string
+    // literal claiming a channel.
     const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
-    expect(src).toContain("GENESIS_VOICE_DELIVERY");
+    expect(src).not.toContain("GENESIS_VOICE_DELIVERY");
     expect(src).not.toMatch(/voiceDelivery\s*[:=]\s*["']whatsapp["']/);
   });
 });
