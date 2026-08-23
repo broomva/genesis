@@ -144,7 +144,18 @@ export function siblingInvisible(out: string, sibling: string): boolean {
   if (sibling.length === 0) return false; // a blank name would match nothing and always "pass"
   const listing = decodeListing(p);
   if (listing === null) return false; // undecodable -> NOT MEASURED, never a pass
-  return !listing.includes(sibling);
+  // EXACT ENTRY match, not substring. `ls -A` emits one entry per line, and
+  // base64 preserves those newlines, so entries can be compared properly.
+  // `.includes()` collided in both directions on real-shaped data:
+  //   listing "573214994114-backup", sibling "573214994114" -> claimed a BREACH
+  //     that had not happened (a false FAIL on the eval's most important row)
+  //   listing "5732149941140",       sibling "5732149"      -> same collision
+  // Tenant ids are phone numbers, so a longer name sharing a prefix is exactly
+  // the shape a backup or scratch directory takes.
+  return !listing
+    .split("\n")
+    .map((e) => e.trim())
+    .includes(sibling);
 }
 
 /** The listing travels BASE64. Raw text was unsafe three ways, each a false PASS:

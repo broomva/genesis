@@ -88,6 +88,9 @@ run_mutant "sudo status 0 read as denied"              'return status !== "0";
 /** `docker version`' KILLED
 run_mutant "listing decoded loosely (b64 guard off)"  'if (!/^[A-Za-z0-9+/=]+$/.test(t)) return null;' 'if (false) return null;' KILLED
 run_mutant "multiple markers: first wins again"       'if (found.length !== 1) return null;' 'if (found.length === 0) return null;' KILLED
+run_mutant "entry match becomes substring again"       '.map((e) => e.trim())
+    .includes(sibling);' '.map((e) => e.trim())
+    .join("").includes(sibling);' KILLED
 run_mutant "degenerate proof accepted"                 'if (expr.includes(product)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED

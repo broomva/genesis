@@ -141,8 +141,26 @@ describe("siblingInvisible — base64 listing, the arc's strongest claim", () =>
   // were omitted entirely so a hidden sibling was invisible to the probe.
   test("a `>` in another name can no longer truncate the sibling out of view", () =>
     expect(siblingInvisible(mk("LS", b64(`weird>name\n${SIB}`)), SIB)).toBe(false));
+  // `ls` without -A omits dotfiles, so a dot-prefixed sibling directory was
+  // invisible to the probe that existed to find it. `readdirSync` returns such a
+  // name verbatim, so the sibling id itself carries the dot.
+  //
+  // The previous version of this test asserted `.hidden<SIB>` was "seen", which
+  // only passed because matching was by SUBSTRING — it was testing the bug.
   test("a DOTFILE sibling is seen (ls -A)", () =>
-    expect(siblingInvisible(mk("LS", b64(`.hidden${SIB}`)), SIB)).toBe(false));
+    expect(siblingInvisible(mk("LS", b64(`573017758620\n.${SIB}`)), `.${SIB}`)).toBe(false));
+
+  // `.includes()` collided both ways on real-shaped data. Tenant ids are phone
+  // numbers, so a longer name sharing a prefix is exactly what a backup dir looks
+  // like — and the old check called that a breach.
+  test("a LONGER name containing the sibling id is NOT the sibling", () =>
+    expect(siblingInvisible(mk("LS", b64(`573017758620\n${SIB}-backup`)), SIB)).toBe(true));
+  test("a sibling id that is a PREFIX of a real entry does not collide", () =>
+    expect(siblingInvisible(mk("LS", b64("5732149941140")), "5732149")).toBe(true));
+  test("...but the exact entry is still caught", () =>
+    expect(siblingInvisible(mk("LS", b64(`573017758620\n${SIB}\nother`)), SIB)).toBe(false));
+  test("surrounding whitespace on an entry does not hide it", () =>
+    expect(siblingInvisible(mk("LS", b64(`573017758620\n  ${SIB}  `)), SIB)).toBe(false));
 
   test("an undecodable payload is NOT MEASURED, never a pass", () =>
     expect(siblingInvisible(mk("LS", "not base64!!"), SIB)).toBe(false));
