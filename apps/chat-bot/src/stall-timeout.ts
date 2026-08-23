@@ -33,6 +33,10 @@ export class StreamStallError extends Error {
 
 export const DEFAULT_STALL_MS = 5 * 60 * 1000;
 
+/** Sentinel: the timer fired but the source is alive, so re-arm. Not an Error —
+ *  it must never escape this module or be mistaken for a failure. */
+const RE_ARM = Symbol("stall-rearm");
+
 /** Yield through `src`, failing if any single gap between chunks exceeds `ms`.
  *
  *  On stall the source's `return()` is invoked so the underlying request is torn
@@ -52,6 +56,15 @@ export async function* withStallTimeout<T>(
      *  connection is precisely what exhausted the host on 2026-08-23. Only
      *  aborting the fetch itself actually closes it. */
     onStall?: () => void;
+    /** Milliseconds since the source last showed ANY sign of life, however it
+     *  defines that. When supplied, a fired timer re-arms instead of throwing if
+     *  this is under the window.
+     *
+     *  Without it the bound measures YIELDS, which for `genesisStream` means
+     *  emitted text — and a turn spending minutes inside a tool call emits nothing
+     *  while being entirely healthy. Aborting that is worse than the diagnostic
+     *  gap this module was added to close. */
+    idleMs?: () => number;
     setTimeout?: (fn: () => void, ms: number) => unknown;
     clearTimeout?: (h: unknown) => void;
   } = {},
@@ -59,39 +72,67 @@ export async function* withStallTimeout<T>(
   const set = opts.setTimeout ?? ((fn, d) => setTimeout(fn, d));
   const clear = opts.clearTimeout ?? ((h) => clearTimeout(h as never));
 
-  while (true) {
-    let handle: unknown;
-    const stalled = new Promise<never>((_, reject) => {
-      handle = set(() => reject(new StreamStallError(ms)), ms);
-    });
+  // One `next()` is kept across re-arms: re-calling it would request a SECOND
+  // value and drop the pending one.
+  let pending: Promise<IteratorResult<T>> | undefined;
 
-    let result: IteratorResult<T>;
-    try {
-      result = await Promise.race([src.next(), stalled]);
-    } catch (err) {
-      // Abort the underlying request FIRST — this is what actually closes the
-      // socket. Guarded: a throwing onStall must not replace the stall error.
+  try {
+    while (true) {
+      pending ??= src.next();
+      let handle: unknown;
+      const stalled = new Promise<never>((_, reject) => {
+        handle = set(() => {
+          // Alive but quiet: re-arm rather than kill a healthy turn.
+          const idle = opts.idleMs?.();
+          if (idle !== undefined && idle < ms) return reject(RE_ARM);
+          reject(new StreamStallError(ms));
+        }, ms);
+      });
+
+      let result: IteratorResult<T>;
       try {
-        opts.onStall?.();
-      } catch {
-        // Deliberately swallowed — see above.
+        result = await Promise.race([pending, stalled]);
+        pending = undefined;
+      } catch (err) {
+        if (err === RE_ARM) {
+          clear(handle);
+          continue; // `pending` deliberately retained
+        }
+        // Abort the underlying request FIRST — this is what actually closes the
+        // socket. Guarded: a throwing onStall must not replace the stall error.
+        // ONLY on a stall: `next()` can reject for the source's own reasons, and
+        // firing the abort hook for those would violate this hook's contract.
+        if (err instanceof StreamStallError) {
+          try {
+            opts.onStall?.();
+          } catch {
+            // Deliberately swallowed — see above.
+          }
+        }
+        // Then tear the generator down, but NEVER await it.
+        //
+        // A generator suspended on a promise that never settles cannot resume, so
+        // its `return()` never settles either — awaiting it hangs forever, which is
+        // precisely the failure this whole module exists to bound. Found by the
+        // "stream that never yields" test hanging the runner.
+        //
+        // Fire-and-forget with a swallowed rejection: the stall is the error worth
+        // reporting, and a cleanup failure must not mask or delay it.
+        void Promise.resolve(src.return?.(undefined as never)).catch(() => undefined);
+        throw err;
+      } finally {
+        clear(handle);
       }
-      // Then tear the generator down, but NEVER await it.
-      //
-      // A generator suspended on a promise that never settles cannot resume, so
-      // its `return()` never settles either — awaiting it hangs forever, which is
-      // precisely the failure this whole module exists to bound. Found by the
-      // "stream that never yields" test hanging the runner.
-      //
-      // Fire-and-forget with a swallowed rejection: the stall is the error worth
-      // reporting, and a cleanup failure must not mask or delay it.
-      void Promise.resolve(src.return?.(undefined as never)).catch(() => undefined);
-      throw err;
-    } finally {
-      clear(handle);
-    }
 
-    if (result.done) return;
-    yield result.value;
+      if (result.done) return;
+      yield result.value;
+    }
+  } finally {
+    // DOWNSTREAM cancellation. If the consumer breaks out — `drainStream` throws,
+    // chunking fails, the caller returns early — this generator is closed and
+    // execution resumes here. Without forwarding, `src` is left suspended and its
+    // response body reader is never released, so the socket stays open. Same leak
+    // as the stall path, reached from the other direction.
+    void Promise.resolve(src.return?.(undefined as never)).catch(() => undefined);
   }
 }

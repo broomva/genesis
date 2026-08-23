@@ -113,6 +113,12 @@ export function classifyDispatchFailure(e: unknown): DispatchFailure {
 }
 
 function classify(e: unknown): DispatchFailure {
+  // PROVENANCE FIRST. An agent's own error text can contain anything — including
+  // an exact copy of the transport messages below, or an object carrying a `code`.
+  // Checking shapes first let the agent's payload decide its own classification,
+  // which is attacker-influenced input steering an operator-facing diagnosis.
+  if (isAgentReported(e)) return "agent-error";
+
   const codes = codesOf(e);
   const msg = e instanceof Error ? e.message : String(e ?? "");
 
@@ -141,9 +147,8 @@ function classify(e: unknown): DispatchFailure {
   // misattributed agent failure.
   if (/unable to connect/i.test(msg)) return "backend-unreachable";
 
-  // POSITIVE attribution only. Everything unmatched — a thread.post failure, a
-  // parser bug, a stream consumer error — is `unknown`, not the agent's fault.
-  if (isAgentReported(e)) return "agent-error";
+  // POSITIVE attribution only. Everything unmatched — a parser bug, a stream
+  // consumer error — is `unknown`, not the agent's fault.
   return "unknown";
 }
 

@@ -52,9 +52,9 @@ export interface HandlerOptions {
    *
    *  Defaults to true — Telegram's behavior is unchanged. */
   streaming?: boolean;
-  /** Abort a dispatch that produces NOTHING for this long. Resets on every chunk,
-   *  so it bounds silence rather than total duration and cannot cut off a slow but
-   *  progressing turn. Defaults to DEFAULT_STALL_MS. */
+  /** Abort a dispatch whose SSE stream shows no activity at all for this long.
+   *  Liveness is measured from frames, not from emitted text, so a turn sitting in
+   *  a long tool call is never cut off. Defaults to DEFAULT_STALL_MS. */
   stallMs?: number;
 }
 
@@ -297,6 +297,7 @@ export async function handleAgentMessage(
   if (await handleControlCommand(thread, trimmed, opts).catch(() => false)) return;
 
   await thread.startTyping?.().catch(() => {});
+  let posting = false;
   try {
     // Bounded by SILENCE, not by total duration: the timer resets on every chunk,
     // so a slow-but-progressing turn is never cut off. Without this a wedged
@@ -307,6 +308,10 @@ export async function handleAgentMessage(
     // generator alone leaves the response body reader held, because a generator
     // suspended on a never-settling await cannot run its own cleanup.
     const dispatchAbort = new AbortController();
+    // Liveness is measured from SSE FRAMES, not from emitted text. genesisStream
+    // yields only text parts, so a turn inside a long tool call emits nothing while
+    // being entirely healthy — a yield-based bound would abort it.
+    let lastActivity = Date.now();
     const stream = withStallTimeout(
       genesisStream({
         baseUrl: opts.baseUrl,
@@ -316,15 +321,22 @@ export async function handleAgentMessage(
         fetchImpl: opts.fetchImpl,
         workspaceId: opts.workspaceId,
         signal: dispatchAbort.signal,
+        onActivity: () => {
+          lastActivity = Date.now();
+        },
       }),
       opts.stallMs,
-      { onStall: () => dispatchAbort.abort() },
+      {
+        onStall: () => dispatchAbort.abort(),
+        idleMs: () => Date.now() - lastActivity,
+      },
     );
     if (opts.streaming === false) {
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
       const chunks = chunkForWhatsapp(reply);
+      posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
         // from the bot being down, which is the failure mode this whole channel
@@ -334,13 +346,17 @@ export async function handleAgentMessage(
         for (const chunk of chunks) await thread.post(chunk);
       }
     } else {
+      posting = true;
       await thread.post(stream);
     }
   } catch (e) {
     // The class goes to the channel; the ERROR ITSELF only ever goes to the log.
     // A tenant on a shared number must not receive a raw message that could carry
     // a path, a hostname, or a token fragment.
-    const kind = classifyDispatchFailure(e);
+    // A failure while POSTING is the channel, not Genesis. Reporting a
+    // channel-side `TypeError("fetch failed")` as "the agent backend is not
+    // reachable" would point an operator at the wrong system entirely.
+    const kind = posting ? "unknown" : classifyDispatchFailure(e);
     console.error(`[genesis-bot] dispatch failed (${kind})`, e);
     await thread.post(dispatchFailureMessage(kind)).catch(() => {});
   }
