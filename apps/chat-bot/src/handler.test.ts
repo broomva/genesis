@@ -465,7 +465,7 @@ describe("turn status signals", () => {
     };
   }
 
-  test("marks working before the agent runs, done after it replies", async () => {
+  test("marks the turn done once it has replied", async () => {
     const thread = mockThread("kapso:a:b");
     const r = recorder();
     await handleAgentMessage(
@@ -474,7 +474,7 @@ describe("turn status signals", () => {
       { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
       r.signals,
     );
-    expect(r.seen).toEqual(["working", "done"]);
+    expect(r.seen).toEqual(["done"]);
     expect(thread.posts).toEqual(["hi"]);
   });
 
@@ -490,7 +490,7 @@ describe("turn status signals", () => {
       { baseUrl: "https://x", fetchImpl: boom, streaming: false },
       r.signals,
     );
-    expect(r.seen).toEqual(["working", "failed"]);
+    expect(r.seen).toEqual(["failed"]);
   });
 
   test("a closed 24h window is NOT reported as a normal failure", async () => {
@@ -516,7 +516,7 @@ describe("turn status signals", () => {
       { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
       r.signals,
     );
-    expect(r.seen).toEqual(["working"]);
+    expect(r.seen).toEqual([]);
   });
 
   test("an ordinary post failure DOES mark failed and apologises", async () => {
@@ -540,7 +540,7 @@ describe("turn status signals", () => {
       { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
       r.signals,
     );
-    expect(r.seen).toEqual(["working", "failed"]);
+    expect(r.seen).toEqual(["failed"]);
     expect(apologised).toBe(true);
   });
 
@@ -688,14 +688,13 @@ describe("chunkForWhatsapp — fractional limits", () => {
 });
 
 describe("P20 round 2 — status ordering and the shared budget", () => {
-  test("a SLOW 'working' can never land after 'done'", async () => {
-    // The race introduced by making 'working' fire-and-forget: two independent
-    // promises can resolve out of order, leaving the reaction stuck on 👀 —
-    // a status claiming the turn never finished, on a turn that did.
+  test("exactly ONE status call per turn — nothing can arrive out of order", async () => {
+    // The structural answer to the ordering race: a single terminal call has
+    // nothing to race against. An abandoned-but-uncancelled earlier reaction
+    // was the defect; there is no earlier reaction now.
     const applied: TurnStatus[] = [];
     const signals = {
       async setStatus(s: TurnStatus) {
-        if (s === "working") await new Promise((r) => setTimeout(r, 30));
         applied.push(s);
       },
     };
@@ -706,8 +705,7 @@ describe("P20 round 2 — status ordering and the shared budget", () => {
       { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
       signals,
     );
-    expect(applied).toEqual(["working", "done"]);
-    expect(applied.at(-1)).toBe("done"); // the visible status when it settles
+    expect(applied).toEqual(["done"]);
   });
 
   test("a NEVER-SETTLING status cannot block the terminal status", async () => {

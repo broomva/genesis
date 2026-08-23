@@ -265,8 +265,21 @@ export async function withTimeout(p: Promise<unknown> | undefined, ms: number): 
   }
 }
 
-/** Lifecycle of one turn, as shown on the user's own inbound message. */
-export type TurnStatus = "working" | "done" | "failed";
+/** How a finished turn is marked on the user's own inbound message.
+ *
+ *  TERMINAL ONLY — there is deliberately no "working" state. An earlier version
+ *  sent 👀 on receipt and replaced it on completion, and that ordering could not
+ *  be made safe: the two reactions are independent API calls, and abandoning a
+ *  slow one (which is all a timeout can do — an in-flight request cannot be
+ *  cancelled) lets it land AFTER the terminal one and restore 👀 permanently.
+ *  A status that says the turn never finished, on a turn that did, is worse than
+ *  no status.
+ *
+ *  Nothing is lost by dropping it. The typing indicator already says "working",
+ *  and it says so for the whole turn; what a reaction adds is a mark that
+ *  OUTLIVES the indicator, telling you afterwards how the turn ended. One call,
+ *  sent once, with nothing to race. (P20 round 4, MAJOR.) */
+export type TurnStatus = "done" | "failed";
 
 /** WhatsApp has no message edit, so a reply cannot be revised in place. A
  *  REACTION is the one primitive that changes an already-delivered message's
@@ -278,7 +291,6 @@ export type TurnStatus = "working" | "done" | "failed";
  *  So the user's own question becomes the progress indicator for the turn it
  *  started, which is the only mutable surface this channel has. */
 export const TURN_STATUS_EMOJI: Record<TurnStatus, string> = {
-  working: "👀",
   done: "✅",
   failed: "⚠️",
 };
@@ -550,27 +562,12 @@ export async function handleAgentMessage(
     // No longer awaited, so a hung indicator cannot stall the turn behind it.
     void thread.startTyping?.().catch(() => {});
   }
-  // Statuses are SEQUENCED through one chain, not fired independently.
-  //
-  // Making "working" fire-and-forget removed it from the critical path, but
-  // opened a race: two independent promises can resolve out of order, so a slow
-  // "working" landing after "done" leaves the reaction permanently stuck on 👀
-  // — a status that says the turn never finished, on a turn that did. That is
-  // worse than the latency it was trading away. Chaining preserves order while
-  // still not blocking dispatch: only the FINAL status is awaited, by which
-  // point "working" has long since gone out. (P20 round 2, MAJOR.)
-  let statusChain: Promise<void> = Promise.resolve();
-  const setStatus = (status: TurnStatus): Promise<void> => {
-    statusChain = statusChain
-      .then(() =>
-        withTimeout(signals?.setStatus?.(status), opts.statusTimeoutMs ?? STATUS_TIMEOUT_MS),
-      )
-      .then(() => {})
-      .catch(() => {});
-    return statusChain;
-  };
-
-  void setStatus("working");
+  // Exactly ONE status call per turn, at the end. No chain, no ordering, no
+  // race — there is nothing for it to race against. Still bounded, so a hung
+  // reaction cannot hold the turn open or, on the failure path, hold the
+  // apology behind it.
+  const setStatus = (status: TurnStatus): Promise<void> =>
+    withTimeout(signals?.setStatus?.(status), opts.statusTimeoutMs ?? STATUS_TIMEOUT_MS);
   try {
     const stream = genesisStream({
       baseUrl: opts.baseUrl,

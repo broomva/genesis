@@ -12,15 +12,22 @@
   `keepTyping()` re-arms every 20s, is stopped in a `finally`, and is stopped
   before the first chunk (WhatsApp dismisses on send anyway, and re-arming
   between chunks would show "typing" after the answer had begun arriving).
-- **Turn status as a reaction.** WhatsApp has no message edit, so a reply cannot
-  be revised in place — but a **reaction** is the one primitive that changes an
-  already-delivered message's appearance. The user's own question becomes the
-  progress indicator for the turn it started: 👀 working → ✅ done / ⚠️ failed.
-  Routed through `Adapter.addReaction` rather than the message object, because
-  Chat SDK's inbound `Message` carries an id but no reaction methods — those
-  live on `SentMessage`, i.e. messages *we* sent, which is the wrong message to
-  mark. WhatsApp-only on purpose: Telegram can edit, so it already shows
-  progress by streaming in place, and a second status channel there is noise.
+- **Turn outcome as a reaction.** WhatsApp has no message edit, but a
+  **reaction** is the one primitive that changes an already-delivered message's
+  appearance. When the turn ends, the user's own question is marked ✅ done or
+  ⚠️ failed — a signal that OUTLIVES the typing indicator and tells them
+  afterwards how it went. Routed through `Adapter.addReaction`, because Chat
+  SDK's inbound `Message` carries an id but no reaction methods (those are on
+  `SentMessage`, i.e. messages *we* sent — the wrong message to mark).
+  WhatsApp-only: Telegram streams in place and needs no second status channel.
+
+  **Exactly one reaction per turn, at the end.** An earlier design sent 👀 on
+  receipt and replaced it on completion; that ordering could not be made safe.
+  The two reactions are independent API calls, and a timeout can only *abandon*
+  a slow one — an in-flight request cannot be cancelled — so the 👀 could land
+  *after* the terminal mark and stick permanently. A status claiming the turn
+  never finished, on a turn that did, is worse than no status. Nothing is lost:
+  the typing indicator already covers "working", for the whole turn.
 
 ### Changed
 - **`CHUNK_TARGET` 3900 → 1000.** 3900 was sized to the transport cap, not to a
