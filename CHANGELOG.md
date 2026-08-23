@@ -1,5 +1,51 @@
 # Changelog
 
+## [Unreleased] — WhatsApp channel says something while it works (BRO-2256)
+
+### Added
+- **Typing keep-alive.** `thread.startTyping()` was already wired end-to-end —
+  Chat SDK's `Thread` exposes it and `@kapso/chat-adapter` implements it as
+  `markRead` + `typingIndicator:{type:"text"}` — but it was called **once**, and
+  WhatsApp dismisses the indicator after ~25s. A 3-minute turn showed typing for
+  25 seconds and then nothing, which reads worse than never having shown it:
+  silence *after* a promise of activity looks like the bot died mid-thought.
+  `keepTyping()` re-arms every 20s, is stopped in a `finally`, and is stopped
+  before the first chunk (WhatsApp dismisses on send anyway, and re-arming
+  between chunks would show "typing" after the answer had begun arriving).
+- **Turn status as a reaction.** WhatsApp has no message edit, so a reply cannot
+  be revised in place — but a **reaction** is the one primitive that changes an
+  already-delivered message's appearance. The user's own question becomes the
+  progress indicator for the turn it started: 👀 working → ✅ done / ⚠️ failed.
+  Routed through `Adapter.addReaction` rather than the message object, because
+  Chat SDK's inbound `Message` carries an id but no reaction methods — those
+  live on `SentMessage`, i.e. messages *we* sent, which is the wrong message to
+  mark. WhatsApp-only on purpose: Telegram can edit, so it already shows
+  progress by streaming in place, and a second status channel there is noise.
+
+### Changed
+- **`CHUNK_TARGET` 3900 → 1000.** 3900 was sized to the transport cap, not to a
+  phone screen: ~600 words arriving as one balloon reads as a document dump
+  rather than a reply. `chunkForWhatsapp` now also **clamps** to
+  `WHATSAPP_TEXT_LIMIT`, so a configured target above 4096 degrades to "less
+  readable" instead of "silently rejected by WhatsApp", and a non-positive
+  target falls back to the default rather than spinning the `while` loop
+  forever. Configurable per channel via `HandlerOptions.chunkTarget`.
+
+### Fixed
+- **A closed 24-hour service window was indistinguishable from a crash.** Meta
+  only permits free-form messages within 24h of the user's last inbound message;
+  outside it every send fails 422. The handler now names that case explicitly in
+  the log and deliberately does **not** post an apology — the nature of this
+  failure is that we cannot message the user at all, so the apology fails
+  identically and buries the real cause under a second exception. It also does
+  not mark the turn failed, because the reaction would fail for the same reason.
+  A failure indistinguishable from success is the worst state this channel can
+  be in, and this one now says so where the operator can see it.
+
+### Compatibility
+`handleAgentMessage` takes `signals` as a new **optional 4th parameter**;
+Telegram passes nothing and behaves exactly as before.
+
 ## [Unreleased] — Voice channel reaches production (BRO-2228)
 
 ### Added
