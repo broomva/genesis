@@ -65,9 +65,18 @@ switch (cmd) {
     store.put(next);
     console.log(`${id}: ${existing.state} -> ${next.state}`);
     if (cmd === "approve") {
+      // genesis-api MUST restart too: it loads the workspace registry from
+      // GENESIS_WORKSPACES_DIR at boot, so a manifest written after that is
+      // invisible to it. The bot then asks the api whether the workspace
+      // exists, is told no, and REFUSES TO SERVE WHATSAPP AT ALL — taking the
+      // channel down for every existing tenant, not just the new one.
+      // Measured: omitting the api restart put genesis-bot into a crash loop
+      // with "1 of 3 tenant workspace(s) are NOT registered/available".
+      // api first, then bot, so the bot's startup check sees the new manifest.
       console.log(
-        "\nnow provision their workspace and restart:\n" +
+        "\nnow provision their workspace and restart BOTH services (api first):\n" +
           "  sudo -E bun scripts/provision-whatsapp-tenants.ts\n" +
+          "  systemctl --user restart genesis-api.service && sleep 5\n" +
           "  systemctl --user restart genesis-bot.service",
       );
     }
