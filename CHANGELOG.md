@@ -42,6 +42,26 @@
   A failure indistinguishable from success is the worst state this channel can
   be in, and this one now says so where the operator can see it.
 
+### Security / resilience
+- **Feedback can no longer starve the reply.** Kapso meters per API key,
+  project-wide, in a fixed one-minute window (100 free / 500 Pro) — and replies,
+  typing indicators and status reactions all draw on that one budget. A per-turn
+  ceiling does nothing about concurrency: ~34 simultaneous turns spend the whole
+  free window on saying "still working", and then the 429s land on the REPLIES.
+  `FeedbackBudget` is one instance per process, shared across every thread and
+  both channels, because the limit it models is project-wide. Feedback gets a
+  50% share and is **drop-first, never queued** — delaying an indicator until
+  budget frees would deliver "typing" *after* the answer, which is worse than
+  skipping it. Replies never consult it. Override with `GENESIS_FEEDBACK_RPM`
+  when the plan is known to be above free tier.
+
+### Known residue
+- A typing re-arm issued microseconds before the reply can still land after it,
+  briefly showing "typing" on an answered conversation. Not fixable here: no
+  process can recall an in-flight request, and WhatsApp exposes no stop-typing
+  call — only `markRead` *with* an indicator, never without. Bounded, since
+  WhatsApp drops the indicator ~25s later and our next send drops it sooner.
+
 ### Compatibility
 `handleAgentMessage` takes `signals` as a new **optional 4th parameter**;
 Telegram passes nothing and behaves exactly as before.
