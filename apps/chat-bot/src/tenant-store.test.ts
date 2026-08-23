@@ -101,3 +101,61 @@ describe("parseRecord — validation", () => {
     for (const junk of [null, "x", 3, []]) expect(() => parseRecord(junk)).toThrow();
   });
 });
+
+describe("policy + domains survive a write/read cycle (BRO-2236's shape)", () => {
+  test("a trusted tenant with approved domains reads back trusted, with them", () => {
+    const s = new TenantStore(dir());
+    s.put(rec({ state: "active", policy: "trusted", domains: ["docs.python.org"] }));
+    const back = s.get("573001234567");
+    // The regression this guards: BRO-2236's `confined` was absent from the
+    // parse, so the store dropped it and the tenant came back UNCONFINED while
+    // every log line said the record loaded fine. A boundary field must either
+    // round-trip or make the record unreadable — never quietly vanish.
+    expect(back?.policy).toBe("trusted");
+    expect(back?.domains).toEqual(["docs.python.org"]);
+  });
+
+  test("a record written before these fields existed still loads, at the default tier", () => {
+    const d = dir();
+    writeFileSync(
+      join(d, "573001234567.json"),
+      JSON.stringify({
+        id: "573001234567",
+        channel: "kapso",
+        state: "active",
+        requestedAt: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+    const back = new TenantStore(d).get("573001234567");
+    expect(back?.policy).toBeUndefined();
+    expect(back?.domains).toBeUndefined();
+  });
+
+  test("a hand-edited record with a junk policy is REJECTED, not defaulted", () => {
+    // Defaulting would be the dangerous direction in both cases: to "trusted"
+    // it promotes, to "confined" it silently demotes a tenant the operator
+    // deliberately widened and nobody sees it happen.
+    expect(() => parseRecord({ ...rec(), policy: "root" })).toThrow(/bad policy/);
+    expect(() => parseRecord({ ...rec(), policy: "" })).toThrow(/bad policy/);
+  });
+
+  test("a domain that could not be approved cannot be smuggled in by hand", () => {
+    // The write path validates, but the file is editable by root and by hand,
+    // so the READ path validates too — otherwise `allowDomain`'s rejection is
+    // advisory and `*.com` reaches a live settings file.
+    expect(() => parseRecord({ ...rec(), domains: ["*.com"] })).toThrow(/bad domain/);
+    expect(() => parseRecord({ ...rec(), domains: ["evil.com/#.github.com"] })).toThrow(
+      /bad domain/,
+    );
+    expect(() => parseRecord({ ...rec(), domains: [42] })).toThrow(/bad domain entry/);
+    expect(() => parseRecord({ ...rec(), domains: "github.com" })).toThrow(/bad domains/);
+  });
+
+  test("duplicates and ordering are normalized on read", () => {
+    const back = parseRecord({
+      ...rec(),
+      domains: ["b.example.com", "A.example.com", "b.example.com"],
+    });
+    expect(back.domains).toEqual(["a.example.com", "b.example.com"]);
+  });
+});

@@ -26,6 +26,12 @@ import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } 
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
 import { TenantStore } from "../apps/chat-bot/src/tenant-store";
+import {
+  type TenantRecord,
+  egressDomainsFor,
+  policyOf,
+  webFetchHost,
+} from "../apps/chat-bot/src/tenants";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -59,19 +65,29 @@ if (!TENANTS_DIR && allowlist.open) {
   process.exit(1);
 }
 
-const registryPrincipals = TENANTS_DIR
-  ? new TenantStore(TENANTS_DIR).active().map((t) => ({ channel: "kapso" as const, id: t.id }))
-  : undefined;
-if (registryPrincipals) {
+// Carry the whole RECORD, not just the principal. `policy` and `domains` live
+// on the record and decide what the settings file grants, so projecting down to
+// {channel,id} here would silently provision every tenant at the default tier —
+// the same shape of loss as BRO-2236, one layer up.
+const registryRecords = TENANTS_DIR ? new TenantStore(TENANTS_DIR).active() : undefined;
+if (registryRecords) {
   console.log(`provisioning from the tenant registry at ${TENANTS_DIR}`);
 }
-const tenants = (registryPrincipals ?? allowlist.principals)
-  .filter((p) => p.channel === "kapso")
-  .map((p) => ({
-    principal: p,
-    workspaceId: tenantWorkspaceId(p, PREFIX),
-    dir: join(RUNTIME_ROOT, p.id),
-  }));
+/** The env-allowlist fallback has no registry record, so it gets a synthetic one
+ *  at the DEFAULT tier. Never a widened one: a path that cannot express a policy
+ *  must not invent a generous one. */
+function syntheticRecord(id: string): TenantRecord {
+  return { id, channel: "kapso", state: "active", requestedAt: new Date(0).toISOString() };
+}
+const tenants = (
+  registryRecords ??
+  allowlist.principals.filter((p) => p.channel === "kapso").map((p) => syntheticRecord(p.id))
+).map((record) => ({
+  record,
+  principal: { channel: "kapso" as const, id: record.id },
+  workspaceId: tenantWorkspaceId({ channel: "kapso", id: record.id }, PREFIX),
+  dir: join(RUNTIME_ROOT, record.id),
+}));
 
 if (tenants.length === 0) {
   console.error("The allowlist names no WhatsApp principal — nothing to provision.");
@@ -83,28 +99,41 @@ if (tenants.length === 0) {
  *  permission flow (they are NOT sandboxed — verified — so dropping
  *  bypassPermissions is what confines them, since an out-of-cwd read then fails
  *  closed under `claude -p`). */
-function settingsFor(dir: string): string {
+function settingsFor(dir: string, tenant: TenantRecord): string {
+  const domains = egressDomainsFor(tenant);
+  const policy = policyOf(tenant);
   return `${JSON.stringify(
     {
       permissions: {
-        // NOT bypassPermissions. Under bypass, allow rules are inert and the
-        // file tools are ungated, so per-tenant confinement cannot be built.
-        defaultMode: "default",
-        // WebSearch only. These tools run inside the Claude Code process, NOT
-        // through the Bash sandbox, so this opens a channel the network policy
-        // never covered — a tenant's `curl` stays fully blocked (DNS included)
-        // and this does not change that. It is a SEPARATE egress path.
+        // Per-tenant tier. `confined` keeps every tool not named in `allow`
+        // unavailable; `trusted` ungates them.
         //
-        // Search, not fetch: WebFetch takes an arbitrary URL, and a URL is an
-        // exfiltration channel in itself (the path and query carry whatever the
-        // agent puts there). A search query is narrower. Grant WebFetch only
-        // with a domain allow-list, and only for a reason.
+        // Under `claude -p` there is NO prompt, so in `confined` an un-allowed
+        // tool does not ask -- it simply fails, and the agent (which cannot see
+        // why) tells the user to approve at a prompt that will never render.
+        // That dead end is what `trusted` exists to remove, and it is why the
+        // tier is a permission dial ONLY: the sandbox below is unchanged by it,
+        // so a trusted tenant is ungated inside the same cage, never outside it.
+        defaultMode: policy === "trusted" ? "bypassPermissions" : "default",
+        // This file used to say "Search, not fetch: grant WebFetch only with a
+        // domain allow-list, and only for a reason." BRO-2245 is the reason and
+        // this is that allow-list. The objection it recorded still stands and is
+        // NOT solved -- a URL is an exfiltration channel in itself, and an
+        // allowlist bounds where data may go, never what may go there. What
+        // makes it acceptable is the confinement underneath: a tenant reaches
+        // only its own directory, so the worst it can send anywhere is its own
+        // data. Under the old blocklist -- crm/, *.env and the gh token
+        // readable -- any egress at all would have been an exfiltration path.
+        // WebSearch plus a `WebFetch(domain:)` rule per approved domain. The
+        // in-process fetch tool and the Bash sandbox are SEPARATE egress paths:
+        // opening `sandbox.network` does nothing for WebFetch, and this list
+        // does nothing for curl. Both are driven from the same approved set so
+        // they cannot drift into "the agent can fetch it but not curl it".
         //
-        // Tolerable because reads are confined: a tenant can only reach its own
-        // directory, so the worst it can leak is its own data. Under the
-        // previous blocklist — when crm/, *.env and the gh token were readable —
-        // granting any egress would have been an exfiltration path.
-        allow: ["WebSearch"],
+        // Emitted even at the `trusted` tier, where allow rules are inert, so
+        // that flipping a tenant back to `confined` does not silently revoke
+        // domains an operator already said yes to.
+        allow: ["WebSearch", ...domains.map((d) => `WebFetch(domain:${webFetchHost(d)})`)],
         // Deny rules block in EVERY mode, so these survive a future operator
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
@@ -136,8 +165,24 @@ function settingsFor(dir: string): string {
           "Read(//home/agent/*.env)",
           "Grep(//home/agent/broomva/**)",
           "Grep(//home/agent/genesis/**)",
-          `Edit(//${dir.replace(/^\//, "")}/.claude/**)`,
-          `Write(//${dir.replace(/^\//, "")}/.claude/**)`,
+          // NARROWED from `.claude/**` (BRO-2245). The whole directory was
+          // denied to stop the agent rewriting its own sandbox switches, but
+          // `.claude/skills/` lives there too, so the tenant could not install
+          // or author a skill -- the thing the workspace is for.
+          //
+          // Only these two files can change what the agent is allowed to do, so
+          // only these two are denied. `skills/`, `agents/` and `commands/` are
+          // prompt-level content: a skill cannot register a hook (hooks are
+          // declared in settings.json, which stays denied), and anything a
+          // command could tell the agent to do it can already be told inline.
+          //
+          // Belt and braces, not the only control: both files are also written
+          // root-owned 0444, so Bash cannot edit them either -- and Bash is not
+          // covered by deny rules at all.
+          `Edit(//${dir.replace(/^\//, "")}/.claude/settings.json)`,
+          `Write(//${dir.replace(/^\//, "")}/.claude/settings.json)`,
+          `Edit(//${dir.replace(/^\//, "")}/.claude/settings.local.json)`,
+          `Write(//${dir.replace(/^\//, "")}/.claude/settings.local.json)`,
         ],
       },
       sandbox: {
@@ -164,6 +209,17 @@ function settingsFor(dir: string): string {
           denyRead: [HOME],
           allowRead: [dir],
         },
+        // Egress allowlist (BRO-2245). With no `network` key at all the
+        // resolver falls through to deny, which is why `curl`, `npx skills
+        // add`, `bun install` and `git clone` were ALL blocked, DNS included --
+        // and why the visible symptom was a WebFetch permission message that
+        // had nothing to do with the actual cause.
+        //
+        // Match order in the client is deniedDomains -> allowedDomains -> deny.
+        // Nothing is listed as denied here: a deny entry would be dead weight
+        // against an allowlist this short, and pretending otherwise would make
+        // the file look like it defends against something it does not.
+        network: { allowedDomains: domains },
       },
     },
     null,
@@ -236,7 +292,7 @@ for (const t of tenants) {
     chownSync(join(claudeDir, protectedPath), 0, AGENT_GID);
     execFileSync("/bin/chmod", ["1775", join(claudeDir, protectedPath)]);
   }
-  writeFileSync(settingsPath, settingsFor(t.dir));
+  writeFileSync(settingsPath, settingsFor(t.dir, t.record));
 
   // settings.local.json is PROJECT-LOCAL settings — precedence level 3, ABOVE
   // the level-4 settings.json beside it. A tenant that can create this file can

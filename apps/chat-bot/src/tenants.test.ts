@@ -1,5 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { type TenantRecord, admit, approve, pruneTimestamps, rateLimit, suspend } from "./tenants";
+import {
+  MAX_TENANT_DOMAINS,
+  TenantDomainError,
+  type TenantRecord,
+  admit,
+  allowDomain,
+  approve,
+  denyDomain,
+  egressDomainsFor,
+  normalizeDomain,
+  policyOf,
+  pruneTimestamps,
+  rateLimit,
+  setPolicy,
+  suspend,
+  webFetchHost,
+} from "./tenants";
 
 const b64 = (v: string) => Buffer.from(v, "utf8").toString("base64url");
 const thread = (waId: string) => `kapso:${b64("1314014011788509")}:${b64(waId)}`;
@@ -142,5 +158,99 @@ describe("rateLimit — sliding window", () => {
   test("pruneTimestamps keeps only the window", () => {
     expect(pruneTimestamps([1, 2, 59_000, 59_999], 60_000, WINDOW)).toEqual([1, 2, 59_000, 59_999]);
     expect(pruneTimestamps([1, 2, 59_000], 120_000, WINDOW)).toEqual([]);
+  });
+});
+
+describe("normalizeDomain — hostile input, because the tenant proposes the string", () => {
+  test("plain and wildcard hosts are accepted, case-folded and trimmed", () => {
+    expect(normalizeDomain("Example.COM")).toBe("example.com");
+    expect(normalizeDomain("  docs.python.org  ")).toBe("docs.python.org");
+    expect(normalizeDomain("*.skills.sh")).toBe("*.skills.sh");
+    expect(normalizeDomain("a-b.example.co.uk")).toBe("a-b.example.co.uk");
+  });
+
+  test("a wildcard over a public suffix is refused — one yes would open a TLD", () => {
+    expect(normalizeDomain("*")).toBeUndefined();
+    expect(normalizeDomain("*.com")).toBeUndefined();
+    expect(normalizeDomain("*.")).toBeUndefined();
+  });
+
+  test("strings that read as a trusted host but are not", () => {
+    // The delimiter cases: each of these contains "github.com" and none of them
+    // IS github.com. An operator skimming an approval message sees the tail.
+    expect(normalizeDomain("evil.com/#.github.com")).toBeUndefined();
+    expect(normalizeDomain("github.com:8443@evil.com")).toBeUndefined();
+    expect(normalizeDomain("https://github.com")).toBeUndefined();
+    expect(normalizeDomain("github.com/path")).toBeUndefined();
+    expect(normalizeDomain("evil.com,github.com")).toBeUndefined();
+    expect(normalizeDomain("github.com evil.com")).toBeUndefined();
+  });
+
+  test("no-dot and numeric TLDs are refused", () => {
+    expect(normalizeDomain("localhost")).toBeUndefined();
+    expect(normalizeDomain("127.0.0.1")).toBeUndefined();
+    expect(normalizeDomain("")).toBeUndefined();
+    expect(normalizeDomain("   ")).toBeUndefined();
+  });
+
+  test("malformed labels are refused", () => {
+    expect(normalizeDomain("-lead.example.com")).toBeUndefined();
+    expect(normalizeDomain("trail-.example.com")).toBeUndefined();
+    expect(normalizeDomain("a..example.com")).toBeUndefined();
+    expect(normalizeDomain(`${"a".repeat(64)}.example.com`)).toBeUndefined();
+  });
+});
+
+describe("allowDomain / denyDomain — the list the operator grows", () => {
+  test("approving adds, sorted, and is idempotent", () => {
+    const one = allowDomain(rec(), "docs.python.org", NOW);
+    expect(one.domains).toEqual(["docs.python.org"]);
+    const two = allowDomain(one, "api.example.com", NOW);
+    expect(two.domains).toEqual(["api.example.com", "docs.python.org"]);
+    // Saying yes twice must not grow the file.
+    expect(allowDomain(two, "DOCS.python.org", NOW).domains).toEqual(two.domains);
+  });
+
+  test("a domain that would not survive validation is refused, not cleaned up", () => {
+    expect(() => allowDomain(rec(), "evil.com/#.github.com", NOW)).toThrow(TenantDomainError);
+    expect(() => allowDomain(rec(), "*.com", NOW)).toThrow(TenantDomainError);
+  });
+
+  test("the cap holds", () => {
+    const many = Array.from({ length: MAX_TENANT_DOMAINS }, (_, i) => `h${i}.example.com`);
+    const full = rec({ domains: many });
+    expect(() => allowDomain(full, "one.more.com", NOW)).toThrow(TenantDomainError);
+    // At the cap, re-approving something already present is still fine.
+    expect(allowDomain(full, "h0.example.com", NOW).domains).toEqual(many);
+  });
+
+  test("revoking removes exactly one and tolerates a miss", () => {
+    const t = rec({ domains: ["a.example.com", "b.example.com"] });
+    expect(denyDomain(t, "a.example.com").domains).toEqual(["b.example.com"]);
+    expect(denyDomain(t, "c.example.com").domains).toEqual(t.domains);
+  });
+});
+
+describe("policy tier and the egress set", () => {
+  test("a record with no policy runs confined — absence never widens", () => {
+    expect(policyOf(rec())).toBe("confined");
+    expect(policyOf(rec({ policy: "trusted" }))).toBe("trusted");
+    expect(setPolicy(rec(), "trusted").policy).toBe("trusted");
+  });
+
+  test("egress is the shared toolchain plus this tenant's approvals", () => {
+    const d = egressDomainsFor(rec({ domains: ["docs.python.org"] }));
+    expect(d).toContain("skills.sh");
+    expect(d).toContain("registry.npmjs.org");
+    expect(d).toContain("docs.python.org");
+    expect(d).toEqual([...d].sort());
+    // De-duplicated: approving something already in the base set is not a
+    // second entry, or the settings file drifts on every re-provision.
+    expect(egressDomainsFor(rec({ domains: ["github.com"] }))).toEqual(egressDomainsFor(rec()));
+  });
+
+  test("the WebFetch rule names a host, never a literal wildcard", () => {
+    expect(webFetchHost("*.skills.sh")).toBe("skills.sh");
+    expect(webFetchHost("github.com")).toBe("github.com");
   });
 });

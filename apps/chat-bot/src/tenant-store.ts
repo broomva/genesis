@@ -15,7 +15,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { TenantRecord, TenantState } from "./tenants";
+import {
+  MAX_TENANT_DOMAINS,
+  TENANT_POLICIES,
+  type TenantPolicy,
+  type TenantRecord,
+  type TenantState,
+  normalizeDomain,
+} from "./tenants";
 
 const RECORD_RE = /\.json$/;
 
@@ -97,6 +104,33 @@ export function parseRecord(raw: unknown): TenantRecord {
     throw new Error(`bad state ${JSON.stringify(r.state)}`);
   if (typeof r.requestedAt !== "string") throw new Error("bad requestedAt");
   const str = (k: string) => (typeof r[k] === "string" ? (r[k] as string) : undefined);
+
+  // REJECT, never default. BRO-2236 was the opposite mistake one field over:
+  // `confined` was absent from the parse, so the store projected it away and a
+  // DB-resolved tenant came back UNCONFINED. A field that governs a boundary
+  // must round-trip or make the record unreadable -- silently dropping it
+  // widens access while every log line still says the record loaded fine.
+  const rawPolicy = r.policy;
+  if (rawPolicy !== undefined && !TENANT_POLICIES.includes(rawPolicy as TenantPolicy)) {
+    throw new Error(`bad policy ${JSON.stringify(rawPolicy)}`);
+  }
+  const policy = rawPolicy as TenantPolicy | undefined;
+
+  // Re-validate on READ, not only on write. The file is editable by hand and by
+  // root, so the write path is not the only way a domain gets in here; a value
+  // that would not survive `allowDomain` must not survive a load either.
+  const rawDomains = r.domains;
+  if (rawDomains !== undefined && !Array.isArray(rawDomains)) throw new Error("bad domains");
+  const domains: string[] = [];
+  for (const d of (rawDomains as unknown[]) ?? []) {
+    if (typeof d !== "string") throw new Error("bad domain entry");
+    const norm = normalizeDomain(d);
+    if (norm === undefined) throw new Error(`bad domain ${JSON.stringify(d)}`);
+    if (!domains.includes(norm)) domains.push(norm);
+  }
+  if (domains.length > MAX_TENANT_DOMAINS) throw new Error("too many domains");
+  domains.sort();
+
   return {
     id: r.id,
     channel: "kapso",
@@ -108,5 +142,7 @@ export function parseRecord(raw: unknown): TenantRecord {
     ...(str("suspendedAt") ? { suspendedAt: str("suspendedAt") } : {}),
     ...(str("lastSeenAt") ? { lastSeenAt: str("lastSeenAt") } : {}),
     ...(str("note") ? { note: str("note") } : {}),
+    ...(policy ? { policy } : {}),
+    ...(domains.length > 0 ? { domains } : {}),
   };
 }
