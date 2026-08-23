@@ -57,14 +57,18 @@ if (!lock.ok) {
 if (lock.tookOverStaleFrom) {
   console.log(`  (took over a stale lock from pid ${lock.tookOverStaleFrom})`);
 }
+// Release is OWNERSHIP-CHECKED: it passes our own record so it can only remove a
+// lock still carrying our nonce. Unconditional removal would let this handler
+// delete a lock a DIFFERENT runner wrote after taking ours over.
+//
 // `exit` fires for process.exit() as well as a natural end, which is what this
-// file uses on every one of its three verdict paths. The signal handlers are
-// separate because a Ctrl-C otherwise leaves a lock that blocks the next run
-// until its pid is checked.
-process.on("exit", () => releaseEvalLock(LOCK_PATH));
+// file uses on all three verdict paths, and for an uncaught exception. It does
+// NOT fire for SIGKILL or a hard crash — those leave the file behind, which is
+// why the stale-takeover path exists and why the lock carries a max age.
+process.on("exit", () => releaseEvalLock(LOCK_PATH, lock.record));
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
-    releaseEvalLock(LOCK_PATH);
+    releaseEvalLock(LOCK_PATH, lock.record);
     process.exit(130);
   });
 }
