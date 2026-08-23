@@ -72,6 +72,13 @@ export function ghUnreachable(out: string): boolean {
   return /not logged|no such|command not found|denied|not found/i.test(out);
 }
 
+/** Did this probe run at all? Used to route a missing marker to INCONCLUSIVE
+ *  rather than FAIL, so a reader can tell "the boundary broke" from "we could not
+ *  check" — two states the single FAIL tag collapses. Both still fail the run. */
+export function markerPresent(name: string): (out: string) => boolean {
+  return (out: string) => markerPayload(out, name) !== null;
+}
+
 /** Shell fragments that emit the delimited markers the predicates require.
  *
  *  Kept beside the predicates deliberately: a marker renamed in one place and not
