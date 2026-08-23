@@ -264,3 +264,33 @@ describe("policy tier and the egress set", () => {
     expect(rules.filter((r) => r === "WebFetch(domain:skills.sh)")).toHaveLength(1);
   });
 });
+
+describe("normalizeDomain — special-use TLDs never reach the internet (BRO-2245)", () => {
+  test("mDNS and other RFC 6761 names are refused", () => {
+    // `service.local` is mDNS: approving it puts LAN services on the tenant's egress
+    // allowlist. That is a confinement break, not a web grant — the tenant sandbox
+    // exists to keep it off the operator's network as much as off their disk.
+    for (const d of [
+      "service.local",
+      "printer.local",
+      "foo.localhost",
+      "bar.test",
+      "x.invalid",
+      "y.example",
+      "abc.onion",
+      "*.local",
+    ]) {
+      expect(normalizeDomain(d)).toBeUndefined();
+    }
+  });
+
+  test("POSITIVE CONTROL — ordinary domains, including wildcards, still normalize", () => {
+    // Without this, rejecting everything would satisfy the test above.
+    expect(normalizeDomain("github.com")).toBe("github.com");
+    expect(normalizeDomain("*.github.com")).toBe("*.github.com");
+    expect(normalizeDomain("  API.GitHub.CoM ")).toBe("api.github.com");
+    // And a domain that merely CONTAINS a reserved label is fine — only the TLD counts.
+    expect(normalizeDomain("local.github.com")).toBe("local.github.com");
+    expect(normalizeDomain("test.example.com")).toBe("test.example.com");
+  });
+});
