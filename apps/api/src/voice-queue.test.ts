@@ -67,7 +67,12 @@ describe("parseVoicePrincipals — must produce ids resolveCaller can actually m
     expect(principals.some((p) => p.id === "")).toBe(false);
   });
 
-  test("a duplicate number is kept once, so entry order cannot change behaviour", () => {
+  // Named honestly (P20 Strata A, round 1). This asserts FIRST-WINS, so entry
+  // order does decide which name survives — the earlier name of this test
+  // claimed order could not matter, which the assertion itself contradicts.
+  // First-wins is the deliberate choice: appending a duplicate should not
+  // silently rewrite an entry an operator put earlier in the list.
+  test("a duplicate number collapses to ONE principal, first entry winning", () => {
     expect(parseVoicePrincipals("573017758620:First,573017758620:Second")).toEqual([
       { id: "573017758620", name: "First" },
     ]);

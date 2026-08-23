@@ -311,6 +311,12 @@ const voicePrincipals = voiceSecret
   ? parseVoicePrincipals(process.env.GENESIS_VOICE_PRINCIPALS)
   : [];
 const enqueueVoice = voiceSecret ? createVoiceQueue(voiceQueueDir) : undefined;
+// What a queued answer will actually be delivered over. Deliberately opt-IN and
+// deliberately still off: nothing drains the queue yet (BRO-2228 scope item 4,
+// blocked on #107), and until something does, promising a caller a WhatsApp
+// follow-up would be a promise the system cannot keep. Set
+// GENESIS_VOICE_DELIVERY=whatsapp only once a consumer genuinely sends.
+const voiceDelivery = process.env.GENESIS_VOICE_DELIVERY === "whatsapp" ? "whatsapp" : undefined;
 if (voiceSecret) {
   // An enabled channel with no principals still ANSWERS — every caller resolves
   // unknown and can leave a message. That is a legitimate configuration, so this
@@ -318,7 +324,8 @@ if (voiceSecret) {
   // follow-up" is otherwise indistinguishable from a working deploy.
   console.log(
     `[genesis] voice channel → /voice/* enabled (queue: ${join(voiceQueueDir, "queue.jsonl")}, ` +
-      `${voicePrincipals.length} principal(s) can receive follow-up)`,
+      `${voicePrincipals.length} principal(s) can receive follow-up, ` +
+      `delivery: ${voiceDelivery ?? "NONE — callers are told a message was taken"})`,
   );
 }
 
@@ -356,6 +363,7 @@ const { app, websocket } = build({
   voiceSecret,
   voicePrincipals,
   enqueueVoice,
+  voiceDelivery,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes

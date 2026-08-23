@@ -97,6 +97,7 @@ describe("voice routes (BRO-2228)", () => {
       workspaceRoot: "/tmp",
       voiceSecret: SECRET,
       voicePrincipals: PRINCIPALS,
+      voiceDelivery: "whatsapp",
       enqueueVoice: (t: unknown) => {
         enqueued.push(t);
       },
@@ -144,7 +145,7 @@ describe("voice routes (BRO-2228)", () => {
       SECRET,
     );
     expect(known.status).toBe(200);
-    expect(await known.json()).toEqual({ known: true, name: "Carlos", canFollowUp: true });
+    expect(await known.json()).toEqual({ known: true, canFollowUp: true });
 
     const unknown = await post(
       app as never,
@@ -153,11 +154,23 @@ describe("voice routes (BRO-2228)", () => {
       SECRET,
     );
     expect(unknown.status).toBe(200);
-    expect(await unknown.json()).toEqual({ known: false, name: null, canFollowUp: false });
+    expect(await unknown.json()).toEqual({ known: false, canFollowUp: false });
+  });
+
+  test("SECURITY: identify NEVER discloses the principal's name (P20 round 1)", async () => {
+    // Caller id is spoofable, so anything this route returns is returned to
+    // whoever guessed the number. `known` echoes back a claim the caller already
+    // made; a NAME is information they did not have and did not prove a right
+    // to. The original response included it.
+    const { app } = voiceApp();
+    const res = await post(app as never, "/voice/identify", { callerId: "573017758620" }, SECRET);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ known: true, canFollowUp: true });
+    expect(JSON.stringify(body)).not.toContain("Carlos");
   });
 
   test("request: a known caller is queued and promised WhatsApp follow-up", async () => {
-    const { app, enqueued } = voiceApp();
+    const { app, enqueued } = voiceApp(); // voiceDelivery: "whatsapp"
     const res = await post(
       app as never,
       "/voice/request",
@@ -184,6 +197,75 @@ describe("voice routes (BRO-2228)", () => {
     const body = (await res.json()) as { followUp: string };
     expect(body.followUp).toBe("none");
     expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBeUndefined();
+  });
+
+  test("request: with NO delivery leg wired, even a known caller is promised NOTHING", async () => {
+    // The blocker this encodes: the surface shipped promising "whatsapp" while
+    // no consumer existed anywhere to drain the queue and send. A caller heard a
+    // follow-up commitment that nothing in the system could honour.
+    const { app, enqueued } = voiceApp({ voiceDelivery: undefined });
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: "please send me the invoice" },
+      SECRET,
+    );
+    const body = (await res.json()) as { followUp: string };
+    expect(body.followUp).toBe("none");
+    // Still QUEUED — the work is recorded, only the promise is withheld.
+    expect(enqueued).toHaveLength(1);
+  });
+
+  test("a configured secret with NO sink fails at BUILD, not silently per call", () => {
+    // enqueueVoice was optional-chained, so this combination answered 200 and
+    // discarded the ticket. A misconfiguration must not be a runtime condition.
+    expect(() =>
+      build({ workspaceRoot: "/tmp", voiceSecret: SECRET, voicePrincipals: PRINCIPALS } as never),
+    ).toThrow(/enqueueVoice/);
+  });
+
+  test("a retried tool call collapses onto ONE ticket id (idempotency)", async () => {
+    // A lost response makes the provider retry; a fresh UUID per attempt turned
+    // one caller request into N agent runs and N WhatsApp messages.
+    const { app, enqueued } = voiceApp();
+    const body = {
+      callerId: "573017758620",
+      request: "send the invoice",
+      conversationId: "conv-77",
+    };
+    const a = (await (await post(app as never, "/voice/request", body, SECRET)).json()) as {
+      ticketId: string;
+    };
+    const b = (await (await post(app as never, "/voice/request", body, SECRET)).json()) as {
+      ticketId: string;
+    };
+    expect(a.ticketId).toBe(b.ticketId);
+    expect(enqueued).toHaveLength(2); // appended twice; the delivery leg dedupes on id
+  });
+
+  test("a non-string field is a caller-safe 400, never a 500", async () => {
+    const { app, enqueued } = voiceApp();
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: 42 },
+      SECRET,
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/must be text/);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("an oversized conversationId is rejected, not persisted", async () => {
+    const { app, enqueued } = voiceApp();
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: "hi", conversationId: "x".repeat(50_000) },
+      SECRET,
+    );
+    expect(res.status).toBe(400);
+    expect(enqueued).toHaveLength(0);
   });
 
   test("request: an empty request is a 400 with a caller-safe message", async () => {

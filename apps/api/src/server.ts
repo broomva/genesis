@@ -90,8 +90,14 @@ export interface BuildOpts {
   /** Numbers the voice channel may deliver an answer to. A caller matching one
    *  gets follow-up on that number; everyone else can only leave a message. */
   voicePrincipals?: readonly DeliverablePrincipal[];
-  /** Sink for queued voice work. Must return fast — a caller is on the line. */
+  /** Sink for queued voice work. Must return fast — a caller is on the line.
+   *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
+  /** The channel a queued answer will actually be delivered over. UNDEFINED —
+   *  the default — means no delivery leg is wired, and /voice/request then tells
+   *  every caller a message was taken rather than promising a follow-up nothing
+   *  can make. Set only once a consumer genuinely drains the queue. */
+  voiceDelivery?: "whatsapp";
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
@@ -218,6 +224,17 @@ export function build(opts: BuildOpts) {
   // unconfigured deploy 404s instead of exposing an open intake. Nothing here
   // runs an agent: a caller is on the line and a turn takes 9-30s+.
   if (opts.voiceSecret) {
+    // A configured channel with no sink used to answer 200 + "I'll follow up"
+    // while storing nothing, because enqueueVoice was optional-chained away.
+    // That is a misconfiguration, not a runtime condition, so it fails at BUILD
+    // rather than silently per-call. (P20 Strata A, round 1.)
+    if (!opts.enqueueVoice) {
+      throw new Error(
+        "voiceSecret is set but enqueueVoice is not: the voice routes would " +
+          "acknowledge requests and discard them. Pass a sink (createVoiceQueue).",
+      );
+    }
+    const enqueueVoice = opts.enqueueVoice;
     const voicePrincipals = opts.voicePrincipals ?? [];
     const voiceDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
       !secretMatches(c.req.header("x-genesis-voice-secret"), opts.voiceSecret ?? "");
@@ -228,10 +245,20 @@ export function build(opts: BuildOpts) {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
       const body = (await c.req.json().catch(() => ({}))) as { callerId?: string };
       const r = resolveCaller(body.callerId, voicePrincipals);
+      // NO NAME. The header of voice.ts states the invariant this route was
+      // breaking: caller id is spoofable, so it is a routing hint and a spoofer
+      // must gain NOTHING. Returning `name` handed an attacker who guessed a
+      // number both "this number is known to the system" and the account
+      // holder's name — information gained, from a claim we never verified.
+      // `known` alone is what the agent needs to choose take-a-message vs
+      // offer-follow-up, and unlike a name it discloses nothing the caller did
+      // not already assert. Greeting by name needs a second factor (voice.ts
+      // header: "any capability that does NOT have that property ... must not be
+      // added here without a second factor"). (P20 Strata A, round 1.)
       return c.json(
         r.kind === "known"
-          ? { known: true, name: r.principal.name ?? null, canFollowUp: true }
-          : { known: false, name: null, canFollowUp: false },
+          ? { known: true, canFollowUp: true }
+          : { known: false, canFollowUp: false },
       );
     });
 
@@ -255,16 +282,21 @@ export function build(opts: BuildOpts) {
         throw e;
       }
       try {
-        await opts.enqueueVoice?.(ticket);
+        await enqueueVoice(ticket);
       } catch (e) {
         console.error(`[genesis] voice enqueue failed: ${e instanceof Error ? e.message : e}`);
         return c.json({ error: "could not record the request; please try again" }, 503);
       }
       return c.json({
         ticketId: ticket.id,
-        // The agent reads this to the caller, so it must not promise delivery
-        // we cannot make: an unrecognized number has nowhere to follow up TO.
-        followUp: ticket.deliverTo ? "whatsapp" : "none",
+        // The agent reads this to the caller, so it must not promise delivery we
+        // cannot make. TWO ways that promise can be false, and only the first was
+        // handled: an unrecognized number has nowhere to follow up TO, and — the
+        // one that shipped — no delivery leg exists to follow up WITH. Until a
+        // consumer drains the queue and sends, `voiceDelivery` is undefined and
+        // every caller correctly hears that a message was taken. (P20 Strata A,
+        // round 1; the delivery leg is BRO-2228 scope item 4, blocked on #107.)
+        followUp: ticket.deliverTo && opts.voiceDelivery ? opts.voiceDelivery : "none",
       });
     });
   }
