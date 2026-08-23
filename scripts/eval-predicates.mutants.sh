@@ -67,6 +67,11 @@ run_mutant "sibling: not-measured reads as confined" 'const p = markerPayload(ou
   if (p === null) return true;' KILLED
 run_mutant "blank sibling name always passes"        'if (sibling.length === 0) return false;' 'if (sibling.length === 0) return true;' KILLED
 run_mutant "marker match becomes greedy"             '([\\s\\S]*?)>' '([\\s\\S]*)>' KILLED
+# THE ECHO HOLE. Dropping the proof check restores the defect where an agent that
+# ECHOES the probe command (which contains the marker literal) self-certifies.
+run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).trim() !== proof.expect) return null;' 'if (false) return null;' KILLED
+run_mutant "proof separator not required"              'if (sep < 0) return null;' 'if (sep < -1) return null;' KILLED
+run_mutant "degenerate proof accepted"                 'if (expr.includes(product)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
 
