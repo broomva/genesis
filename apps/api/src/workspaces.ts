@@ -128,6 +128,7 @@ export function discoverWorkspaces(
             rootPath: w.rootPath,
             isGitRepo: typeof w.isGitRepo === "boolean" ? w.isGitRepo : undefined,
             noWorktree: typeof w.noWorktree === "boolean" ? w.noWorktree : undefined,
+            confined: typeof w.confined === "boolean" ? w.confined : undefined,
           });
         }
       } else {

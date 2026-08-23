@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunResult } from "@genesis/runner";
 import { InMemoryStore } from "./store";
-import { Supervisor, buildTitlePrompt, deriveTitle, sanitizeTitle } from "./supervisor";
+import {
+  Supervisor,
+  buildTitlePrompt,
+  deriveTitle,
+  hardenedExtraArgs,
+  sanitizeTitle,
+} from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
 
 // A pid-unique real dir (not a fixed /tmp path) so the BRO-1630 RC3 vanished-
@@ -1124,5 +1130,40 @@ describe("title generation (BRO-1665)", () => {
     ).generateTitleAsync("tr", prompt, "reply");
     // The rename wins — the LLM title must not overwrite it.
     expect((await store.findSessionByThread("tr"))?.title).toBe("My Own Title");
+  });
+});
+
+describe("hardenedExtraArgs — confined workspaces drop inherited MCP (BRO-2224)", () => {
+  test("a confined workspace ALWAYS gets --strict-mcp-config", () => {
+    expect(hardenedExtraArgs({ confined: true })).toEqual(["--strict-mcp-config"]);
+    expect(hardenedExtraArgs({ confined: true }, [])).toEqual(["--strict-mcp-config"]);
+  });
+
+  test("operator args are preserved, with the flag appended after them", () => {
+    // Appended, not merged: the flag is boolean, so a later occurrence can only
+    // add it. Nothing an operator puts in GENESIS_AGENT_ARGS can take it away.
+    expect(hardenedExtraArgs({ confined: true }, ["--model=haiku"])).toEqual([
+      "--model=haiku",
+      "--strict-mcp-config",
+    ]);
+  });
+
+  test("an unconfined workspace is UNCHANGED — the operator keeps their MCP", () => {
+    expect(hardenedExtraArgs({}, ["--model=haiku"])).toEqual(["--model=haiku"]);
+    expect(hardenedExtraArgs({ confined: false }, ["--model=haiku"])).toEqual(["--model=haiku"]);
+    expect(hardenedExtraArgs({})).toBeUndefined();
+  });
+
+  test("absent `confined` is treated as UNCONFINED, so this cannot silently harden", () => {
+    // Direction check. Hardening every workspace would strip MCP from the
+    // operator's own Telegram and web sessions — a regression that looks like
+    // "my Railway tools vanished", with no error naming this code.
+    expect(hardenedExtraArgs({ confined: undefined }, ["x"])).toEqual(["x"]);
+  });
+
+  test("the input array is not mutated", () => {
+    const operator = ["--model=haiku"];
+    hardenedExtraArgs({ confined: true }, operator);
+    expect(operator).toEqual(["--model=haiku"]);
   });
 });

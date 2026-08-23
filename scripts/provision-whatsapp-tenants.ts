@@ -96,16 +96,22 @@ function settingsFor(dir: string): string {
         // dangerouslyDisableSandbox — the agent leaving its own boundary.
         allowUnsandboxedCommands: false,
         filesystem: {
-          // Deny the whole runtime root, then re-open exactly this tenant. The
-          // documented overlap rule is "the more specific path wins", so a
-          // sibling tenant's files stay unreadable to Bash.
-          denyRead: [
-            RUNTIME_ROOT,
-            join(HOME, ".ssh"),
-            join(HOME, ".aws"),
-            join(HOME, ".config"),
-            join(HOME, ".claude"),
-          ],
+          // ALLOWLIST, not a blocklist. The sandbox's default read policy is
+          // "the entire computer except denied directories", so enumerating
+          // paths to deny leaves everything unnamed readable — which is how the
+          // first version of this file let a tenant read crm/ PII, sibling
+          // projects, *.env files, and the logged-in gh/railway CLI tokens.
+          // Deny the home directory outright and re-open exactly this tenant;
+          // the documented overlap rule is "the more specific path wins".
+          //
+          // Measured with a positive control (echo ran, ./inside.txt created):
+          //   ls /home/agent            -> no output
+          //   test -r ~/kanon.env       -> ENV-BLOCKED
+          //   ls ~/broomva/crm          -> No such file or directory
+          //   gh auth status            -> "not logged into any GitHub hosts"
+          // The gh/railway CLI tokens are closed by this too: a CLI cannot read
+          // a credential file it cannot reach.
+          denyRead: [HOME],
           allowRead: [dir],
         },
       },
@@ -120,7 +126,17 @@ function settingsFor(dir: string): string {
  *  checkouts back in one place. */
 function manifestFor(t: (typeof tenants)[number]): string {
   return `${JSON.stringify(
-    { id: t.workspaceId, name: `wa-${t.principal.id}`, rootPath: t.dir, noWorktree: true },
+    {
+      id: t.workspaceId,
+      name: `wa-${t.principal.id}`,
+      rootPath: t.dir,
+      noWorktree: true,
+      // Untrusted principal: the supervisor hardens the spawn (drops inherited
+      // MCP). MCP runs outside the filesystem sandbox, so the settings above
+      // cannot reach it — without this the tenant holds the operator's Railway,
+      // Gmail, Drive and Calendar.
+      confined: true,
+    },
     null,
     2,
   )}\n`;

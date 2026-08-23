@@ -240,6 +240,28 @@ export function sanitizeTitle(raw: string | undefined): string | undefined {
   return chars.length > 60 ? `${chars.slice(0, 60).join("").trimEnd()}…` : t;
 }
 
+/** Agent CLI args for a workspace, hardened when it serves an untrusted principal.
+ *
+ *  `--strict-mcp-config` drops every inherited MCP server. It is the ONLY control
+ *  that reaches them: MCP servers are separate processes that run OUTSIDE the
+ *  filesystem sandbox by documented design, so no amount of path confinement
+ *  touches them. Measured on the VPS — without the flag a tenant session carries
+ *  mcp__railway__set_variables / update_service / whoami plus the account's Gmail,
+ *  Drive and Calendar connectors; with it, the session reports NONE.
+ *
+ *  Appended AFTER the operator's args, never merged into them: the flag is
+ *  boolean, so a later occurrence can only add it. There is deliberately no way
+ *  for configuration to remove it from a confined workspace.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function hardenedExtraArgs(
+  workspace: { confined?: boolean },
+  extraArgs?: string[],
+): string[] | undefined {
+  if (!workspace.confined) return extraArgs;
+  return [...(extraArgs ?? []), "--strict-mcp-config"];
+}
+
 export class Supervisor {
   private readonly store: Store;
   private readonly runners: Record<string, RunnerFn>;
@@ -601,7 +623,7 @@ export class Supervisor {
         cwd: workspace.rootPath,
         resumeSessionId: session.agentSessionId,
         host: lease.host,
-        extraArgs: this.extraArgs,
+        extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
         // Per-turn model/effort (BRO-1573) override the constructor defaults.
         model: turnOpts?.model,
         effort: turnOpts?.effort,
