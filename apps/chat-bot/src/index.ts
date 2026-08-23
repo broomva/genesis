@@ -47,6 +47,7 @@ import {
 } from "./handler";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
+import { webhookPort } from "./webhook-port";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -330,7 +331,15 @@ async function registerTelegramCommands(): Promise<void> {
  *  Telegram-only deployment keeps its "no inbound port" posture. Signature
  *  verification is the adapter's (KAPSO_WEBHOOK_SECRET); this only routes. */
 function startWebhookServer(): void {
-  const port = Number(process.env.GENESIS_BOT_WEBHOOK_PORT ?? 8788);
+  const port = webhookPort(process.env.GENESIS_BOT_WEBHOOK_PORT);
+  if (port === undefined) {
+    // Loud and NOT listening beats quietly listening on a port nobody forwards to.
+    // Telegram keeps serving, matching the missing-handler branch below.
+    console.error(
+      `[genesis-bot] GENESIS_BOT_WEBHOOK_PORT=${JSON.stringify(process.env.GENESIS_BOT_WEBHOOK_PORT)} is not a port (want an integer 1-65535). NOT listening — every inbound WhatsApp message would be refused at the proxy. Unset it to use the default 8788.`,
+    );
+    return;
+  }
   const path = process.env.GENESIS_BOT_WEBHOOK_PATH ?? "/webhooks/kapso";
   // `chat` is a union of the two constructor shapes above, so `webhooks.kapso`
   // is not statically present on the Telegram-only arm. This branch only runs
@@ -343,7 +352,7 @@ function startWebhookServer(): void {
     return;
   }
 
-  Bun.serve({
+  const server = Bun.serve({
     port,
     hostname: "127.0.0.1", // Funnel/proxy terminates TLS and forwards; never bind public directly
     fetch: async (req) => {
@@ -363,7 +372,9 @@ function startWebhookServer(): void {
       }
     },
   });
-  console.log(`[genesis-bot] kapso webhook listening on 127.0.0.1:${port}${path}`);
+  // Report the port the SERVER bound, never the one we asked for. The old line
+  // printed the request, so a bad value announced a listener that was not there.
+  console.log(`[genesis-bot] kapso webhook listening on 127.0.0.1:${server.port}${path}`);
 }
 
 const active = kapsoConfigured ? "Telegram (polling) + WhatsApp (webhook)" : "Telegram (polling)";
