@@ -86,7 +86,9 @@ run_mutant "parseRecord accepts junk"      'typeof r?.pid === "number" && typeof
 # operator the exact race the ordering exists to close.
 run_mutant "recovery drops the kill step"  'if (held) lines.push(`  kill ${held.pid}   # or: kill -9 ${held.pid}`);' 'if (false) lines.push("");' KILLED
 run_mutant "rm path unquoted"              'rm -- ${shellQuote(lockPath)}'      'rm -- ${lockPath}'                  KILLED
-run_mutant "unknown liveness read as dead" 'return "unknown";'                  'return "dead";'                     KILLED
+# Anchored on the ESRCH line plus the fallthrough so the anchor is unique: the bare
+# `return "unknown";` also serves the non-pid guard above.
+run_mutant "unknown liveness read as dead" 'if (code === "ESRCH") return "dead";' 'if (code !== "EPERM") return "dead";' KILLED
 # Control: prose no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted prose"     'There is no automatic takeover'     'There is no auto takeover'          SURVIVED
 
