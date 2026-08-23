@@ -56,6 +56,7 @@ import {
 } from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
+import { type Transcriber, findVoiceNote, resolveVoiceNote } from "./voice-note";
 import { webhookPort } from "./webhook-port";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -212,6 +213,43 @@ const chat = kapsoAdapter
  *  progress by streaming the reply in place; adding reactions there would be a
  *  second, redundant status channel. This exists because WhatsApp has no edit
  *  and a reaction is its only mutable surface. */
+// Transcription backend for inbound voice notes (BRO-2266). UNSET is a
+// supported state, not a broken one: with no backend the channel TELLS the
+// sender it cannot hear voice notes, which is strictly better than the silent
+// drop that came before. The backend choice (local whisper vs a hosted API) is
+// an operator decision and plugs in here.
+const transcriber: Transcriber | undefined = undefined;
+
+/** Resolve the text of an inbound message, transcribing a voice note if that is
+ *  what it is.
+ *
+ *  Returns undefined when there is nothing to dispatch — which now means "the
+ *  user has already been told why", never "we dropped it on the floor".
+ *
+ *  Text WINS over audio when a message somehow carries both: the typed words
+ *  are the higher-confidence signal, and transcription is the lossy path. */
+async function textToDispatch(
+  thread: { id: string; post: (c: string) => Promise<unknown> },
+  message: { text: string; attachments?: readonly { type: string }[] },
+): Promise<string | undefined> {
+  const typed = message.text?.trim();
+  if (typed) return typed;
+
+  const note = findVoiceNote((message.attachments ?? []) as never);
+  if (!note) return undefined;
+
+  const outcome = await resolveVoiceNote(note, transcriber);
+  if (outcome.kind === "text") {
+    console.log(`[genesis-bot] transcribed a voice note for ${thread.id}`);
+    return outcome.text;
+  }
+  console.warn(`[genesis-bot] voice note not dispatched for ${thread.id}: ${outcome.reason}`);
+  await thread
+    .post(outcome.reply)
+    .catch((e) => console.error(`[genesis-bot] could not answer a voice note: ${e}`));
+  return undefined;
+}
+
 function turnSignalsFor(threadId: string, messageId: string): TurnSignals | undefined {
   if (!kapsoAdapter || !threadId.startsWith("kapso:") || !messageId) return undefined;
   return {
@@ -370,7 +408,9 @@ chat.onDirectMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Groups: subscribe on first @-mention, then handle every follow-up. Group
@@ -380,13 +420,17 @@ chat.onNewMention(async (thread, message) => {
   await thread.subscribe();
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 chat.onSubscribedMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Register the native Telegram `/` menu (control commands only — the full
