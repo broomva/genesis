@@ -10,6 +10,7 @@
 // session to someone unvetted on a box where tenants still share a uid and a
 // kernel (the microVM substrate is what removes that — BRO-2224 phase 2).
 
+import { getDomain } from "tldts";
 import { type Principal, principalOf } from "./allowlist";
 
 export type TenantState = "pending" | "active" | "suspended";
@@ -214,9 +215,17 @@ const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
  *    - bare hostnames with no dot, which match nothing useful and would let
  *      `localhost` through.
  *
- *  It does NOT try to know the public-suffix list: `*.co.uk` has two labels
- *  after the wildcard and is accepted. That is a real limit, and the reason the
- *  approval stays a human decision rather than becoming automatic. */
+ *  It DOES know the public-suffix list, via `tldts` (BRO-2245 follow-up). `*.co.uk`
+ *  used to be accepted because it has two labels after the wildcard, which would
+ *  open every domain under a whole registry in one approval. A hand-maintained list
+ *  of two-label suffixes would have been the same blocklist mistake this file warns
+ *  about everywhere else -- it covers co.uk and com.au and silently misses the next
+ *  one -- so this is a dependency that updates instead of an array that rots.
+ *
+ *  The rule is the same for wildcards and bare hosts: the name must have a
+ *  REGISTRABLE domain. `getDomain("co.uk")` is null, `getDomain("github.com")` is
+ *  "github.com". Approval stays a human decision; this only removes the class of
+ *  approval a human is most likely to misread. */
 /** Special-use TLDs (RFC 6761 + RFC 7686). None of these reach the public internet;
  *  `.local` in particular is mDNS and resolves on the LAN the box sits on. */
 const RESERVED_TLDS = new Set(["local", "localhost", "test", "invalid", "example", "onion"]);
@@ -245,6 +254,10 @@ export function normalizeDomain(raw: string): string | undefined {
   // CLOSED, standardised set -- unlike the public-suffix problem below, where a
   // partial list would be the same blocklist mistake this file keeps warning about.
   if (RESERVED_TLDS.has(tld)) return undefined;
+  // A registrable domain must exist beneath the public suffix. This rejects both
+  // `*.co.uk` (an entire registry in one yes) and a bare `co.uk`, which is not a
+  // host anyone means. tldts returns null for a name that IS a public suffix.
+  if (getDomain(host) === null) return undefined;
   return d;
 }
 

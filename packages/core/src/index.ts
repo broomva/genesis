@@ -1,4 +1,5 @@
 export * from "./agent-stack";
+export * from "./skill-seed";
 export * from "./types";
 export * from "./store";
 export * from "./reconcile";
