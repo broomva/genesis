@@ -28,7 +28,11 @@ trap cleanup EXIT INT TERM
 
 run_mutant () {
   local name="$1" from="$2" to="$3" expected="$4" n
-  n=$(grep -cF -- "$from" "$FILE")
+  # Counted in python, not grep: `grep -F` with a multi-line pattern treats each
+  # LINE as a separate pattern, so it reports the number of matching lines rather
+  # than the number of occurrences of the substring. That miscount made this guard
+  # reject every multi-line anchor here — caught by the guard itself on first run.
+  n=$(python3 -c 'import sys;print(open(sys.argv[1]).read().count(sys.argv[2]))' "$FILE" "$from")
   if [ "$n" != "1" ]; then
     printf '  %-9s %-46s (anchor appears %s times, expected 1)\n' "SKIP" "$name" "$n"; fail=1; return
   fi
