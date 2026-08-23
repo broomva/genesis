@@ -60,18 +60,11 @@ export interface HandlerOptions {
    *  "both get one" — the mutation sweep proved it by SURVIVING removal of the
    *  buffered gate. Shrinking the interval is what makes the claim falsifiable. */
   typingRearmMs?: number;
-  /** Shared, reply-prioritised budget for FEEDBACK requests only.
-   *
-   *  One instance per API key, shared across every thread — the limit it models
-   *  is project-wide, so a per-turn or per-thread limiter would not see the
-   *  concurrency that actually exhausts it. Replies never consult it. */
-  feedbackBudget?: FeedbackClaim;
-}
-
-/** The slice of FeedbackBudget the handler needs. Narrow on purpose: the
- *  handler must be able to DROP feedback, never to queue or retry it. */
-export interface FeedbackClaim {
-  tryClaim(): boolean;
+  /** Ceiling on one status update. Same kind of seam as typingRearmMs: at the
+   *  10s default a hung-status test outlives the runner's own 5s timeout, so
+   *  "a hung reaction cannot withhold the reply" could only be asserted by NOT
+   *  hanging. Shrinking it lets the guarantee be exercised directly. */
+  statusTimeoutMs?: number;
 }
 
 /** WhatsApp's text body cap — a hard protocol limit. A body above it is
@@ -162,7 +155,19 @@ export const TYPING_REARM_MS = 20_000;
  *
  *  Five minutes bounds one turn to ~15 re-arms. Past it the indicator lapses
  *  and the turn runs on silently, which is the pre-existing behaviour rather
- *  than a new failure. (P20 round 1, BLOCKER.) */
+ *  than a new failure. (P20 round 1, BLOCKER.)
+ *
+ *  THIS IS A PER-TURN BOUND AND NOTHING MORE. It does not address concurrency:
+ *  enough simultaneous turns still exhaust the window, and the calls that then
+ *  fail are the replies. A process-wide feedback limiter was built for that and
+ *  DELETED — it was an approximation of an upstream counter this process cannot
+ *  observe (unaligned window phase, a reserve guessed rather than measured),
+ *  and each review round found a new way the approximation was wrong. The
+ *  correct fix is to gate on the `X-RateLimit-Remaining` header Kapso returns on
+ *  every response, which needs the adapter to surface response headers the Chat
+ *  SDK does not currently expose. Tracked on BRO-2256; stated here rather than
+ *  approximated, because a limiter that is wrong in an unknown direction is
+ *  worse than a documented bound. */
 export const TYPING_MAX_MS = 5 * 60_000;
 
 /** Keeps the channel's typing indicator alive for the duration of a turn.
@@ -202,7 +207,6 @@ export function keepTyping(
   thread: PostableThread,
   rearmMs: number = TYPING_REARM_MS,
   maxMs: number = TYPING_MAX_MS,
-  budget?: FeedbackClaim,
 ): () => void {
   if (!thread.startTyping) return () => {};
   let inFlight = false;
@@ -216,9 +220,6 @@ export function keepTyping(
       stop();
       return;
     }
-    // DROP, never queue. Delaying an indicator until budget frees up would
-    // deliver "typing" after the answer, which is worse than skipping it.
-    if (budget && !budget.tryClaim()) return;
     inFlight = true;
     void thread
       .startTyping?.()
@@ -233,6 +234,35 @@ export function keepTyping(
   // Never let a courtesy indicator hold the process open at shutdown.
   (timer as unknown as { unref?: () => void }).unref?.();
   return stop;
+}
+
+/** Ceiling on a single status update.
+ *
+ *  Sequencing the statuses fixed an ordering race but created a liveness one:
+ *  the chain awaits each link, so a `working` reaction that NEVER settles would
+ *  block the terminal status forever — and, on the failure path, block the
+ *  apology reply behind it. A feedback call must never be able to withhold the
+ *  product. (P20 round 3, MAJOR.) */
+export const STATUS_TIMEOUT_MS = 10_000;
+
+/** Resolve `p`, or give up after `ms`. Never rejects: a feedback call that
+ *  times out is dropped, exactly like one that fails. */
+export async function withTimeout(p: Promise<unknown> | undefined, ms: number): Promise<void> {
+  if (!p) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      p,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+        (timer as unknown as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  } catch {
+    // dropped
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Lifecycle of one turn, as shown on the user's own inbound message. */
@@ -513,14 +543,12 @@ export async function handleAgentMessage(
   const buffered = opts.streaming === false;
   let stopTyping = () => {};
   if (buffered) {
-    stopTyping = keepTyping(thread, opts.typingRearmMs, undefined, opts.feedbackBudget);
+    stopTyping = keepTyping(thread, opts.typingRearmMs);
   } else {
     // Streaming channels keep the pre-existing single indicator: the stream
     // IS the progress display, so there is nothing for a keep-alive to add.
     // No longer awaited, so a hung indicator cannot stall the turn behind it.
-    if (!opts.feedbackBudget || opts.feedbackBudget.tryClaim()) {
-      void thread.startTyping?.().catch(() => {});
-    }
+    void thread.startTyping?.().catch(() => {});
   }
   // Statuses are SEQUENCED through one chain, not fired independently.
   //
@@ -534,10 +562,9 @@ export async function handleAgentMessage(
   let statusChain: Promise<void> = Promise.resolve();
   const setStatus = (status: TurnStatus): Promise<void> => {
     statusChain = statusChain
-      .then(() => {
-        if (opts.feedbackBudget && !opts.feedbackBudget.tryClaim()) return;
-        return signals?.setStatus?.(status);
-      })
+      .then(() =>
+        withTimeout(signals?.setStatus?.(status), opts.statusTimeoutMs ?? STATUS_TIMEOUT_MS),
+      )
       .then(() => {})
       .catch(() => {});
     return statusChain;

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CHUNK_TARGET,
   type PostableThread,
+  STATUS_TIMEOUT_MS,
   TURN_STATUS_EMOJI,
   type TurnStatus,
   WHATSAPP_TEXT_LIMIT,
@@ -709,11 +710,13 @@ describe("P20 round 2 — status ordering and the shared budget", () => {
     expect(applied.at(-1)).toBe("done"); // the visible status when it settles
   });
 
-  test("an exhausted budget drops FEEDBACK but still delivers the REPLY", async () => {
-    // Drop-first is the whole point: under quota pressure the indicator and the
-    // reaction are what get sacrificed, never the answer.
-    const applied: TurnStatus[] = [];
+  test("a NEVER-SETTLING status cannot block the terminal status", async () => {
+    // Sequencing fixed ordering but created a liveness hazard: the chain awaits
+    // each link, so a 'working' that never resolves would hold the terminal
+    // status — and the apology — forever. Feedback must never withhold the
+    // product.
     const thread = mockThread("kapso:a:b");
+    const started = Date.now();
     await handleAgentMessage(
       thread,
       "hello",
@@ -721,40 +724,32 @@ describe("P20 round 2 — status ordering and the shared budget", () => {
         baseUrl: "https://x",
         fetchImpl: okFetch("the answer"),
         streaming: false,
-        feedbackBudget: { tryClaim: () => false },
+        statusTimeoutMs: 40,
       },
-      {
-        async setStatus(s: TurnStatus) {
-          applied.push(s);
-        },
-      },
+      { setStatus: () => new Promise<void>(() => {}) },
     );
-    expect(thread.posts).toEqual(["the answer"]); // reply survives
-    expect(applied).toEqual([]); // feedback dropped
-    expect(thread.typingCount).toBe(0);
+    expect(thread.posts).toEqual(["the answer"]); // reply still delivered
+    expect(Date.now() - started).toBeLessThan(2_000); // bounded by statusTimeoutMs, not by the hung promise
   });
 
-  test("an available budget lets feedback through", async () => {
-    // Polarity partner: without it, a budget wired to always-deny would pass
-    // the test above while disabling the feature entirely.
-    const applied: TurnStatus[] = [];
-    const thread = mockThread("kapso:a:b");
+  test("a hung status cannot block the APOLOGY on the failure path", async () => {
+    const posts: string[] = [];
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async startTyping() {},
+      async post(c) {
+        if (typeof c === "string") posts.push(c);
+      },
+    };
+    const boom = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
     await handleAgentMessage(
       thread,
       "hello",
-      {
-        baseUrl: "https://x",
-        fetchImpl: okFetch("the answer"),
-        streaming: false,
-        feedbackBudget: { tryClaim: () => true },
-      },
-      {
-        async setStatus(s: TurnStatus) {
-          applied.push(s);
-        },
-      },
+      { baseUrl: "https://x", fetchImpl: boom, streaming: false, statusTimeoutMs: 40 },
+      { setStatus: () => new Promise<void>(() => {}) },
     );
-    expect(applied).toEqual(["working", "done"]);
-    expect(thread.typingCount).toBeGreaterThan(0);
+    expect(posts.some((p) => p.includes("\u26a0\ufe0f"))).toBe(true);
   });
 });
