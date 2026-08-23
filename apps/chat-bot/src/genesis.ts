@@ -1,3 +1,4 @@
+import { AgentReportedError } from "./dispatch-failure";
 // Bridge the Genesis engine's `/api/chat` (Vercel AI SDK UI message stream) into
 // an `AsyncIterable<string>` that Chat SDK's `thread.post()` streams to a chat
 // platform. The Telegram channel is thin: a message in → this stream out.
@@ -127,5 +128,7 @@ export async function* genesisStream(opts: GenesisStreamOptions): AsyncGenerator
       break;
     }
   }
-  if (errorText !== undefined) throw new Error(errorText);
+  // Marked, so the dispatch classifier can attribute this to the AGENT rather
+  // than lumping it with everything else that can throw on the dispatch path.
+  if (errorText !== undefined) throw new AgentReportedError(errorText);
 }

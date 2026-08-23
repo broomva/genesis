@@ -19,6 +19,7 @@ import {
 } from "./commands";
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
+import { withStallTimeout } from "./stall-timeout";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -51,6 +52,10 @@ export interface HandlerOptions {
    *
    *  Defaults to true — Telegram's behavior is unchanged. */
   streaming?: boolean;
+  /** Abort a dispatch that produces NOTHING for this long. Resets on every chunk,
+   *  so it bounds silence rather than total duration and cannot cut off a slow but
+   *  progressing turn. Defaults to DEFAULT_STALL_MS. */
+  stallMs?: number;
 }
 
 /** WhatsApp's text body cap. Chunk below it so a long reply is delivered rather
@@ -293,14 +298,22 @@ export async function handleAgentMessage(
 
   await thread.startTyping?.().catch(() => {});
   try {
-    const stream = genesisStream({
-      baseUrl: opts.baseUrl,
-      threadId: thread.id,
-      text: trimmed,
-      token: opts.token,
-      fetchImpl: opts.fetchImpl,
-      workspaceId: opts.workspaceId,
-    });
+    // Bounded by SILENCE, not by total duration: the timer resets on every chunk,
+    // so a slow-but-progressing turn is never cut off. Without this a wedged
+    // dispatch hangs forever, the catch below never runs, and the channel says
+    // nothing at all — measured on 2026-08-23, where the stream opened and then
+    // produced zero bytes for the 170s a client waited before giving up.
+    const stream = withStallTimeout(
+      genesisStream({
+        baseUrl: opts.baseUrl,
+        threadId: thread.id,
+        text: trimmed,
+        token: opts.token,
+        fetchImpl: opts.fetchImpl,
+        workspaceId: opts.workspaceId,
+      }),
+      opts.stallMs,
+    );
     if (opts.streaming === false) {
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.

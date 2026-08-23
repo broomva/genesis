@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AgentReportedError,
   type DispatchFailure,
   classifyDispatchFailure,
   dispatchFailureMessage,
@@ -70,7 +71,30 @@ describe("classifyDispatchFailure — transport codes", () => {
   test("a self-referential cause chain terminates instead of hanging", () => {
     const e = new Error("loop") as Error & { cause?: unknown };
     e.cause = e;
-    expect(classifyDispatchFailure(e)).toBe("agent-error");
+    expect(classifyDispatchFailure(e)).toBe("unknown");
+  });
+
+  // Captured from bun 1.3.14: a plain Error, bun-native code, NO cause chain.
+  test("bun's real connect failure shape → backend-unreachable", () => {
+    const e = Object.assign(
+      new Error("Unable to connect. Is the computer able to access the url?"),
+      {
+        code: "ConnectionRefused",
+      },
+    );
+    expect(classifyDispatchFailure(e)).toBe("backend-unreachable");
+  });
+
+  test("classification is TOTAL — a hostile getter cannot make it throw", () => {
+    const hostile = {
+      get code() {
+        throw new Error("boom");
+      },
+      get message() {
+        throw new Error("boom");
+      },
+    };
+    expect(classifyDispatchFailure(hostile)).toBe("unknown");
   });
 });
 
@@ -87,14 +111,27 @@ describe("classifyDispatchFailure — HTTP status from genesis.ts", () => {
   // The status is parsed, not the prose. A reworded message must fall through to
   // agent-error rather than being silently reclassified as a backend problem.
   test("a reworded HTTP message is NOT guessed at", () => {
-    expect(classifyDispatchFailure(new Error("chat endpoint gave 503"))).toBe("agent-error");
+    expect(classifyDispatchFailure(new Error("chat endpoint gave 503"))).toBe("unknown");
+  });
+
+  // Anchored: an agent's OWN text quoting the phrase must not read as transport.
+  test("an agent error quoting the HTTP phrase is not read as a transport status", () => {
+    const e = new AgentReportedError("the tool said: Genesis /api/chat failed: HTTP 500 (nested)");
+    expect(classifyDispatchFailure(e)).toBe("agent-error");
   });
 });
 
 describe("classifyDispatchFailure — agent vs unknown", () => {
   // genesisStream rethrows the agent's own `error` part text.
-  test("an agent error part → agent-error", () => {
-    expect(classifyDispatchFailure(new Error("tool execution failed"))).toBe("agent-error");
+  // POSITIVE attribution only: a bare Error could be thread.post, a parser, or the
+  // stream consumer. Calling those "agent-error" misdiagnosed channel failures.
+  test("a MARKED agent error → agent-error", () => {
+    expect(classifyDispatchFailure(new AgentReportedError("tool execution failed"))).toBe(
+      "agent-error",
+    );
+  });
+  test("an UNMARKED bare Error → unknown, not agent-error", () => {
+    expect(classifyDispatchFailure(new Error("thread.post failed"))).toBe("unknown");
   });
   test.each([[null], [undefined], [""], [new Error("")]])("%p → unknown", (v) => {
     expect(classifyDispatchFailure(v)).toBe("unknown");
