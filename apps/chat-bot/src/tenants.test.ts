@@ -127,8 +127,16 @@ describe("rateLimit — sliding window", () => {
     expect(rateLimit(hits, 60_100, WINDOW, 3).allowed).toBe(false);
   });
 
-  test("max <= 0 blocks everything rather than dividing by zero", () => {
-    expect(rateLimit([], 1000, WINDOW, 0).allowed).toBe(false);
+  test("max <= 0 blocks with a FINITE retry, not Infinity", () => {
+    // Without the explicit guard this still reports allowed:false — by falling
+    // through to Math.min(...[]) === Infinity. `allowed` alone therefore does
+    // not distinguish the guard from its absence; a mutation sweep caught that
+    // this assertion was vacuous. retryAfterMs is what the guard actually
+    // provides, and Infinity would poison any caller that sleeps on it.
+    const d = rateLimit([], 1000, WINDOW, 0);
+    expect(d.allowed).toBe(false);
+    expect(Number.isFinite(d.retryAfterMs)).toBe(true);
+    expect(d.retryAfterMs).toBe(WINDOW);
   });
 
   test("pruneTimestamps keeps only the window", () => {
