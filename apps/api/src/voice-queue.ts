@@ -5,7 +5,7 @@
 // and no entrypoint passed `voiceSecret` either, so `if (opts.voiceSecret)` never
 // ran and the routes were never registered in ANY real deploy. Seventeen unit
 // tests and eight route tests all passed against a surface no caller could reach:
-// a gate that never executes (BRO-2226). This file plus the index.ts wiring is
+// a gate that never executes. This file plus the index.ts wiring is
 // what closes that.
 //
 // FAILURE POLICY — deliberately the OPPOSITE of printTrace's. The per-event trace

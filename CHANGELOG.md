@@ -18,8 +18,8 @@
 - **The voice routes existed in tests and in no deploy.** `voiceSecret`,
   `voicePrincipals` and `enqueueVoice` were declared on the server options and
   passed by nothing, so `if (opts.voiceSecret)` never ran. Twenty-five green tests
-  exercised a surface no caller could reach — a gate that never executes
-  (BRO-2226). The entrypoint now supplies all three from env. Verified by booting
+  exercised a surface no caller could reach — a gate that never executes. The
+  entrypoint now supplies all three from env. Verified by booting
   the real entrypoint: with the secret set both routes answer and tickets land in
   `queue.jsonl`; with it unset both return 404 and no queue directory is created.
 - **A human-formatted principal matched no one.** `resolveCaller` normalizes the

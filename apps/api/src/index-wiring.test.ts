@@ -34,7 +34,7 @@ function buildCallSource(): string {
   throw new Error("unbalanced build({ ... }) in index.ts");
 }
 
-describe("index.ts wires the voice channel into build() (BRO-2228 / BRO-2226)", () => {
+describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
   const call = buildCallSource();
 
   test.each(["voiceSecret", "voicePrincipals", "enqueueVoice", "voiceDelivery"])(
