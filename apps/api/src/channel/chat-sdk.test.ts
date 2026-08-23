@@ -45,7 +45,9 @@ describe("parseChatRequest", () => {
         },
       ],
     });
-    expect(r).toEqual({ threadId: "chat-42", text: "hello world" });
+    // channelQualified defaults FALSE for a body that does not assert it — the web
+    // UI keeps the lenient BRO-1627 behaviour; only a channel opts into refusal.
+    expect(r).toEqual({ threadId: "chat-42", text: "hello world", channelQualified: false });
   });
 
   test("uses the LAST user message when several are present", () => {

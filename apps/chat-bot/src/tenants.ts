@@ -24,7 +24,7 @@ export type TenantState = "pending" | "active" | "suspended";
  *              closed. Under `claude -p` there is no prompt to answer, so an
  *              un-allowed tool is simply unavailable and the agent cannot say
  *              how to grant it.
- *    trusted   `defaultMode: "bypassPermissions"` — tools are ungated, which
+ *    trusted   `defaultMode: "acceptEdits"` — the per-edit prompt is removed, which
  *              removes the approval friction entirely. Deny rules still block
  *              (they apply in EVERY mode) and the sandbox still confines the
  *              filesystem to the tenant dir and egress to `domains`.
@@ -217,6 +217,10 @@ const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
  *  It does NOT try to know the public-suffix list: `*.co.uk` has two labels
  *  after the wildcard and is accepted. That is a real limit, and the reason the
  *  approval stays a human decision rather than becoming automatic. */
+/** Special-use TLDs (RFC 6761 + RFC 7686). None of these reach the public internet;
+ *  `.local` in particular is mDNS and resolves on the LAN the box sits on. */
+const RESERVED_TLDS = new Set(["local", "localhost", "test", "invalid", "example", "onion"]);
+
 export function normalizeDomain(raw: string): string | undefined {
   const d = raw.trim().toLowerCase();
   if (d.length === 0 || d.length > 253) return undefined;
@@ -235,6 +239,12 @@ export function normalizeDomain(raw: string): string | undefined {
   // pass the label test and is never what an approval message means.
   const tld = labels[labels.length - 1] ?? "";
   if (!/^[a-z]{2,}$/.test(tld)) return undefined;
+  // RFC 6761 / RFC 7686 special-use names never route to the public internet, and
+  // `service.local` is mDNS: approving it puts LOCAL-NETWORK services on the tenant's
+  // egress allowlist, which is a confinement break rather than a web grant. This is a
+  // CLOSED, standardised set -- unlike the public-suffix problem below, where a
+  // partial list would be the same blocklist mistake this file keeps warning about.
+  if (RESERVED_TLDS.has(tld)) return undefined;
   return d;
 }
 

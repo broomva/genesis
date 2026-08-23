@@ -86,6 +86,7 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     effort?: unknown;
     engine?: unknown;
     workspaceId?: unknown;
+    channelQualified?: unknown;
     worktree?: unknown;
   };
   const threadId = typeof b.id === "string" && b.id ? b.id : "chat";
@@ -149,6 +150,7 @@ export function parseChatRequest(body: unknown): IncomingMessage {
     effort,
     engine,
     workspaceId,
+    channelQualified: b.channelQualified === true,
     worktree,
     attachments: attachments.length > 0 ? attachments : undefined,
   };

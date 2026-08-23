@@ -159,3 +159,41 @@ describe("policy + domains survive a write/read cycle (BRO-2236's shape)", () =>
     expect(back.domains).toEqual(["a.example.com", "b.example.com"]);
   });
 });
+
+describe("touchLastSeen — a stale snapshot must not revert a concurrent approval (BRO-2245)", () => {
+  test("an approval landing between read and write SURVIVES the stamp", () => {
+    const store = new TenantStore(dir());
+    store.put({
+      id: "573001234567",
+      channel: "kapso",
+      state: "pending",
+      requestedAt: "t0",
+    } as never);
+
+    // The bot reads the record at the start of a request...
+    const snapshot = store.get("573001234567");
+    expect(snapshot?.state).toBe("pending");
+    if (snapshot === undefined) throw new Error("unreachable: just written");
+
+    // ...the operator approves via the CLI while that request is in flight...
+    store.put({ ...snapshot, state: "active", approvedAt: "t1" } as TenantRecord);
+
+    // ...and the bot then stamps lastSeenAt. The OLD code did
+    // `put(snapshot)`, which carried state:"pending" back to disk and silently
+    // un-approved the tenant on their very next message.
+    store.touchLastSeen("573001234567", "t2");
+
+    const after = store.get("573001234567");
+    expect(after?.state).toBe("active"); // the approval survived
+    expect(after?.approvedAt).toBe("t1");
+    expect(after?.lastSeenAt).toBe("t2"); // and the stamp still landed
+  });
+
+  test("POSITIVE CONTROL — it does not resurrect a record that is gone", () => {
+    // Without this, a touchLastSeen that blindly wrote `{id, lastSeenAt}` would pass
+    // the test above while re-creating tenants the operator had deleted.
+    const store = new TenantStore(dir());
+    store.touchLastSeen("999", "t2");
+    expect(store.get("999")).toBeUndefined();
+  });
+});

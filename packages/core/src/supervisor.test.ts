@@ -643,6 +643,89 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect((await store.findSessionByThread("t-ws"))?.workspaceId).toBe("ws-a");
   });
 
+  // ── BRO-2236 / BRO-2241 ────────────────────────────────────────────────────
+  // The leniencies above are CORRECT for a human picking a workspace and dangerous
+  // for a public channel. Every case below is PAIRED: a refusal on its own is not
+  // evidence, because a blanket refusal would also produce it. Each negative sits
+  // beside a positive proving the same apparatus still serves a legitimate turn.
+
+  test("channel-qualified: an UNREGISTERED id is refused, a REGISTERED one is still served", async () => {
+    const sink: { cwd?: string } = {};
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA],
+      workspaceExists: () => true,
+      run: cwdRunner(sink),
+    });
+    // NEGATIVE — must refuse rather than resolve to the default workspace, which on
+    // the box is /home/agent, i.e. the PII directory (BRO-2236).
+    await expect(
+      sup.dispatch("t-ch-unk", "go", undefined, {
+        workspaceId: "ws-nope",
+        channelQualified: true,
+      }),
+    ).rejects.toThrow(/not registered/);
+    expect(sink.cwd).toBeUndefined(); // never ran anywhere, least of all the default
+
+    // POSITIVE CONTROL — same supervisor, same flag, a registered id still runs.
+    await sup.dispatch("t-ch-ok", "go", undefined, {
+      workspaceId: "ws-a",
+      channelQualified: true,
+    });
+    expect(sink.cwd).toBe("/repos/alpha");
+  });
+
+  test("channel-qualified: a STALE binding is refused, a matching one still dispatches", async () => {
+    const sink: { cwd?: string } = {};
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      workspaces: [wsA, wsB],
+      store,
+      workspaceExists: () => true,
+      run: cwdRunner(sink),
+    });
+    await sup.dispatch("t-ch-stick", "one", undefined, {
+      workspaceId: "ws-a",
+      channelQualified: true,
+    });
+    expect(sink.cwd).toBe("/repos/alpha");
+
+    // NEGATIVE — this is the measured live defect: a row minted before its channel
+    // had a confined workspace keeps the old binding forever, and resolve() never
+    // looks at the caller's id again. Silently serving ws-a here is the bug.
+    await expect(
+      sup.dispatch("t-ch-stick", "two", undefined, {
+        workspaceId: "ws-b",
+        channelQualified: true,
+      }),
+    ).rejects.toThrow(/bound to workspace ws-a/);
+    expect((await store.findSessionByThread("t-ch-stick"))?.workspaceId).toBe("ws-a");
+
+    // POSITIVE CONTROL — re-asserting the SAME id is not a re-bind and must serve,
+    // otherwise the refusal above would be indistinguishable from "channels are
+    // broken", which is the failure mode a bare negative cannot rule out.
+    // A SENTINEL rather than undefined: it keeps the type a string (assigning
+    // undefined narrows sink.cwd for the rest of the block) and it is the stronger
+    // control anyway — asserting /repos/alpha now proves the third dispatch actually
+    // WROTE cwd, where a cleared value only proves it is no longer empty.
+    sink.cwd = "/sentinel-never-dispatched";
+    await sup.dispatch("t-ch-stick", "three", undefined, {
+      workspaceId: "ws-a",
+      channelQualified: true,
+    });
+    expect(sink.cwd).toBe("/repos/alpha");
+  });
+
+  test("the refusals are OFF by default — the web UI keeps BRO-1627 leniency", async () => {
+    // Polarity guard: without the flag both refusals must stay dormant, or this
+    // change would silently break every non-channel caller.
+    const sink: { cwd?: string } = {};
+    const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: cwdRunner(sink) });
+    await sup.dispatch("t-web-unk", "go", undefined, { workspaceId: "ws-nope" });
+    expect(sink.cwd).toBe(ws.rootPath);
+  });
+
   test("an unregistered workspaceId falls back to the default workspace", async () => {
     const sink: { cwd?: string } = {};
     const sup = new Supervisor({ defaultWorkspace: ws, workspaces: [wsA], run: cwdRunner(sink) });

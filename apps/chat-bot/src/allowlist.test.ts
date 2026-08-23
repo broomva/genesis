@@ -342,3 +342,66 @@ describe("Allowlist.principals — per-tenant provisioning input (BRO-2224)", ()
     ]);
   });
 });
+
+describe("startupGateFor — the union is CHANNEL-AWARE (BRO-2216 follow-up)", () => {
+  const TG = { channel: "telegram", envVar: "GENESIS_TELEGRAM_ALLOWED_USERS" } as const;
+  const WA = { channel: "kapso", envVar: "GENESIS_WHATSAPP_ALLOWED_USERS" } as const;
+  // kapso:<phoneNumberId>:<waId> — base64url. waId 573001234567 is the SENDER.
+  const WA_THREAD = "kapso:MTMxNDAxNDAxMTc4ODUwOQ:NTczMDAxMjM0NTY3";
+
+  test("an OPEN channel does not make another channel's ENFORCED list inert", () => {
+    // The defect: an open list's predicate is `() => true`, which is not
+    // channel-qualified, so `lists.some(l => l.allowlist.allows(id))` returned true
+    // for a Telegram thread the Telegram list had refused.
+    const d = startupGateFor(
+      [
+        { ...TG, raw: "111111" },
+        { ...WA, raw: undefined },
+      ],
+      true,
+    );
+    expect(d.action).toBe("serve");
+    if (d.action !== "serve") return;
+
+    // NEGATIVE — an unlisted Telegram thread stays refused despite WhatsApp being open.
+    expect(d.allowlist.allows("telegram:999999")).toBe(false);
+    // POSITIVE CONTROLS — the listed Telegram id still passes, and the open WhatsApp
+    // channel still serves its OWN threads. Without these the assertion above would
+    // also pass on an allowlist that refuses everything.
+    expect(d.allowlist.allows("telegram:111111")).toBe(true);
+    expect(d.allowlist.allows(WA_THREAD)).toBe(true);
+  });
+
+  test("one channel's list cannot authorize another channel's BARE thread id", () => {
+    // principalOf(id, fallback) attributes an unprefixed id to whatever fallback the
+    // caller passes, and each list passes its own channel — so the same digits read
+    // as telegram-573001234567 to one list and kapso-573001234567 to the other, and
+    // `some()` accepted the kapso reading for a thread that was not kapso's.
+    const d = startupGateFor(
+      [
+        { ...TG, raw: "111111" },
+        { ...WA, raw: "573001234567" },
+      ],
+      false,
+    );
+    expect(d.action).toBe("serve");
+    if (d.action !== "serve") return;
+
+    // NEGATIVE — bare digits are ambiguous with two channels registered. Guessing is
+    // exactly what channel-qualification exists to prevent, so nobody owns it.
+    expect(d.allowlist.allows("573001234567")).toBe(false);
+    // POSITIVE CONTROLS — the SAME principal, properly channel-qualified, is allowed.
+    expect(d.allowlist.allows(WA_THREAD)).toBe(true);
+    expect(d.allowlist.allows("telegram:111111")).toBe(true);
+  });
+
+  test("a bare id still works when only ONE channel is registered", () => {
+    // Polarity guard: the ambiguity rule must not break the single-channel case,
+    // where an unprefixed id has exactly one possible reading.
+    const d = startupGateFor([{ ...TG, raw: "111111" }], false);
+    expect(d.action).toBe("serve");
+    if (d.action !== "serve") return;
+    expect(d.allowlist.allows("111111")).toBe(true);
+    expect(d.allowlist.allows("222222")).toBe(false);
+  });
+});

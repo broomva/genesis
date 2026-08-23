@@ -95,8 +95,11 @@ export class DrizzleStore implements Store {
     // future driver/added column can't silently start persisting them).
     await this.db
       .insert(workspaces)
-      .values({ id: ws.id, name: ws.name, rootPath: ws.rootPath })
-      .onConflictDoUpdate({ target: workspaces.id, set: { name: ws.name, rootPath: ws.rootPath } });
+      .values({ id: ws.id, name: ws.name, rootPath: ws.rootPath, confined: ws.confined ?? null })
+      .onConflictDoUpdate({
+        target: workspaces.id,
+        set: { name: ws.name, rootPath: ws.rootPath, confined: ws.confined ?? null },
+      });
     return ws;
   }
 

@@ -43,8 +43,22 @@ export interface TurnOptions {
   engine?: string;
   /** Requested workspace (BRO-1627) — honored only at SESSION CREATION (a
    *  thread's first turn, when the session row is minted); ignored after.
-   *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`. */
+   *  Unknown/unregistered → the default workspace. Sticky, mirrors `engine`.
+   *  EXCEPTION: see `channelQualified`, which turns both of those leniencies off. */
   workspaceId?: string;
+  /** BRO-2236 / BRO-2241 — this turn arrives from a PUBLIC CHANNEL (WhatsApp), where
+   *  `workspaceId` names a tenant rather than expressing a human's preference.
+   *
+   *  The two leniencies above are correct for a human picking a workspace in the web
+   *  UI and dangerous for a channel: "unregistered → default" hands an unknown tenant
+   *  the broadest directory on the box, and "sticky, ignored after" pins a row minted
+   *  before its channel had a confined workspace to whatever it was bound to then.
+   *  Both were measured live, not theorised.
+   *
+   *  Set true and BOTH become refusals. The caller decides, because only the caller
+   *  knows the request came off a channel — core cannot sniff it from the id without
+   *  copying the `GENESIS_WHATSAPP_WORKSPACE_PREFIX` convention into a second place. */
+  channelQualified?: boolean;
   /** Requested worktree posture (BRO-1656) — `true` = cut a per-session worktree,
    *  `false` = run at the workspace root. Honored only on a thread's FIRST turn
    *  (sticky), and only when the workspace ALLOWS a worktree (a nested-repo
@@ -265,6 +279,44 @@ export function hardenedExtraArgs(
 ): string[] | undefined {
   if (!workspace.confined) return extraArgs;
   return [...(extraArgs ?? []), "--strict-mcp-config"];
+}
+
+/** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
+ *
+ *  `hardenedExtraArgs` above decides whether a turn is hardened. These decide
+ *  whether the turn is allowed to happen at all, and they exist because hardening
+ *  silently degrades: a workspace that arrives with `confined: undefined` gets the
+ *  caller's args back unchanged, so an unconfined tenant looks exactly like a
+ *  workspace that was never meant to be confined.
+ *
+ *  A CHANNEL-QUALIFIED request is one where the caller named a workspace. A public
+ *  channel (WhatsApp) always names one; a human picking from the web UI also names
+ *  one. In both cases "the id you named is not registered" must refuse rather than
+ *  fall back to the default workspace, because the default is the broadest
+ *  directory on the box.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function bindRefusal(
+  requested: string | undefined,
+  isRegistered: (id: string) => boolean,
+): string | undefined {
+  if (requested === undefined) return undefined; // no claim made -> default is fine
+  if (isRegistered(requested)) return undefined;
+  return `Workspace ${requested} is not registered on this host, so this request cannot be served. It will NOT fall back to the default workspace.`;
+}
+
+/** BRO-2241 — an existing session's binding is sticky, so a row created before its
+ *  channel had a confined workspace keeps pointing at whatever it was bound to,
+ *  forever, and `resolve()` never looks at the caller's id again. Measured live:
+ *  three sandbox-number rows still bound to `ws-orchestrator`, which carries no
+ *  `confined` field at all. Refuse rather than silently serve the stale binding. */
+export function rebindRefusal(
+  existingWorkspaceId: string,
+  requested: string | undefined,
+): string | undefined {
+  if (requested === undefined) return undefined;
+  if (existingWorkspaceId === requested) return undefined;
+  return `This thread is bound to workspace ${existingWorkspaceId}, but the request names ${requested}. A binding is not migrated silently. Start a new thread, or re-bind it deliberately.`;
 }
 
 export class Supervisor {
@@ -521,10 +573,27 @@ export class Supervisor {
   /** chat-id/thread → Session. A NEW thread binds the requested workspace (BRO-1627)
    *  if it's registered, else the default; an existing thread is returned unchanged
    *  (the binding is sticky from session creation — switching = a new thread). */
-  async resolve(threadId: string, workspaceId?: string): Promise<Session> {
+  async resolve(
+    threadId: string,
+    workspaceId?: string,
+    channelQualified?: boolean,
+  ): Promise<Session> {
     await this.ensureWorkspace();
     const existing = await this.store.findSessionByThread(threadId);
-    if (existing) return existing;
+    if (existing) {
+      // BRO-2241: sticky is right for a human switching workspaces mid-thread, and
+      // wrong for a channel, where a stale binding can point at an UNCONFINED
+      // workspace the tenant was never meant to reach.
+      const stale = channelQualified ? rebindRefusal(existing.workspaceId, workspaceId) : undefined;
+      if (stale) throw new Error(stale);
+      return existing;
+    }
+    // BRO-2236: a named-but-unregistered id falls through to the default workspace,
+    // which on a public channel is an escalation rather than a convenience.
+    const refusal = channelQualified
+      ? bindRefusal(workspaceId, (id) => this.workspaceRegistry.has(id))
+      : undefined;
+    if (refusal) throw new Error(refusal);
     // Validate the requested id against the live registry at bind time (mirror the
     // engine `this.runners[requested] ? …` discipline); unknown → default.
     const bound =
@@ -573,7 +642,7 @@ export class Supervisor {
     onState?: (state: RunState, event: AgentEvent) => void,
     turnOpts?: TurnOptions,
   ): Promise<DispatchResult> {
-    const session = await this.resolve(threadId, turnOpts?.workspaceId);
+    const session = await this.resolve(threadId, turnOpts?.workspaceId, turnOpts?.channelQualified);
     // Resolve the bound workspace registry-FIRST (BRO-1627) — the registry carries
     // the richer noWorktree/isGitRepo the DB row does NOT. A thread that already RAN
     // under a workspace no longer in the registry can't be safely resumed (P20 S1):
