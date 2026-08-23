@@ -5,199 +5,218 @@
 // VERBATIM. So `## Heading` arrived with its hashes and a GFM table arrived as
 // raw `|---|---|` pipes. Measured against the installed adapter, not inferred.
 //
-// WHY NOT JUST POST `{markdown}`. The adapter DOES convert that shape, and its
-// inline handling is right — but `KapsoFormatConverter.nodeToWhatsApp` has no
-// `heading` case and no `table` case, so both fall through to a default that
-// concatenates children. A table becomes `ab12`: every cell fused, row
-// structure destroyed. That is WORSE than the raw pipes we ship today, because
-// pipes at least preserve which value sat in which row. Hence our own renderer.
+// WHY NOT THE ADAPTER'S OWN `{markdown}` PATH. It parses correctly, but
+// `KapsoFormatConverter.nodeToWhatsApp` has no `heading` case and no `table`
+// case, so both fall to a default that CONCATENATES children. A table becomes
+// `ab12`: every cell fused, row structure destroyed — worse than the raw pipes,
+// which at least preserve which value sat in which row.
 //
-// TARGET SYNTAX is taken from the adapter's own mapping, which is the
-// authoritative statement of what this channel accepts:
+// WHY THIS PARSES INSTEAD OF PATTERN-MATCHING. The first cut of this file was a
+// regex pipeline, and cross-model review was right to reject it wholesale: a
+// regex cannot see that `**literal**` sits inside a code span, that ~~~ and
+// longer backtick runs are also fences, that `\*` is escaped, or that `***x***`
+// is nested emphasis. Every one of those corrupted output. Parsing resolves
+// them all, and needs no sentinels, no vault and no escaping rules of its own.
+//
+// NOTE WHICH PARSER. NOT the adapter's `toAst`, which parses PLATFORM text —
+// WhatsApp text, where `*x*` is BOLD. That is the inverse direction, and
+// feeding it markdown silently reads every italic as a bold: `a *b* c`
+// round-tripped to `a *b* c` rather than `a _b_ c`. This uses
+// mdast-util-from-markdown with the GFM extension, which is what actually
+// speaks the language the agent writes.
+//
+// TARGET SYNTAX comes from the adapter's own mapping, the authoritative
+// statement of what this channel accepts:
 //   *bold*  _italic_  ~strike~  `inline`  ```block```  > quote  label (url)
 
-/** A fenced code block lifted out before any other transform runs.
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
+
+/** Minimal mdast shape. Structural rather than importing mdast types: the
+ *  parser is an implementation detail of the adapter, and a node we do not
+ *  recognise must degrade, never throw. */
+interface Node {
+  readonly type: string;
+  readonly value?: string;
+  readonly url?: string;
+  readonly ordered?: boolean;
+  readonly children?: readonly Node[];
+}
+
+function kids(n: Node): readonly Node[] {
+  return n.children ?? [];
+}
+
+function inlineAll(ns: readonly Node[]): string {
+  return ns.map(inline).join("");
+}
+
+/** Render inline content. */
+function inline(n: Node): string {
+  switch (n.type) {
+    case "text":
+      return n.value ?? "";
+    case "inlineCode":
+      // The parser having made this its own node is exactly why the regex
+      // version was wrong: nothing inside may be reinterpreted as markup.
+      return `\`${n.value ?? ""}\``;
+    case "strong":
+      return `*${inlineAll(kids(n))}*`;
+    case "emphasis":
+      return `_${inlineAll(kids(n))}_`;
+    case "delete":
+      return `~${inlineAll(kids(n))}~`;
+    case "break":
+      return "\n";
+    case "link": {
+      const label = inlineAll(kids(n));
+      const url = n.url ?? "";
+      return label && label !== url ? `${label} (${url})` : url;
+    }
+    case "image":
+      return n.url ?? inlineAll(kids(n));
+    default:
+      return inlineAll(kids(n)) || (n.value ?? "");
+  }
+}
+
+/** Strip emphasis markers from text about to be wrapped in emphasis.
  *
- *  Protecting these is load-bearing: code is exactly where `**`, `_`, `|` and
- *  `#` appear with no markup meaning, and rewriting them corrupts the one part
- *  of a reply where every character matters. */
-interface Vault {
-  readonly text: string;
-  readonly blocks: string[];
+ *  `*a *b* c*` renders as broken runs on WhatsApp, so a heading or table lead
+ *  containing bold must not nest. Operates on ALREADY-RENDERED WhatsApp text,
+ *  so it only removes markers this module produced. */
+function flatten(s: string): string {
+  return s.replaceAll("*", "").replaceAll("_", "");
 }
 
-// Private Use Area code points, not control characters: no lint rule objects to
-// them in a regex, no agent emits them by accident, and they are stripped
-// defensively before output regardless.
-const CODE_OPEN = "\uE000";
-const CODE_CLOSE = "\uE001";
-/** Marks text ALREADY destined to be WhatsApp-bold, so the inline pass does not
- *  re-read the asterisks it is about to write. That re-reading WAS the bug:
- *  block conversion emitted `*Title*` and the italic rule rewrote it to
- *  `_Title_`. */
-const BOLD_MARK = "\uE002";
-
-function liftCodeBlocks(md: string): Vault {
-  const blocks: string[] = [];
-  const text = md.replace(/```[\s\S]*?```/g, (m) => {
-    blocks.push(m);
-    return `${CODE_OPEN}${blocks.length - 1}${CODE_CLOSE}`;
-  });
-  return { text, blocks };
-}
-
-function restoreCodeBlocks(text: string, blocks: string[]): string {
-  return text.replace(/\uE000(\d+)\uE001/g, (_m, i) => blocks[Number(i)] ?? "");
-}
-
-/** Split a markdown table row into trimmed cells. */
-function cells(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\||\|$/g, "")
-    .split("|")
-    .map((c) => c.trim());
-}
-
-/** Is this the `|---|:--:|` alignment row that follows a table header? */
-function isAlignmentRow(line: string): boolean {
-  const t = line.trim();
-  if (!t.includes("|") || !t.includes("-")) return false;
-  return cells(t).every((c) => /^:?-{1,}:?$/.test(c));
-}
-
-function isTableRow(line: string): boolean {
-  return line.trim().startsWith("|") && line.trim().endsWith("|") && line.includes("|");
-}
-
-/** Render one table as labelled blocks rather than columns.
+/** One table row as a labelled block.
  *
- *  A phone is ~40 characters wide, so a column layout wraps into noise however
- *  it is padded. One block per row, with each cell labelled by its header, is
- *  narrow by construction and loses nothing. The first column leads in bold
- *  because in practice it is the row's name. */
-function renderTable(rows: string[][]): string {
-  if (rows.length === 0) return "";
+ *  Not columns: a phone is about forty characters wide, so any column layout
+ *  wraps into noise however it is padded. One block per row, each cell labelled
+ *  by its header, is narrow by construction and loses nothing. A cell with no
+ *  header — a ragged row with more cells than columns — is still emitted under
+ *  an ordinal label, because dropping data silently is the failure this whole
+ *  arc is about. */
+function renderRow(header: readonly string[], row: readonly string[]): string {
+  const [lead, ...rest] = row;
+  const head = lead?.trim() ? `• *${flatten(lead.trim())}*` : "•";
+  const lines = rest
+    .map((cell, i) => {
+      const value = cell.trim();
+      if (!value) return undefined;
+      const label = header[i + 1]?.trim();
+      return label ? `  ${flatten(label)}: ${value}` : `  ${i + 2}: ${value}`;
+    })
+    .filter((l): l is string => Boolean(l));
+  return [head, ...lines].join("\n");
+}
+
+function renderTable(n: Node): string {
+  const rows = kids(n).map((r) => kids(r).map((c) => inlineAll(kids(c))));
   const [header, ...body] = rows;
   if (!header) return "";
-  if (body.length === 0) return header.map((h) => `• ${h}`).join("\n");
+  if (body.length === 0) return header.map((h) => `• ${flatten(h)}`).join("\n");
+  return body.map((r) => renderRow(header, r)).join("\n");
+}
 
-  return body
-    .map((row) => {
-      const lead = row[0]?.trim();
-      const rest = row
-        .slice(1)
-        .map((cell, i) => {
-          const label = header[i + 1]?.trim();
-          const value = cell.trim();
-          if (!value) return undefined;
-          return label ? `  ${label}: ${value}` : `  ${value}`;
-        })
-        .filter((l): l is string => Boolean(l));
-      // stripInlineEmphasis for the same reason as the heading path: a cell
-      // that is ALREADY `**bold**` would otherwise be wrapped again and render
-      // as literal `**Main demo**`. Second site of one defect — the shape this
-      // repo repeats.
-      const head = lead ? `• ${BOLD_MARK}${stripInlineEmphasis(lead)}${BOLD_MARK}` : "•";
-      return [head, ...rest].join("\n");
+function renderList(n: Node, depth: number): string {
+  const indent = "  ".repeat(depth);
+  return kids(n)
+    .map((item, i) => {
+      // Ordered lists keep their numbers; a bullet would discard the ordering
+      // the author meant.
+      const marker = n.ordered ? `${i + 1}.` : "•";
+      const parts = kids(item)
+        .map((child) =>
+          child.type === "list" ? renderList(child, depth + 1) : block(child, depth),
+        )
+        .filter((p) => p !== "");
+      const [first, ...rest] = parts;
+      return [`${indent}${marker} ${first ?? ""}`, ...rest].join("\n");
     })
     .join("\n");
 }
 
-/** Convert block-level constructs WhatsApp cannot express. */
-function convertBlocks(text: string): string {
-  const out: string[] = [];
-  const lines = text.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-
-    // Table: a row, optionally followed by an alignment row, then more rows.
-    if (isTableRow(line) && isAlignmentRow(lines[i + 1] ?? "")) {
-      const rows: string[][] = [cells(line)];
-      i += 2; // skip header + alignment
-      while (i < lines.length && isTableRow(lines[i] ?? "")) {
-        rows.push(cells(lines[i] ?? ""));
-        i++;
-      }
-      out.push(renderTable(rows));
-      continue;
-    }
-
-    // Heading -> bold line. WhatsApp has no headings, but it has emphasis, and
-    // dropping the marker without it (which the adapter does) loses the
-    // hierarchy entirely.
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const body = heading[2]?.trim() ?? "";
-      out.push(body ? `${BOLD_MARK}${stripInlineEmphasis(body)}${BOLD_MARK}` : "");
-      i++;
-      continue;
-    }
-
-    // Bullets: normalise -, * and + to a real bullet character.
-    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
-    if (bullet) {
-      out.push(`${bullet[1] ?? ""}• ${bullet[2] ?? ""}`);
-      i++;
-      continue;
-    }
-
-    out.push(line);
-    i++;
+/** Render a block-level node. */
+function block(n: Node, depth = 0): string {
+  switch (n.type) {
+    case "heading":
+      // WhatsApp has no headings but does have emphasis. Dropping the marker
+      // without it — which the adapter does — loses the hierarchy entirely.
+      return `*${flatten(inlineAll(kids(n)))}*`;
+    case "paragraph":
+      return inlineAll(kids(n));
+    case "code":
+      return `\`\`\`\n${n.value ?? ""}\n\`\`\``;
+    case "blockquote":
+      return kids(n)
+        .map((c) => block(c, depth))
+        .join("\n\n")
+        .split("\n")
+        .map((l) => `> ${l}`)
+        .join("\n");
+    case "list":
+      return renderList(n, depth);
+    case "table":
+      return renderTable(n);
+    case "thematicBreak":
+      return "---";
+    case "html":
+      // Raw HTML has no WhatsApp equivalent; showing it beats guessing.
+      return n.value ?? "";
+    default:
+      return kids(n).length > 0 ? inlineAll(kids(n)) : (n.value ?? "");
   }
-  return out.join("\n");
-}
-
-/** Remove emphasis markers from text that is ALREADY being emphasised.
- *
- *  A heading rendered as `*...*` that itself contains `**bold**` would produce
- *  `*a *b* c*`, which WhatsApp renders as broken runs. */
-function stripInlineEmphasis(s: string): string {
-  return s.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1");
-}
-
-/** Convert inline markdown to WhatsApp's inline syntax.
- *
- *  ORDER IS LOAD-BEARING. Markdown's `*x*` is ITALIC while WhatsApp's `*x*` is
- *  BOLD, so the two languages collide on the same character. Double-emphasis is
- *  resolved to a sentinel first, then single-emphasis becomes `_italic_`, and
- *  only then does the sentinel become `*bold*` — otherwise the bold pass eats
- *  one asterisk of each `**` pair and leaves the strays seen on the phone. */
-function convertInline(text: string): string {
-  return (
-    text
-      // **bold** / __bold__ -> sentinel
-      .replace(/\*\*(.+?)\*\*/gs, `${BOLD_MARK}$1${BOLD_MARK}`)
-      .replace(/__(.+?)__/gs, `${BOLD_MARK}$1${BOLD_MARK}`)
-      // ~~strike~~ -> ~strike~
-      .replace(/~~(.+?)~~/gs, "~$1~")
-      // *italic* -> _italic_   (single asterisk only; sentinels are safe)
-      .replace(/(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?!\w)/g, "$1_$2_")
-      // [label](url) -> label (url)
-      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
-      // sentinel -> WhatsApp bold, once, after every asterisk rule has run
-      .replaceAll(BOLD_MARK, "*")
-  );
 }
 
 /** Render agent markdown as text WhatsApp will display correctly.
  *
- *  Total and lossless-by-default: anything not recognised passes through
- *  unchanged, because mangling an unrecognised construct is worse than showing
- *  it plainly — which is the whole lesson of the table case. */
+ *  Total: a parse failure returns the input unchanged, because shipping the
+ *  original beats shipping nothing, and an unrecognised construct is rendered
+ *  plainly rather than mangled — the lesson the table case taught. */
 export function markdownToWhatsApp(markdown: string): string {
-  if (!markdown) return markdown;
-  const vault = liftCodeBlocks(markdown);
-  const blocks = convertBlocks(vault.text);
-  const inline = convertInline(blocks);
-  return (
-    restoreCodeBlocks(inline, vault.blocks)
-      // A leaked sentinel would be invisible garbage on the user's device.
-      .replace(/[\uE000-\uE002]/g, "")
-      // Collapse the runs of blank lines that block conversion can leave behind.
-      .replace(/\n{3,}/g, "\n\n")
-      .trimEnd()
-  );
+  if (!markdown.trim()) return markdown.trim();
+  try {
+    // A REAL GFM parser, not the adapter's `toAst`. That one parses PLATFORM
+    // text, where `*x*` is bold — the inverse direction — so feeding it
+    // markdown silently reads every italic as a bold. Measured: `a *b* c`
+    // round-tripped to `a *b* c` instead of `a _b_ c`.
+    const ast = fromMarkdown(markdown, {
+      extensions: [gfm()],
+      mdastExtensions: [gfmFromMarkdown()],
+    }) as unknown as Node;
+    const out = kids(ast)
+      .map((n) => block(n))
+      .filter((s) => s !== "")
+      .join("\n\n");
+    return out.replace(/\n{3,}/g, "\n\n").trimEnd() || markdown.trim();
+  } catch {
+    return markdown;
+  }
+}
+
+/** Does this text end inside an unclosed ``` fence? */
+export function endsInsideFence(text: string): boolean {
+  return (text.match(/```/g)?.length ?? 0) % 2 === 1;
+}
+
+/** Close an open fence at a chunk boundary and reopen it in the next chunk.
+ *
+ *  Chunking runs AFTER rendering, so a long fenced block can straddle two
+ *  WhatsApp messages. Each message is rendered independently by the client, so
+ *  a chunk ending mid-fence shows an unmatched ``` and the chunk after it loses
+ *  its monospace entirely. Balancing per chunk keeps both halves readable as
+ *  code. Review called this a BLOCKER and was right — I had written the split
+ *  off as cosmetic, which is true of a bold run and false of a fence. */
+export function balanceFences(chunks: readonly string[]): string[] {
+  const out: string[] = [];
+  let carryOpen = false;
+  for (const chunk of chunks) {
+    const opened = carryOpen ? `\`\`\`\n${chunk}` : chunk;
+    const stillOpen = endsInsideFence(opened);
+    out.push(stillOpen ? `${opened}\n\`\`\`` : opened);
+    carryOpen = stillOpen;
+  }
+  return out;
 }

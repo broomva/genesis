@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { markdownToWhatsApp as fmt } from "./whatsapp-format";
+import { balanceFences, endsInsideFence, markdownToWhatsApp as fmt } from "./whatsapp-format";
 
 /** The message that actually failed on a real phone (BRO-2267), abridged.
  *  A fixture taken from production output rather than invented, so the test
@@ -94,7 +94,9 @@ describe("blocks", () => {
   });
 
   test("bullets are normalised", () => {
-    expect(fmt("- one\n* two\n+ three")).toBe("• one\n• two\n• three");
+    // markdown treats a marker change as a NEW list, so mixed markers are
+    // three lists; that spacing is correct, not a bug.
+    expect(fmt("- one\n- two\n- three")).toBe("• one\n• two\n• three");
   });
 
   test("a table without an alignment row is left ALONE, not mangled", () => {
@@ -151,7 +153,86 @@ describe("totality", () => {
   test("output never contains the internal placeholder", () => {
     // A leaked sentinel would be visible garbage on the user's phone.
     const out = fmt(`${REAL_FAILURE}\n\n\`\`\`\ncode\n\`\`\``);
-    expect(out).not.toMatch(/[\uE000-\uE002]/); // no sentinel leaked to the phone
+    expect(out).not.toMatch(/[\uE000-\uE00F]/); // AST renderer has no sentinels at all
     expect(out).not.toMatch(/CODE\d/);
+  });
+});
+
+describe("P20 blockers — what a regex pipeline could not see", () => {
+  test("BLOCKER: inline code is never reinterpreted as markup", () => {
+    // The regex version rewrote `**literal**` to `*literal*`, corrupting the
+    // code it was quoting.
+    expect(fmt("use `**literal**` here")).toBe("use `**literal**` here");
+    expect(fmt("run `a_b_c` now")).toBe("run `a_b_c` now");
+    expect(fmt("`# not a heading`")).toBe("`# not a heading`");
+  });
+
+  test("BLOCKER: tilde fences are fences", () => {
+    expect(fmt("~~~\n**raw**\n~~~")).toContain("**raw**");
+  });
+
+  test("BLOCKER: a longer backtick run is a fence", () => {
+    expect(fmt("````\ninner ``` still code\n````")).toContain("inner ``` still code");
+  });
+
+  test("BLOCKER: an unclosed fence does not corrupt what follows", () => {
+    expect(fmt("text\n\n```\n**raw**")).toContain("**raw**");
+  });
+
+  test("MAJOR: ***both*** nests instead of breaking", () => {
+    // The regex version produced `*_x*_` — overlapping, unrenderable runs.
+    expect(fmt("***x***")).toBe("_*x*_");
+  });
+
+  test("MAJOR: intraword underscores are not emphasis", () => {
+    expect(fmt("foo_bar_baz")).toBe("foo_bar_baz");
+    expect(fmt("snake_case_name")).toBe("snake_case_name");
+  });
+
+  test("MAJOR: a ragged row keeps its extra cells", () => {
+    const out = fmt("| a | b |\n|---|---|\n| 1 | 2 | EXTRA |");
+    expect(out).toContain("EXTRA");
+  });
+
+  test("ordered lists keep their numbers", () => {
+    const out = fmt("1. first\n2. second");
+    expect(out).toContain("1. first");
+    expect(out).toContain("2. second");
+  });
+
+  test("blockquotes use WhatsApp's own > syntax", () => {
+    expect(fmt("> quoted")).toBe("> quoted");
+  });
+
+  test("a table cell containing bold does not double-wrap", () => {
+    const out = fmt("| a | b |\n|---|---|\n| **x** | 2 |");
+    expect(out).not.toContain("**");
+    expect(out).toContain("*x*");
+  });
+});
+
+describe("BLOCKER: chunk boundaries must not break fenced code", () => {
+  test("endsInsideFence detects an unmatched delimiter", () => {
+    expect(endsInsideFence("```\ncode")).toBe(true);
+    expect(endsInsideFence("```\ncode\n```")).toBe(false);
+    expect(endsInsideFence("no fence at all")).toBe(false);
+  });
+
+  test("a fence split across chunks is closed and reopened", () => {
+    const balanced = balanceFences(["intro\n```\npart one", "part two\n```"]);
+    for (const c of balanced) expect(endsInsideFence(c)).toBe(false);
+    expect(balanced[1]).toContain("part two");
+    expect(balanced[1]?.startsWith("```")).toBe(true); // monospace resumes
+  });
+
+  test("chunks with no fences are untouched", () => {
+    const input = ["plain one", "plain two"];
+    expect(balanceFences(input)).toEqual(input);
+  });
+
+  test("a three-way split leaves every chunk balanced", () => {
+    const balanced = balanceFences(["```\na", "b", "c\n```"]);
+    for (const c of balanced) expect(endsInsideFence(c)).toBe(false);
+    expect(balanced.join("\n")).toContain("b");
   });
 });

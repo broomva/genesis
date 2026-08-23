@@ -20,7 +20,7 @@ import {
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 import { withStallTimeout } from "./stall-timeout";
-import { markdownToWhatsApp } from "./whatsapp-format";
+import { balanceFences, markdownToWhatsApp } from "./whatsapp-format";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -619,7 +619,11 @@ export async function handleAgentMessage(
       // whole and only then split, whereas chunking first could cut a table
       // across two messages and destroy the row structure. A split emphasis
       // marker is a cosmetic wart; split data is not.
-      const chunks = chunkForWhatsapp(markdownToWhatsApp(reply), opts.chunkTarget);
+      // Render, chunk, then re-balance fences ACROSS chunk boundaries. Each
+      // WhatsApp message is rendered independently by the client, so a fenced
+      // block split in two leaves an unmatched ``` in one message and loses
+      // monospace in the next.
+      const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(reply), opts.chunkTarget));
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
