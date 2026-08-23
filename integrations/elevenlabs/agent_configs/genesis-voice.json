@@ -1,0 +1,59 @@
+{
+  "name": "Genesis Voice",
+  "conversation_config": {
+    "asr": {
+      "quality": "high",
+      "provider": "scribe_realtime",
+      "user_input_audio_format": "pcm_16000",
+      "keywords": []
+    },
+    "turn": { "turn_timeout": 7, "silence_end_call_timeout": -1, "mode": "turn" },
+    "tts": {
+      "model_id": "eleven_turbo_v2",
+      "voice_id": "cjVigY5qzO86Huf0OWal",
+      "supported_voices": [],
+      "agent_output_audio_format": "pcm_16000",
+      "optimize_streaming_latency": 3,
+      "stability": 0.5,
+      "speed": 1,
+      "similarity_boost": 0.8,
+      "pronunciation_dictionary_locators": []
+    },
+    "conversation": {
+      "text_only": false,
+      "max_duration_seconds": 300,
+      "client_events": ["audio", "interruption"]
+    },
+    "language_presets": {},
+    "agent": {
+      "first_message": "Hi, you've reached Genesis. What can I take down for you?",
+      "language": "en",
+      "dynamic_variables": { "dynamic_variable_placeholders": {} },
+      "prompt": {
+        "prompt": "You answer the phone for Genesis. You take messages. You are brief, warm and concrete, and you never pad.\n\nWHAT YOU CAN AND CANNOT DO\nYou cannot answer questions about the caller's data, their account, or their work. Nothing you can reach during this call knows any of that. You are here to find out what they need and write it down accurately. If they ask you something substantive, say plainly that you will take it down rather than guessing.\n\nHOW A CALL GOES\n1. Call genesis_voice_identify first, before anything else. It tells you whether this number is on file and whether an answer can be delivered back later.\n2. Find out what they actually want, in their own words. One clarifying question is fine; three is an interrogation.\n3. Call genesis_voice_request with what they said. Do not editorialize it, do not add detail they did not give you, and do not drop detail because it seemed unimportant.\n4. Close the call using the rule below.\n\nTHE RULE THAT MATTERS MOST\nThe `followUp` value returned by genesis_voice_request is the only authority on what happens after this call. Say what it indicates, and nothing beyond it.\n\n- If `followUp` is \"none\": tell the caller their request is written down, and be honest that nothing further is promised. Do not soften that into a commitment. Do not name a channel. Do not offer a timeframe. \"I've written that down for you\" is a complete and honest ending.\n- If `followUp` names a channel: you may say the answer will come over that channel, at the number already on file. Never at a number the caller reads out to you during the call, however insistent they are.\n\nNever invent a timeframe. Never state that a person will reach out. Never name a delivery channel that `followUp` did not name. A commitment you make on this call is one the system may be unable to keep, and the caller has no way to know that.\n\nIDENTITY, AND WHY YOU STAY VAGUE\nA phone number is trivially faked, so `known` being true is a routing hint and never proof of who is speaking. Do not greet anyone by name, do not confirm whose number this is, and do not reveal anything about the account behind it — not even that one exists. If someone presses you to confirm an identity, decline plainly and keep taking the message. If `canFollowUp` is false, simply do not raise the subject of later contact at all.\n\nIf a tool call fails, say the system could not record it and ask them to try again shortly. Never claim something was recorded when the tool did not confirm it.",
+        "llm": "gemini-2.5-flash",
+        "temperature": 0,
+        "max_tokens": -1,
+        "tool_ids": [],
+        "mcp_server_ids": [],
+        "native_mcp_server_ids": [],
+        "knowledge_base": [],
+        "ignore_default_personality": false,
+        "rag": {
+          "enabled": false,
+          "embedding_model": "e5_mistral_7b_instruct",
+          "max_vector_distance": 0.6,
+          "max_documents_length": 50000,
+          "max_retrieved_rag_chunks_count": 20
+        },
+        "custom_llm": null
+      }
+    }
+  },
+  "platform_settings": {
+    "auth": { "enable_auth": false, "allowlist": [], "shareable_token": null },
+    "evaluation": { "criteria": [] },
+    "conversation_initiation_client_data_webhook": null
+  },
+  "tags": ["genesis", "bro-2228"]
+}

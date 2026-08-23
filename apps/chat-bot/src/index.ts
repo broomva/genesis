@@ -39,6 +39,8 @@ import { type ChannelConfig, principalOf, startupGateFor } from "./allowlist";
 import { botStateFile, createFileState } from "./file-state";
 import {
   type HandlerOptions,
+  TURN_STATUS_EMOJI,
+  type TurnSignals,
   handleAgentMessage,
   nativeCommandMenu,
   parseCommand,
@@ -187,21 +189,37 @@ const state: StateAdapter = stateDir
   : createMemoryState();
 if (stateDir) console.log(`[genesis-bot] durable subscription state: ${botStateFile(stateDir)}`);
 
-const chat = kapsoConfigured
-  ? new Chat({
-      userName,
-      adapters: {
-        telegram,
-        kapso: createKapsoAdapter({
-          kapsoApiKey,
-          phoneNumberId: kapsoPhoneNumberId,
-          webhookSecret: kapsoWebhookSecret,
-        }),
-      },
-      state,
-      logger,
+// Hoisted rather than inlined into the Chat config because the turn-status
+// reactions need the adapter directly: Chat SDK's inbound `Message` carries an
+// id but no reaction methods (those live on `SentMessage`, i.e. messages WE
+// sent), while `Adapter.addReaction(threadId, messageId, emoji)` can mark any
+// message — including the user's own, which is the one we want.
+const kapsoAdapter = kapsoConfigured
+  ? createKapsoAdapter({
+      kapsoApiKey,
+      phoneNumberId: kapsoPhoneNumberId,
+      webhookSecret: kapsoWebhookSecret,
     })
+  : undefined;
+
+const chat = kapsoAdapter
+  ? new Chat({ userName, adapters: { telegram, kapso: kapsoAdapter }, state, logger })
   : new Chat({ userName, adapters: { telegram }, state, logger });
+
+/** Turn-status reactions for a WhatsApp message, or undefined elsewhere.
+ *
+ *  WhatsApp-only on purpose. Telegram can EDIT a message, so it already shows
+ *  progress by streaming the reply in place; adding reactions there would be a
+ *  second, redundant status channel. This exists because WhatsApp has no edit
+ *  and a reaction is its only mutable surface. */
+function turnSignalsFor(threadId: string, messageId: string): TurnSignals | undefined {
+  if (!kapsoAdapter || !threadId.startsWith("kapso:") || !messageId) return undefined;
+  return {
+    async setStatus(status) {
+      await kapsoAdapter.addReaction(threadId, messageId, TURN_STATUS_EMOJI[status]);
+    },
+  };
+}
 
 // Owner allowlist (BRO-1512/1534/2216): only configured principals are served,
 // gated PER REGISTERED CHANNEL. Configuring Telegram does not vouch for
@@ -352,7 +370,7 @@ chat.onDirectMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts);
+  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Groups: subscribe on first @-mention, then handle every follow-up. Group
@@ -362,13 +380,13 @@ chat.onNewMention(async (thread, message) => {
   await thread.subscribe();
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts);
+  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
 });
 chat.onSubscribedMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts);
+  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Register the native Telegram `/` menu (control commands only — the full
