@@ -90,6 +90,21 @@ function settingsFor(dir: string): string {
         // NOT bypassPermissions. Under bypass, allow rules are inert and the
         // file tools are ungated, so per-tenant confinement cannot be built.
         defaultMode: "default",
+        // WebSearch only. These tools run inside the Claude Code process, NOT
+        // through the Bash sandbox, so this opens a channel the network policy
+        // never covered — a tenant's `curl` stays fully blocked (DNS included)
+        // and this does not change that. It is a SEPARATE egress path.
+        //
+        // Search, not fetch: WebFetch takes an arbitrary URL, and a URL is an
+        // exfiltration channel in itself (the path and query carry whatever the
+        // agent puts there). A search query is narrower. Grant WebFetch only
+        // with a domain allow-list, and only for a reason.
+        //
+        // Tolerable because reads are confined: a tenant can only reach its own
+        // directory, so the worst it can leak is its own data. Under the
+        // previous blocklist — when crm/, *.env and the gh token were readable —
+        // granting any egress would have been an exfiltration path.
+        allow: ["WebSearch"],
         // Deny rules block in EVERY mode, so these survive a future operator
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
