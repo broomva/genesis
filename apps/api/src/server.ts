@@ -248,9 +248,22 @@ export function build(opts: BuildOpts) {
     // are strangers and the agent's correct move for them is to take a message.
     app.post("/voice/identify", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      // `?? {}` because a literal `null` body is VALID json, so .catch() never
-      // fires and the dereference below became a 500 on both routes.
-      const body = ((await c.req.json().catch(() => ({}))) ?? {}) as { callerId?: unknown };
+      // A PARSE FAILURE IS NOT AN UNKNOWN CALLER. Collapsing it to `{}` made the
+      // two indistinguishable: asString(undefined) returns "" rather than throwing,
+      // so callerId became "", resolveCaller said not-known, and a truncated body or
+      // a serialization bug on ElevenLabs' side returned a cheerful 200 {known:false}
+      // — the same answer a stranger gets. A transport fault would have looked like
+      // normal traffic forever.
+      //
+      // `?? {}` is still right for a literal `null` body, which is VALID json, so
+      // .catch() never fires and the dereference below was a 500 on both routes.
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { callerId?: unknown };
       // SAME validation boundary as /voice/request. Round 1 hardened buildTicket
       // and left this route casting raw JSON, so the two disagreed about what a
       // callerId may be: `42` was a 500 here and a 400 there.
@@ -295,7 +308,17 @@ export function build(opts: BuildOpts) {
     // nothing; the ticket still carries its deliverTo for the future consumer.
     app.post("/voice/request", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {
+      // Same reasoning as /voice/identify above: a body that did not PARSE is a
+      // transport fault, not a request with missing fields. Fixing identify alone
+      // would leave the sibling route converting a truncated body into whatever
+      // buildTicket makes of `{}`.
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as {
         callerId?: unknown;
         request?: unknown;
         conversationId?: unknown;

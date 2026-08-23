@@ -135,6 +135,38 @@ describe("voice routes (BRO-2228)", () => {
     expect((await post(app as never, "/voice/identify", {}, "wrong")).status).toBe(401);
   });
 
+  // Raw body, not `post()`, because post() JSON.stringifies and the whole point is
+  // a body that does not parse.
+  const raw = (app: { fetch: (r: Request) => Promise<Response> }, path: string, body: string) =>
+    app.fetch(
+      new Request(`http://x${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-genesis-voice-secret": SECRET },
+        body,
+      }),
+    );
+
+  test("a body that does not PARSE is 400, not a cheerful 200 {known:false}", async () => {
+    // asString(undefined) RETURNS "" rather than throwing, so collapsing an
+    // unparseable body to `{}` gave callerId "" -> resolveCaller not-known -> the
+    // same 200 a stranger gets. A truncated body or an upstream serialization bug
+    // would have been indistinguishable from normal traffic, forever.
+    const { app } = voiceApp();
+    expect((await raw(app as never, "/voice/identify", "{not json")).status).toBe(400);
+    // The sibling route had the identical pattern. Fixing one site and not the other
+    // is the shape this repo keeps producing.
+    expect((await raw(app as never, "/voice/request", "{not json")).status).toBe(400);
+  });
+
+  test("POSITIVE CONTROL — a literal `null` body is VALID json and must still be 200", async () => {
+    // Without this, returning 400 on anything non-object would pass the test above
+    // while breaking the case the `?? {}` was originally added for.
+    const { app } = voiceApp();
+    const res = await raw(app as never, "/voice/identify", "null");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ known: false, canFollowUp: false });
+  });
+
   test("identify: known caller, and unknown is a 200 not an error", async () => {
     const { app } = voiceApp();
     const known = await post(
