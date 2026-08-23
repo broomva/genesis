@@ -29,35 +29,9 @@ import { TenantStore } from "../apps/chat-bot/src/tenant-store";
 
 const dryRun = process.argv.includes("--dry-run");
 
+import { denyRulesFor } from "./tenant-deny-rules";
+
 const HOME = process.env.GENESIS_TENANT_HOME ?? "/home/agent";
-const RUNTIME_ROOT =
-  process.env.GENESIS_WHATSAPP_RUNTIME_ROOT ?? join(HOME, "orchestrator-workspaces");
-const PREFIX = process.env.GENESIS_WHATSAPP_WORKSPACE_PREFIX?.trim() || "ws-wa-";
-const WORKSPACES_DIR =
-  process.env.GENESIS_WORKSPACES_DIR ?? join(HOME, ".config/genesis-bot/workspaces");
-const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
-
-// The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
-const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
-
-// The registry is the source of truth when configured; the env allowlist is
-// the pre-BRO-2230 fallback. Reading the wrong one would provision workspaces
-// for people the bot does not serve while the real tenants stay unprovisioned —
-// and the bot's startup check would then refuse to serve WhatsApp at all.
-const TENANTS_DIR = process.env.GENESIS_WHATSAPP_TENANTS_DIR?.trim();
-const allowlist = parseAllowlist(RAW_ALLOWLIST, "kapso");
-
-// An open allowlist authorizes senders we cannot name, so there is no finite
-// set to provision. Provisioning zero tenants and exiting 0 would read as
-// success while every sender fell through to the engine default workspace.
-if (!TENANTS_DIR && allowlist.open) {
-  console.error(
-    "GENESIS_WHATSAPP_ALLOWED_USERS is unset or empty. An open channel has no enumerable " +
-      "tenant set, so nothing can be provisioned and every sender would run in the engine " +
-      "default workspace. Set the allowlist and re-run.",
-  );
-  process.exit(1);
-}
 
 const registryPrincipals = TENANTS_DIR
   ? new TenantStore(TENANTS_DIR).active().map((t) => ({ channel: "kapso" as const, id: t.id }))
@@ -109,10 +83,24 @@ function settingsFor(dir: string): string {
         // flipping the mode back. Absolute `//` anchor: a single leading slash
         // would anchor at the settings file instead and match nothing.
         deny: [
-          "Read(//home/agent/.ssh/**)",
-          "Read(//home/agent/.aws/**)",
-          "Read(//home/agent/.config/**)",
-          "Read(//home/agent/.claude/**)",
+          // Built BY CONSTRUCTION from HOME and a verb list, not written out by
+          // hand. Two defects motivated that, both found on this list:
+          //
+          // 1. HARDCODED HOME. `HOME` above is `GENESIS_TENANT_HOME ?? "/home/agent"`,
+          //    but every rule below used to spell `/home/agent` literally. The
+          //    sandbox denyRead IS derived from HOME, so pointing GENESIS_TENANT_HOME
+          //    anywhere else left the two layers guarding different directories --
+          //    and for Read/Glob/Grep this list is the WHOLE boundary.
+          //
+          // 2. READ/GREP ASYMMETRY. `.ssh`, `.aws`, `.config`, `.claude` and `*.env`
+          //    were denied for Read and NOT for Grep, while broomva/ and genesis/ were
+          //    denied for both. Grep returns matching CONTENT, so it is a read
+          //    primitive; a hand-maintained parallel list drifts the moment someone
+          //    adds a path to one column. Glob is included too: it does not return
+          //    content, but it enumerates what is there to ask for next.
+          //
+          // The cross-product cannot drift, which is the whole point.
+          ...denyRulesFor(HOME, dir),
           // The sandbox denyRead below covers Bash. It does NOT cover the
           // built-in file tools, which run inside the Claude Code process --
           // so for Read/Glob/Grep, THIS list is the whole boundary, and it
@@ -131,13 +119,6 @@ function settingsFor(dir: string): string {
           // named-and-known ones. A sibling tenant cannot be denied by prefix
           // without denying the tenant's own directory, so that gap stays open
           // for the file-tool channel and is measured by the eval instead.
-          "Read(//home/agent/broomva/**)",
-          "Read(//home/agent/genesis/**)",
-          "Read(//home/agent/*.env)",
-          "Grep(//home/agent/broomva/**)",
-          "Grep(//home/agent/genesis/**)",
-          `Edit(//${dir.replace(/^\//, "")}/.claude/**)`,
-          `Write(//${dir.replace(/^\//, "")}/.claude/**)`,
         ],
       },
       sandbox: {
