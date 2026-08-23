@@ -17,6 +17,7 @@ import {
   renderCommandList,
   renderHelp,
 } from "./commands";
+import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
@@ -317,7 +318,11 @@ export async function handleAgentMessage(
       await thread.post(stream);
     }
   } catch (e) {
-    console.error("[genesis-bot] dispatch failed", e);
-    await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
+    // The class goes to the channel; the ERROR ITSELF only ever goes to the log.
+    // A tenant on a shared number must not receive a raw message that could carry
+    // a path, a hostname, or a token fragment.
+    const kind = classifyDispatchFailure(e);
+    console.error(`[genesis-bot] dispatch failed (${kind})`, e);
+    await thread.post(dispatchFailureMessage(kind)).catch(() => {});
   }
 }
