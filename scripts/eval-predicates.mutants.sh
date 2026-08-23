@@ -66,17 +66,19 @@ run_mutant "sibling: not-measured reads as confined" 'const p = provenPayload(ou
   if (p === null) return false;' 'const p = provenPayload(out, "LS");
   if (p === null) return true;' KILLED
 run_mutant "blank sibling name always passes"        'if (sibling.length === 0) return false;' 'if (sibling.length === 0) return true;' KILLED
-run_mutant "marker match becomes greedy"             '([\\s\\S]*?)>' '([\\s\\S]*)>' KILLED
+# Anchored on provenPayload's own regex: the same fragment also appears in
+# markerPayload, and the uniqueness guard refused the ambiguous form.
+run_mutant "marker match becomes greedy"              'const re = new RegExp(`${name}<([\\s\\S]*?)>`, "g");' 'const re = new RegExp(`${name}<([\\s\\S]*)>`, "g");' KILLED
 # THE ECHO HOLE. Dropping the proof check restores the defect where an agent that
 # ECHOES the probe command (which contains the marker literal) self-certifies.
-run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).trim() !== proof.expect) return null;' 'if (false) return null;' KILLED
+run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).trim() !== proof.expect) continue;' 'if (false) continue;' KILLED
 # EQUIVALENT MUTANT, and recorded as such rather than deleted. Removing the
 # separator guard changes no behaviour: `indexOf` returns -1, `slice(0, -1)` then
 # yields a truncated string that cannot equal the proof, so the NEXT check rejects
 # it anyway. Expecting SURVIVED documents that the guard is a readable early exit
 # rather than the thing doing the work — a reader who assumed otherwise would be
 # wrong about where the safety lives.
-run_mutant "proof separator guard is redundant"       'if (sep < 0) return null;' 'if (sep < -1) return null;' SURVIVED
+run_mutant "proof separator guard is redundant"       'if (sep < 0) continue;' 'if (sep < -1) continue;' SURVIVED
 run_mutant "sudo status 0 read as denied"              'return status !== "0";
 }
 
