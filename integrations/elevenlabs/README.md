@@ -13,12 +13,28 @@ rather than clicked into a dashboard and forgotten.
 
 ## Provision
 
+Authenticate once, the CLI's own way:
+
 ```bash
-ELEVENLABS_API_KEY=...           \
+elevenlabs auth login          # stores a key in ~/.elevenlabs/api_key
+```
+
+Then:
+
+```bash
 GENESIS_PUBLIC_URL=https://...   \
 GENESIS_VOICE_SECRET=...         \
   scripts/elevenlabs-provision.sh          # --dry-run stops before any write
 ```
+
+`ELEVENLABS_API_KEY` in the environment works as an alternative to `auth login`.
+The script never reads the stored key itself — the CLI owns it, and copying it
+into another process only widens where it can leak.
+
+Note when reading this script or the CLI's output: **this CLI does not use exit
+codes.** `auth whoami` prints "Not logged in" and exits 0; `tools push` prints
+per-item API errors and exits 0. Every check here matches output text for that
+reason, and a gate written as `if elevenlabs auth whoami; then` can never fail.
 
 Then commit the `id` values it writes back, or the next run creates a second copy
 of every tool and agent.

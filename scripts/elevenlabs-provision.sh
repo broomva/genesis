@@ -21,8 +21,11 @@ usage: scripts/elevenlabs-provision.sh [--dry-run]
 
   --dry-run   validate and substitute, push nothing.
 
+authentication (either one):
+  elevenlabs auth login   stores a key the CLI reads (preferred)
+  ELEVENLABS_API_KEY      set in the environment instead
+
 required environment:
-  ELEVENLABS_API_KEY    from https://elevenlabs.io/app/settings/api-keys
   GENESIS_PUBLIC_URL    base URL ElevenLabs reaches Genesis on. Scheme required,
                         no path, no trailing slash — /voice/* is appended.
                         A Tailscale funnel works; do NOT use --set-path, it
@@ -48,11 +51,30 @@ SRC="$REPO_ROOT/integrations/elevenlabs"
 CLI="@elevenlabs/cli@${ELEVENLABS_CLI_VERSION:-0.5.6}"
 
 missing=()
-[ -n "${ELEVENLABS_API_KEY:-}" ]   || missing+=("ELEVENLABS_API_KEY")
 [ -n "${GENESIS_PUBLIC_URL:-}" ]   || missing+=("GENESIS_PUBLIC_URL")
 [ -n "${GENESIS_VOICE_SECRET:-}" ] || missing+=("GENESIS_VOICE_SECRET")
 if [ ${#missing[@]} -gt 0 ]; then
   echo "✗ missing required environment: ${missing[*]}" >&2; echo >&2; usage; exit 2
+fi
+
+# ElevenLabs auth: EITHER the env var OR the credential `elevenlabs auth login`
+# stores. Requiring the env var was wrong — it is not the documented way to
+# authenticate this CLI, so an operator who followed the CLI's own instructions
+# was told they had configured nothing. Never read the key file here; the CLI
+# owns that, and copying it into this process only widens where it can leak.
+if [ -z "${ELEVENLABS_API_KEY:-}" ]; then
+  # Match the OUTPUT, not the exit code: `auth whoami` prints "Not logged in" and
+  # exits 0, exactly like the push commands report per-item failures and exit 0.
+  # Gating on `if whoami >/dev/null` looked right and could never fail.
+  who=$( { command -v elevenlabs >/dev/null 2>&1 && elevenlabs auth whoami; } 2>&1 )
+  [ -n "$who" ] || who=$(npx -y "$CLI" auth whoami 2>&1)
+  if printf '%s' "$who" | grep -qi "logged in:"; then
+    echo "▶ using the credential stored by \`elevenlabs auth login\`"
+  else
+    echo "✗ not authenticated to ElevenLabs." >&2
+    echo "  run \`elevenlabs auth login\`, or set ELEVENLABS_API_KEY." >&2
+    echo >&2; usage; exit 2
+  fi
 fi
 
 # Scheme required, and NO path component — the README promises /voice/* is
