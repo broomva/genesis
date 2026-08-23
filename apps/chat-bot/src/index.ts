@@ -56,6 +56,7 @@ import {
 } from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
+import { textToDispatch } from "./voice-note";
 import { webhookPort } from "./webhook-port";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -370,7 +371,9 @@ chat.onDirectMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Groups: subscribe on first @-mention, then handle every follow-up. Group
@@ -380,13 +383,17 @@ chat.onNewMention(async (thread, message) => {
   await thread.subscribe();
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 chat.onSubscribedMessage(async (thread, message) => {
   if (!(await admitThread(thread))) return;
   const opts = dispatchOptions(thread.id);
   if (!opts) return;
-  await handleAgentMessage(thread, message.text, opts, turnSignalsFor(thread.id, message.id));
+  const text = await textToDispatch(thread, message);
+  if (!text) return;
+  await handleAgentMessage(thread, text, opts, turnSignalsFor(thread.id, message.id));
 });
 
 // Register the native Telegram `/` menu (control commands only — the full
