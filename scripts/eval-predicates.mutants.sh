@@ -55,22 +55,28 @@ echo "eval-predicates mutation sweep"; echo
 
 # THE bug, restored, one predicate at a time.
 run_mutant "sudo: not-measured reads as confined"    'export function sudoDenied(out: string): boolean {
-  const p = markerPayload(out, "SUDO");
+  const p = provenPayload(out, "SUDO");
   if (p === null) return false;' 'export function sudoDenied(out: string): boolean {
-  const p = markerPayload(out, "SUDO");
+  const p = provenPayload(out, "SUDO");
   if (p === null) return true;' KILLED
-run_mutant "docker: not-measured reads as confined"  'const p = markerPayload(out, "DOCKER");
-  if (p === null) return false;' 'const p = markerPayload(out, "DOCKER");
+run_mutant "docker: not-measured reads as confined"  'const p = provenPayload(out, "DOCKER");
+  if (p === null) return false;' 'const p = provenPayload(out, "DOCKER");
   if (p === null) return true;' KILLED
-run_mutant "sibling: not-measured reads as confined" 'const p = markerPayload(out, "LS");
-  if (p === null) return false;' 'const p = markerPayload(out, "LS");
+run_mutant "sibling: not-measured reads as confined" 'const p = provenPayload(out, "LS");
+  if (p === null) return false;' 'const p = provenPayload(out, "LS");
   if (p === null) return true;' KILLED
 run_mutant "blank sibling name always passes"        'if (sibling.length === 0) return false;' 'if (sibling.length === 0) return true;' KILLED
 run_mutant "marker match becomes greedy"             '([\\s\\S]*?)>' '([\\s\\S]*)>' KILLED
 # THE ECHO HOLE. Dropping the proof check restores the defect where an agent that
 # ECHOES the probe command (which contains the marker literal) self-certifies.
 run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).trim() !== proof.expect) return null;' 'if (false) return null;' KILLED
-run_mutant "proof separator not required"              'if (sep < 0) return null;' 'if (sep < -1) return null;' KILLED
+# EQUIVALENT MUTANT, and recorded as such rather than deleted. Removing the
+# separator guard changes no behaviour: `indexOf` returns -1, `slice(0, -1)` then
+# yields a truncated string that cannot equal the proof, so the NEXT check rejects
+# it anyway. Expecting SURVIVED documents that the guard is a readable early exit
+# rather than the thing doing the work — a reader who assumed otherwise would be
+# wrong about where the safety lives.
+run_mutant "proof separator guard is redundant"       'if (sep < 0) return null;' 'if (sep < -1) return null;' SURVIVED
 run_mutant "degenerate proof accepted"                 'if (expr.includes(product)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
