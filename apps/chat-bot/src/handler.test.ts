@@ -398,17 +398,41 @@ describe("keepTyping", () => {
   });
 });
 
+/** A GraphApiError as `@kapso/whatsapp-cloud-api` 0.2.3 actually constructs it:
+ *  an Error carrying `code` and `category`, where 131047 -> "reengagementWindow"
+ *  comes from the shipped runtime table in dist/index.js. */
+function graphApiError(code: number, category: string, message = "Graph API error"): Error {
+  return Object.assign(new Error(message), { code, category, httpStatus: 400 });
+}
+
 describe("isOutsideServiceWindow", () => {
-  test("recognises Meta's 24-hour window refusal", () => {
-    expect(
-      isOutsideServiceWindow(
-        new Error("Cannot send non-template messages outside the 24-hour window."),
-      ),
-    ).toBe(true);
+  test("recognises the real structured re-engagement error", () => {
+    expect(isOutsideServiceWindow(graphApiError(131047, "reengagementWindow"))).toBe(true);
+  });
+
+  test("recognises it by code even if the category is missing", () => {
+    expect(isOutsideServiceWindow(Object.assign(new Error("x"), { code: 131047 }))).toBe(true);
   });
 
   test("does not swallow an ordinary dispatch failure", () => {
     expect(isOutsideServiceWindow(new Error("ECONNREFUSED"))).toBe(false);
+  });
+
+  test("a DIFFERENT Graph error is not mistaken for a closed window", () => {
+    // 131026 is "message undeliverable" — a real error that must still surface
+    // as a failure, with its ⚠️ and its apology.
+    expect(isOutsideServiceWindow(graphApiError(131026, "unknown"))).toBe(false);
+  });
+
+  test("MATCHES ON STRUCTURE, NOT WORDING — prose alone is not enough", () => {
+    // The regression this replaced. An error whose TEXT contains the phrase but
+    // which carries no re-engagement code is an ordinary failure: treating it as
+    // a closed window would suppress both the failed status and the apology.
+    expect(
+      isOutsideServiceWindow(
+        new Error("Cannot send non-template messages outside the 24-hour window."),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -454,22 +478,54 @@ describe("turn status signals", () => {
   });
 
   test("a closed 24h window is NOT reported as a normal failure", async () => {
+    // Thrown from thread.post, which is where this error ACTUALLY originates —
+    // the send to WhatsApp, not the Genesis fetch. The first version of this
+    // test threw it from fetchImpl, i.e. exercised the right branch from the
+    // wrong source.
+    //
     // The user cannot be messaged at all in this state, so posting an apology
     // would fail identically. It must stay silent to the thread and loud in the
     // log — and must not claim the turn merely 'failed'.
-    const thread = mockThread("kapso:a:b");
     const r = recorder();
-    const closed = (async () => {
-      throw new Error("Cannot send non-template messages outside the 24-hour window.");
-    }) as unknown as typeof fetch;
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async startTyping() {},
+      async post() {
+        throw graphApiError(131047, "reengagementWindow");
+      },
+    };
     await handleAgentMessage(
       thread,
       "hello",
-      { baseUrl: "https://x", fetchImpl: closed, streaming: false },
+      { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
       r.signals,
     );
     expect(r.seen).toEqual(["working"]);
-    expect(thread.posts).toEqual([]);
+  });
+
+  test("an ordinary post failure DOES mark failed and apologises", async () => {
+    // The polarity partner of the test above. Without it, a change that made
+    // isOutsideServiceWindow always-true would still pass.
+    const r = recorder();
+    let apologised = false;
+    let calls = 0;
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async startTyping() {},
+      async post(content) {
+        calls++;
+        if (calls === 1) throw new Error("ECONNRESET");
+        if (typeof content === "string" && content.includes("⚠️")) apologised = true;
+      },
+    };
+    await handleAgentMessage(
+      thread,
+      "hello",
+      { baseUrl: "https://x", fetchImpl: okFetch("hi"), streaming: false },
+      r.signals,
+    );
+    expect(r.seen).toEqual(["working", "failed"]);
+    expect(apologised).toBe(true);
   });
 
   test("a channel with no signals still completes the turn", async () => {
@@ -485,5 +541,100 @@ describe("turn status signals", () => {
   test("every status maps to a distinct emoji", () => {
     const emojis = Object.values(TURN_STATUS_EMOJI);
     expect(new Set(emojis).size).toBe(emojis.length);
+  });
+});
+
+describe("keepTyping — P20 round 1 hardening", () => {
+  test("does not overlap when a call is slower than the re-arm interval", async () => {
+    // A slow API must not receive MORE requests than a fast one. The naive
+    // version issues a second markRead on top of the first, so the worse the
+    // API behaves the harder it is hit.
+    let started = 0;
+    let release: (() => void) | undefined;
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async post() {},
+      startTyping() {
+        started++;
+        return new Promise<void>((r) => {
+          release = r;
+        });
+      },
+    };
+    const stop = keepTyping(thread, 5);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(started).toBe(1); // eight intervals elapsed, still one in flight
+    release?.();
+    stop();
+  });
+
+  test("an in-flight call that lands after stop() cannot re-arm", async () => {
+    // clearInterval cannot cancel a request already on the wire; without the
+    // `stopped` flag a slow call resolves after the reply and the conversation
+    // shows "typing" on an answered question.
+    let started = 0;
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async post() {},
+      async startTyping() {
+        started++;
+        await new Promise((r) => setTimeout(r, 15));
+      },
+    };
+    const stop = keepTyping(thread, 5);
+    expect(started).toBe(1);
+    stop();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(started).toBe(1);
+  });
+
+  test("stops re-arming at the duration ceiling, bounding request spend", async () => {
+    // The rate-budget guard: one turn must not be able to spend the project's
+    // whole per-minute quota on saying "still working".
+    let started = 0;
+    const thread: PostableThread = {
+      id: "kapso:a:b",
+      async post() {},
+      async startTyping() {
+        started++;
+      },
+    };
+    const stop = keepTyping(thread, 2, 12);
+    await new Promise((r) => setTimeout(r, 60));
+    const afterDeadline = started;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(started).toBe(afterDeadline); // ceiling reached, no further spend
+    expect(started).toBeLessThan(12); // and far fewer than the ~30 uncapped
+    stop();
+  });
+});
+
+describe("streaming channels keep their pre-existing indicator", () => {
+  test("a streaming channel gets exactly ONE indicator, not a keep-alive", async () => {
+    // Telegram's behaviour must be unchanged: the stream itself is the progress
+    // display, and re-arming there would be a behaviour change this PR claims
+    // not to make.
+    const thread = mockThread("tg-1");
+    await handleAgentMessage(thread, "hello", {
+      baseUrl: "https://x",
+      fetchImpl: okFetch("hi"),
+    });
+    expect(thread.typingCount).toBe(1);
+  });
+});
+
+describe("chunkForWhatsapp — fractional limits", () => {
+  test("a fractional limit below 1 does not hang the event loop", () => {
+    // 0.5 passes a `> 0` check, then slice(0, 0.5) consumes zero characters and
+    // the loop never terminates. Flooring to a minimum of 1 is what makes every
+    // accepted limit one that actually advances.
+    const chunks = chunkForWhatsapp("abcdef", 0.5);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.join("")).toContain("a");
+  });
+
+  test("a fractional limit above 1 floors rather than slicing fractionally", () => {
+    const chunks = chunkForWhatsapp("z".repeat(20), 4.9);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(4);
   });
 });

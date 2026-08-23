@@ -86,7 +86,14 @@ export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): st
   // which surfaces as the reply silently not arriving, the exact failure mode
   // this channel is least able to diagnose. A non-positive limit would loop
   // forever, so it falls back to the default rather than hanging the turn.
-  const cap = limit > 0 ? Math.min(limit, WHATSAPP_TEXT_LIMIT) : CHUNK_TARGET;
+  //
+  //  `Math.floor` is load-bearing, not tidiness: a FRACTIONAL limit below 1
+  //  (0.5) passes a `> 0` check, and then `slice(0, 0.5)` consumes zero
+  //  characters, so `rest` never shrinks and the loop spins forever holding the
+  //  event loop. Flooring to a minimum of 1 makes every accepted limit one that
+  //  actually advances. (P20 round 1, MAJOR.)
+  const requested = Math.floor(limit);
+  const cap = requested > 0 ? Math.min(requested, WHATSAPP_TEXT_LIMIT) : CHUNK_TARGET;
   if (body.length <= cap) return [body];
 
   const out: string[] = [];
@@ -125,6 +132,21 @@ export async function drainStream(stream: AsyncIterable<string>): Promise<string
  *  20s re-arms inside the window with margin for a slow round trip. */
 export const TYPING_REARM_MS = 20_000;
 
+/** Hard ceiling on how long one turn may keep re-arming the indicator.
+ *
+ *  THE FEEDBACK LAYER SHARES A BUDGET WITH THE REPLY. Kapso allows 100
+ *  requests/minute on the free plan (500 on Pro), counted per API key across
+ *  the WHOLE project in a fixed window — and every re-arm is `markRead`, i.e. a
+ *  request. Unbounded, a single 30-minute turn spends ~90 requests on saying
+ *  "still working", and a handful of concurrent tenants could then exhaust the
+ *  window so that the actual REPLIES are the calls that get 429'd. Feedback
+ *  starving the product it is reporting on is strictly worse than no feedback.
+ *
+ *  Five minutes bounds one turn to ~15 re-arms. Past it the indicator lapses
+ *  and the turn runs on silently, which is the pre-existing behaviour rather
+ *  than a new failure. (P20 round 1, BLOCKER.) */
+export const TYPING_MAX_MS = 5 * 60_000;
+
 /** Keeps the channel's typing indicator alive for the duration of a turn.
  *
  *  Returns a stop function; calling it is mandatory (use try/finally) or the
@@ -135,17 +157,53 @@ export const TYPING_REARM_MS = 20_000;
  *  `rearmMs` late — the first 20 seconds are exactly when the user is deciding
  *  whether anything happened. Every call is best-effort: a channel with no
  *  typing support (or a transient API failure) must never fail the turn, since
- *  the indicator is a courtesy and the reply is the product. */
-export function keepTyping(thread: PostableThread, rearmMs: number = TYPING_REARM_MS): () => void {
+ *  the indicator is a courtesy and the reply is the product.
+ *
+ *  Two guards beyond the interval, both from P20 round 1:
+ *
+ *  - `stopped` is checked INSIDE the async continuation, not just around the
+ *    timer. `clearInterval` cannot cancel a call already in flight, so a slow
+ *    `markRead` issued just before stop() would land AFTER the reply and show
+ *    "typing" on an answered conversation. The flag makes a late arrival inert.
+ *  - `inFlight` prevents overlap. If a round trip takes longer than `rearmMs`
+ *    the naive version issues a second request on top of the first, and the
+ *    slower the API is the more requests it gets — the exact inversion you want
+ *    under pressure. */
+export function keepTyping(
+  thread: PostableThread,
+  rearmMs: number = TYPING_REARM_MS,
+  maxMs: number = TYPING_MAX_MS,
+): () => void {
   if (!thread.startTyping) return () => {};
-  const fire = () => {
-    void thread.startTyping?.().catch(() => {});
+  let stopped = false;
+  let inFlight = false;
+  const deadline = Date.now() + maxMs;
+
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
   };
+
+  const fire = () => {
+    if (stopped || inFlight) return;
+    if (Date.now() >= deadline) {
+      stop();
+      return;
+    }
+    inFlight = true;
+    void thread
+      .startTyping?.()
+      .catch(() => {})
+      .finally(() => {
+        inFlight = false;
+      });
+  };
+
   fire();
   const timer = setInterval(fire, rearmMs);
   // Never let a courtesy indicator hold the process open at shutdown.
   (timer as unknown as { unref?: () => void }).unref?.();
-  return () => clearInterval(timer);
+  return stop;
 }
 
 /** Lifecycle of one turn, as shown on the user's own inbound message. */
@@ -174,17 +232,38 @@ export interface TurnSignals {
   setStatus?(status: TurnStatus): Promise<void>;
 }
 
+/** Meta's error code for "more than 24h since the customer last replied".
+ *
+ *  Verified against the SHIPPED runtime table, not the docs: `@kapso/
+ *  whatsapp-cloud-api` 0.2.3 `dist/index.js` maps `[131047,
+ *  "reengagementWindow"]` and gives that category `{action: "do_not_retry"}`. */
+export const REENGAGEMENT_ERROR_CODE = 131047;
+
 /** True when a send failed because the 24-hour service window has closed.
  *
  *  Meta only permits free-form messages within 24h of the user's last inbound
- *  message; outside it a send fails 422 and — because the failure IS the
- *  inability to message the user — there is no way to tell them from inside the
- *  channel. It must therefore be loud in the log, and distinguishable from an
- *  ordinary dispatch failure, or the operator sees a bot that simply stopped
- *  answering. */
+ *  message; outside it a send fails and — because the failure IS the inability
+ *  to message the user — there is no way to tell them from inside the channel.
+ *  It must therefore be loud in the log, and distinguishable from an ordinary
+ *  dispatch failure, or the operator sees a bot that simply stopped answering.
+ *
+ *  MATCHES ON STRUCTURE, NEVER ON WORDING. The first version tested the error
+ *  MESSAGE against /24-hour window/. That is wrong in both directions: Meta
+ *  rewording or localising the string silently disables the branch, and any
+ *  unrelated error whose text happens to contain the phrase — an agent reply
+ *  quoted into an exception, for instance — would be misclassified as
+ *  undeliverable and swallow a real failure, suppressing both the ⚠️ status and
+ *  the apology. `GraphApiError` carries `category` and `code`; both are stable
+ *  identifiers and neither is prose. (P20 round 1, BLOCKER + MAJOR.)
+ *
+ *  Deliberately NO text fallback. A wrapped/rethrown error that loses the
+ *  structured fields degrades to "generic dispatch failure", which is exactly
+ *  the pre-existing behaviour — whereas a text fallback reintroduces the
+ *  false-positive this fix exists to remove. */
 export function isOutsideServiceWindow(e: unknown): boolean {
-  const text = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-  return /24-hour window|24 hour window|outside the 24/i.test(text);
+  if (typeof e !== "object" || e === null) return false;
+  const err = e as { category?: unknown; code?: unknown };
+  return err.category === "reengagementWindow" || err.code === REENGAGEMENT_ERROR_CODE;
 }
 
 /** Which Genesis workspace a thread's sessions are pinned to (BRO-2216).
@@ -389,11 +468,30 @@ export async function handleAgentMessage(
   // by ✅ in the same tick is visual noise, not feedback.
   if (await handleControlCommand(thread, trimmed, opts).catch(() => false)) return;
 
-  // Acknowledge BEFORE the agent starts. Both signals are best-effort and
-  // deliberately un-awaited-for-failure: the reply is the product, and a
-  // channel that cannot react must still get its answer.
-  await signals?.setStatus?.("working").catch(() => {});
-  const stopTyping = keepTyping(thread);
+  // Acknowledge BEFORE the agent starts, cheapest signal first.
+  //
+  // ORDER AND AWAIT ARE BOTH DELIBERATE (P20 round 1, MAJOR). The first version
+  // did `await setStatus("working")` ahead of the indicator, which put a
+  // network round trip we do not control on the critical path of EVERY turn: a
+  // hanging reaction call would delay the typing indicator and the agent
+  // dispatch behind it, so the feedback layer could stall the product. The
+  // reaction is now fired and not awaited, and typing starts first.
+  //
+  // Keep-alive runs ONLY on channels that buffer (WhatsApp). A streaming
+  // channel shows progress by posting and editing as tokens arrive, so it
+  // needs no indicator — and re-arming there would have been a behaviour change
+  // on Telegram, which this change claims not to make.
+  const buffered = opts.streaming === false;
+  let stopTyping = () => {};
+  if (buffered) {
+    stopTyping = keepTyping(thread);
+  } else {
+    // Streaming channels keep the pre-existing single indicator: the stream
+    // IS the progress display, so there is nothing for a keep-alive to add.
+    // No longer awaited, so a hung indicator cannot stall the turn behind it.
+    void thread.startTyping?.().catch(() => {});
+  }
+  void signals?.setStatus?.("working").catch(() => {});
   try {
     const stream = genesisStream({
       baseUrl: opts.baseUrl,
