@@ -86,3 +86,132 @@ describe("GET /workspaces/browse route (BRO-1673)", () => {
     expect(body.error).toContain("outside the allowed roots");
   });
 });
+
+describe("voice routes (BRO-2228)", () => {
+  const SECRET = "voice-secret-abc";
+  const PRINCIPALS = [{ id: "573017758620", name: "Carlos" }];
+
+  function voiceApp(over: Record<string, unknown> = {}) {
+    const enqueued: unknown[] = [];
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      voiceSecret: SECRET,
+      voicePrincipals: PRINCIPALS,
+      enqueueVoice: (t: unknown) => {
+        enqueued.push(t);
+      },
+      ...over,
+    } as never);
+    return { app, enqueued };
+  }
+  const post = (
+    app: { fetch: (r: Request) => Promise<Response> },
+    path: string,
+    body: unknown,
+    secret?: string,
+  ) =>
+    app.fetch(
+      new Request(`http://x${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(secret ? { "x-genesis-voice-secret": secret } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  test("WITHOUT a configured secret the routes do not exist (404, not open)", async () => {
+    // The failure this prevents: registering an unauthenticated intake because
+    // the env var was forgotten. A 404 is loud; an open 200 is not.
+    const { app } = build({ workspaceRoot: "/tmp" } as never);
+    const res = await post(app as never, "/voice/identify", { callerId: "573017758620" });
+    expect(res.status).toBe(404);
+  });
+
+  test("a missing or wrong secret is rejected", async () => {
+    const { app } = voiceApp();
+    expect((await post(app as never, "/voice/identify", {}, undefined)).status).toBe(401);
+    expect((await post(app as never, "/voice/identify", {}, "wrong")).status).toBe(401);
+  });
+
+  test("identify: known caller, and unknown is a 200 not an error", async () => {
+    const { app } = voiceApp();
+    const known = await post(
+      app as never,
+      "/voice/identify",
+      { callerId: "+57 301 775 8620" },
+      SECRET,
+    );
+    expect(known.status).toBe(200);
+    expect(await known.json()).toEqual({ known: true, name: "Carlos", canFollowUp: true });
+
+    const unknown = await post(
+      app as never,
+      "/voice/identify",
+      { callerId: "15550001111" },
+      SECRET,
+    );
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toEqual({ known: false, name: null, canFollowUp: false });
+  });
+
+  test("request: a known caller is queued and promised WhatsApp follow-up", async () => {
+    const { app, enqueued } = voiceApp();
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: "please send me the invoice" },
+      SECRET,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ticketId: string; followUp: string };
+    expect(body.followUp).toBe("whatsapp");
+    expect(enqueued).toHaveLength(1);
+    expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBe("573017758620");
+  });
+
+  test("request: an unknown caller is queued but promised NOTHING", async () => {
+    // The agent reads followUp aloud. Promising WhatsApp to a number we cannot
+    // deliver to would be a lie told to a caller, in our voice.
+    const { app, enqueued } = voiceApp();
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "15550001111", request: "hi" },
+      SECRET,
+    );
+    const body = (await res.json()) as { followUp: string };
+    expect(body.followUp).toBe("none");
+    expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBeUndefined();
+  });
+
+  test("request: an empty request is a 400 with a caller-safe message", async () => {
+    const { app, enqueued } = voiceApp();
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: "  " },
+      SECRET,
+    );
+    expect(res.status).toBe(400);
+    expect(enqueued).toHaveLength(0);
+  });
+
+  test("a failing sink is a 503 — never a silent success", async () => {
+    // If enqueue throws and we still returned 200, the agent would tell the
+    // caller their request was recorded when it was dropped.
+    const { app } = voiceApp({
+      enqueueVoice: () => {
+        throw new Error("disk full");
+      },
+    });
+    const res = await post(
+      app as never,
+      "/voice/request",
+      { callerId: "573017758620", request: "x" },
+      SECRET,
+    );
+    expect(res.status).toBe(503);
+  });
+});

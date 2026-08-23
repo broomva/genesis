@@ -15,6 +15,14 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import {
+  type DeliverablePrincipal,
+  type VoiceTicket,
+  VoiceValidationError,
+  buildTicket,
+  resolveCaller,
+  secretMatches,
+} from "./voice";
 import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
@@ -24,6 +32,7 @@ import {
   readWorkspaceFileRaw,
 } from "./workspace-fs";
 import { gitCommit, gitDiff, gitStatus } from "./workspace-git";
+
 import {
   WorkspaceValidationError,
   availableWorkspaces,
@@ -74,6 +83,15 @@ export interface BuildOpts {
   /** Alternate runner (e.g. the exempt interactive engine, BRO-1488). Omit →
    *  the default print engine (`runAgent`, `claude -p`). */
   run?: (opts: RunOptions) => Promise<RunResult>;
+  /** Shared secret an ElevenLabs webhook tool presents on /voice/* (BRO-2228).
+   *  OMITTED → the voice routes are NOT REGISTERED AT ALL. Deliberately not
+   *  "registered but open": an unconfigured deploy must 404, not answer. */
+  voiceSecret?: string;
+  /** Numbers the voice channel may deliver an answer to. A caller matching one
+   *  gets follow-up on that number; everyone else can only leave a message. */
+  voicePrincipals?: readonly DeliverablePrincipal[];
+  /** Sink for queued voice work. Must return fast — a caller is on the line. */
+  enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
   /** Live-session control surface (interactive engine) → enables POST /control
    *  (reset/interrupt/status). Omit → those report "unsupported" (BRO-1493). */
   control?: EngineControl;
@@ -195,6 +213,61 @@ export function build(opts: BuildOpts) {
       // GET /workspaces; /health stays a liveness probe (engine-capability only).
     }),
   );
+
+  // Voice channel (BRO-2228). Registered ONLY with a configured secret, so an
+  // unconfigured deploy 404s instead of exposing an open intake. Nothing here
+  // runs an agent: a caller is on the line and a turn takes 9-30s+.
+  if (opts.voiceSecret) {
+    const voicePrincipals = opts.voicePrincipals ?? [];
+    const voiceDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
+      !secretMatches(c.req.header("x-genesis-voice-secret"), opts.voiceSecret ?? "");
+
+    // Who is calling? Unknown is a normal answer, not an error — most callers
+    // are strangers and the agent's correct move for them is to take a message.
+    app.post("/voice/identify", async (c) => {
+      if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      const body = (await c.req.json().catch(() => ({}))) as { callerId?: string };
+      const r = resolveCaller(body.callerId, voicePrincipals);
+      return c.json(
+        r.kind === "known"
+          ? { known: true, name: r.principal.name ?? null, canFollowUp: true }
+          : { known: false, name: null, canFollowUp: false },
+      );
+    });
+
+    // Queue work and RETURN. The answer is delivered later over WhatsApp, to
+    // the number on file — which is what makes a spoofed caller id useless
+    // rather than dangerous.
+    app.post("/voice/request", async (c) => {
+      if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      const body = (await c.req.json().catch(() => ({}))) as {
+        callerId?: string;
+        request?: string;
+        conversationId?: string;
+      };
+      let ticket: VoiceTicket;
+      try {
+        ticket = buildTicket(body, voicePrincipals, new Date().toISOString(), crypto.randomUUID());
+      } catch (e) {
+        // A validation message is caller-safe by construction; anything else is
+        // internal and must not be read out on a phone call.
+        if (e instanceof VoiceValidationError) return c.json({ error: e.message }, 400);
+        throw e;
+      }
+      try {
+        await opts.enqueueVoice?.(ticket);
+      } catch (e) {
+        console.error(`[genesis] voice enqueue failed: ${e instanceof Error ? e.message : e}`);
+        return c.json({ error: "could not record the request; please try again" }, 503);
+      }
+      return c.json({
+        ticketId: ticket.id,
+        // The agent reads this to the caller, so it must not promise delivery
+        // we cannot make: an unrecognized number has nowhere to follow up TO.
+        followUp: ticket.deliverTo ? "whatsapp" : "none",
+      });
+    });
+  }
 
   // Thread session control (BRO-1493): reset (fresh context) / interrupt /
   // status. Slash commands map here, never into the agent TUI.
