@@ -289,9 +289,10 @@ export function build(opts: BuildOpts) {
       );
     });
 
-    // Queue work and RETURN. The answer is delivered later over WhatsApp, to
-    // the number on file — which is what makes a spoofed caller id useless
-    // rather than dangerous.
+    // Queue work and RETURN. When a delivery leg exists the answer goes to the
+    // number ON FILE — which is what makes a spoofed caller id useless rather
+    // than dangerous. None exists yet, so this records the request and promises
+    // nothing; the ticket still carries its deliverTo for the future consumer.
     app.post("/voice/request", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
       const body = ((await c.req.json().catch(() => ({}))) ?? {}) as {

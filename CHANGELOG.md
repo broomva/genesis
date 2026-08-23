@@ -47,8 +47,8 @@
   the same change that adds the code honouring it. Work is still queued with its
   delivery target — only the promise is withheld.
 - An enqueue failure **propagates** to a 503, deliberately unlike the event
-  trace's swallow-everything policy: a dropped ticket is a follow-up promised
-  aloud on a call and then silently never delivered.
+  trace's swallow-everything policy: a dropped ticket is a request the caller was
+  told we recorded and which then silently vanished.
 
 ## [Unreleased] — Durable interactive-session resume + actionable eviction (BRO-1630)
 

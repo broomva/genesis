@@ -10,8 +10,9 @@
 //
 // FAILURE POLICY — deliberately the OPPOSITE of printTrace's. The per-event trace
 // swallows every write error because observability must never break a turn. This
-// must not swallow. A dropped ticket is a follow-up we promised out loud on a
-// phone call and then silently cannot deliver, and /voice/request already turns a
+// must not swallow. A dropped ticket is a request the caller was told we
+// recorded and which then silently vanished — and once a delivery leg exists, a
+// follow-up promised out loud that never comes. /voice/request already turns a
 // throw into an honest 503 ("could not record the request; please try again")
 // that the agent reads to the caller. Propagating is what makes that 503 true.
 
