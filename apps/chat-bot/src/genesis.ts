@@ -34,7 +34,11 @@ export function buildRequestBody(threadId: string, text: string, workspaceId?: s
     // Omitted entirely when unset — sending `workspaceId: undefined` would
     // serialize the key away anyway, but an explicit conditional keeps the
     // "no opinion, inherit the engine default" case obvious at the call site.
-    ...(workspaceId ? { workspaceId } : {}),
+    // A pin only ever comes from `workspaceDecisionFor`, i.e. a channel naming a
+    // TENANT. So pinning implies channel-qualified: the engine must refuse an
+    // unregistered or re-bound id here instead of falling back to the default
+    // workspace, which is the broadest directory on the box (BRO-2236/BRO-2241).
+    ...(workspaceId ? { workspaceId, channelQualified: true } : {}),
   };
 }
 
