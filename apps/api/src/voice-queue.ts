@@ -57,6 +57,17 @@ export function parseVoicePrincipals(raw: string | undefined): DeliverablePrinci
   return out;
 }
 
+/** DURABILITY IS BEST-EFFORT, and that is a real limit rather than an oversight.
+ *  appendFileSync returns once the write reaches the page cache, not the platter,
+ *  so a host or power loss can lose a ticket the caller was already told we
+ *  recorded. Two things make that acceptable TODAY and stop being true later:
+ *  the route currently promises no follow-up at all (voiceDelivery is off), and
+ *  Genesis runs a single process, where a synchronous append on a single-threaded
+ *  runtime cannot interleave with another writer. Before GENESIS_VOICE_DELIVERY
+ *  is turned on — the moment a caller is told an answer IS coming — this needs an
+ *  fsync or a real queue, and a second writing process needs record locking.
+ *  (P20 Strata A, round 2.) */
+
 /** Where tickets land. Append-only JSONL, one ticket per line — the shape
  *  voice.ts's VoiceTicket doc ("Append-only; the delivery leg consumes it")
  *  already promised, and the same on-disk convention as the session traces. */

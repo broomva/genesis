@@ -199,6 +199,39 @@ describe("voice routes (BRO-2228)", () => {
     expect((enqueued[0] as { deliverTo?: string }).deliverTo).toBeUndefined();
   });
 
+  test("identify: canFollowUp is FALSE when no delivery leg is wired", async () => {
+    // Round 1 gated /voice/request and left identify unconditionally true, so
+    // the two routes contradicted each other and the impossible promise came
+    // back through identify — which is the answer the agent uses to decide
+    // whether to OFFER a follow-up at all.
+    const { app } = voiceApp({ voiceDelivery: undefined });
+    const res = await post(app as never, "/voice/identify", { callerId: "573017758620" }, SECRET);
+    expect(await res.json()).toEqual({ known: true, canFollowUp: false });
+  });
+
+  test("identify: a non-string callerId is a 400, not a 500", async () => {
+    const { app } = voiceApp();
+    const res = await post(app as never, "/voice/identify", { callerId: 42 }, SECRET);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/must be text/);
+  });
+
+  test("identify: an oversized callerId is rejected", async () => {
+    const { app } = voiceApp();
+    const res = await post(app as never, "/voice/identify", { callerId: "9".repeat(1000) }, SECRET);
+    expect(res.status).toBe(400);
+  });
+
+  test("BOTH routes agree on what a callerId may be", async () => {
+    // The round-1 failure was a fix landing on one route. This asserts the two
+    // in one place so a future divergence fails here rather than in production.
+    const { app } = voiceApp();
+    for (const path of ["/voice/identify", "/voice/request"]) {
+      const res = await post(app as never, path, { callerId: 42, request: "hi" }, SECRET);
+      expect(res.status).toBe(400);
+    }
+  });
+
   test("request: with NO delivery leg wired, even a known caller is promised NOTHING", async () => {
     // The blocker this encodes: the surface shipped promising "whatsapp" while
     // no consumer existed anywhere to drain the queue and send. A caller heard a

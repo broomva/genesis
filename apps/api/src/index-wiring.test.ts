@@ -45,9 +45,12 @@ describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
   );
 
   test("the sink is the durable queue, not an inline throwaway", () => {
+    // Asserting the BINDING, not mere presence of the identifier: round 2 noted
+    // that "contains createVoiceQueue" passes if the name appears anywhere at
+    // all, including an unused import, so it did not actually pin the sink.
     const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
-    expect(src).toContain("createVoiceQueue");
-    expect(src).toContain("parseVoicePrincipals");
+    expect(src).toMatch(/const\s+enqueueVoice\s*=[^;]*createVoiceQueue\(/);
+    expect(src).toMatch(/const\s+voicePrincipals\s*=[^;]*parseVoicePrincipals\(/);
   });
 
   test("delivery stays OPT-IN: index.ts must not hardcode a delivery channel", () => {

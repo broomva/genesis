@@ -20,6 +20,7 @@ import {
   type VoiceTicket,
   VoiceValidationError,
   buildTicket,
+  readCallerId,
   resolveCaller,
   secretMatches,
 } from "./voice";
@@ -243,21 +244,41 @@ export function build(opts: BuildOpts) {
     // are strangers and the agent's correct move for them is to take a message.
     app.post("/voice/identify", async (c) => {
       if (voiceDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      const body = (await c.req.json().catch(() => ({}))) as { callerId?: string };
-      const r = resolveCaller(body.callerId, voicePrincipals);
+      const body = (await c.req.json().catch(() => ({}))) as { callerId?: unknown };
+      // SAME validation boundary as /voice/request. Round 1 hardened buildTicket
+      // and left this route casting raw JSON, so the two disagreed about what a
+      // callerId may be: `42` was a 500 here and a 400 there.
+      let callerId: string;
+      try {
+        callerId = readCallerId(body.callerId);
+      } catch (e) {
+        if (e instanceof VoiceValidationError) return c.json({ error: e.message }, 400);
+        throw e;
+      }
+      const r = resolveCaller(callerId, voicePrincipals);
       // NO NAME. The header of voice.ts states the invariant this route was
       // breaking: caller id is spoofable, so it is a routing hint and a spoofer
       // must gain NOTHING. Returning `name` handed an attacker who guessed a
       // number both "this number is known to the system" and the account
       // holder's name — information gained, from a claim we never verified.
-      // `known` alone is what the agent needs to choose take-a-message vs
-      // offer-follow-up, and unlike a name it discloses nothing the caller did
-      // not already assert. Greeting by name needs a second factor (voice.ts
+      // `known` is what the agent needs to choose take-a-message vs
+      // offer-follow-up. It is NOT free of disclosure — it confirms that the
+      // guessed number is in the configured principal set, which is a real bit an
+      // attacker did not have (an earlier version of this comment claimed
+      // otherwise and was wrong). It is a single bit the caller already
+      // half-asserted by dialing it, and withholding it would make the agent
+      // unable to answer at all; a NAME was unbounded new information and is
+      // gone. Greeting by name needs a second factor (voice.ts
       // header: "any capability that does NOT have that property ... must not be
       // added here without a second factor"). (P20 Strata A, round 1.)
+      // canFollowUp requires BOTH a known principal AND a wired delivery leg.
+      // Round 1 gated /voice/request on opts.voiceDelivery and left this route
+      // unconditionally true, so identify offered a follow-up that request then
+      // refused — the impossible promise re-entering through the other door.
+      // This is the answer the agent uses to decide whether to offer one at all.
       return c.json(
         r.kind === "known"
-          ? { known: true, canFollowUp: true }
+          ? { known: true, canFollowUp: Boolean(opts.voiceDelivery) }
           : { known: false, canFollowUp: false },
       );
     });

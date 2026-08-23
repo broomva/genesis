@@ -100,11 +100,21 @@ export const MAX_REQUEST_CHARS = 2000;
 export const MAX_CALLER_ID_CHARS = 64;
 export const MAX_CONVERSATION_ID_CHARS = 200;
 
+/** Read a caller id from external JSON through the SAME boundary /voice/request
+ *  uses. /voice/identify originally cast the body and passed it straight to
+ *  resolveCaller, so `{"callerId": 42}` reached normalizeCallerId's .replace()
+ *  and became a 500 mid-call, and a 1000-character id was accepted. Two routes
+ *  reading the same field must not disagree about what that field may be.
+ *  (P20 Strata A, round 2 — the fix for round 1 landed only on /voice/request.) */
+export function readCallerId(value: unknown): string {
+  return asString(value, "callerId", MAX_CALLER_ID_CHARS);
+}
+
 /** Accept a string field from external JSON, or reject it in a way the agent can
  *  read to the caller. `input.request ?? ""` followed by .trim() throws a
  *  TypeError on `{"request": 42}` — a 500 mid-call, where a 400 with a fixable
  *  message is what the phone flow needs. (P20 Strata A, round 1.) */
-function asString(value: unknown, field: string, max: number): string {
+export function asString(value: unknown, field: string, max: number): string {
   if (value === undefined || value === null) return "";
   if (typeof value !== "string") {
     throw new VoiceValidationError(`${field} must be text`);
@@ -144,7 +154,14 @@ export function buildTicket(
 
   const resolution = resolveCaller(callerId, principals);
   return {
-    // IDEMPOTENCY (P20 Strata A, round 1). A webhook tool call is retried when
+    // STABLE TICKET IDENTITY — the groundwork for idempotency, not idempotency
+    // itself (P20 Strata A, round 2 corrected round 1's claim). A retry still
+    // APPENDS a second record; what this guarantees is that both records carry
+    // the same id, so the consumer can collapse them. Nothing dedupes until that
+    // consumer exists. Note the key conflates a genuine repeated identical
+    // request with a retry; a provider tool-call id would be exact, and this uses
+    // conversationId+request because the provider's retry id is not yet plumbed.
+    // A webhook tool call is retried when
     // the first response is lost, and a fresh UUID per attempt turned one caller
     // request into N tickets — N agent runs and N WhatsApp messages. When the
     // provider gives us a conversation id, derive the id from it plus the
