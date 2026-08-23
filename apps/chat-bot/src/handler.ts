@@ -17,7 +17,9 @@ import {
   renderCommandList,
   renderHelp,
 } from "./commands";
+import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
+import { withStallTimeout } from "./stall-timeout";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -50,6 +52,10 @@ export interface HandlerOptions {
    *
    *  Defaults to true — Telegram's behavior is unchanged. */
   streaming?: boolean;
+  /** Abort a dispatch whose SSE stream shows no activity at all for this long.
+   *  Liveness is measured from frames, not from emitted text, so a turn sitting in
+   *  a long tool call is never cut off. Defaults to DEFAULT_STALL_MS. */
+  stallMs?: number;
   /** Chunk size for the buffered path. Defaults to CHUNK_TARGET; clamped to
    *  WHATSAPP_TEXT_LIMIT by chunkForWhatsapp so a misconfiguration degrades to
    *  "less readable" rather than "rejected by the transport". */
@@ -539,6 +545,7 @@ export async function handleAgentMessage(
   // by ✅ in the same tick is visual noise, not feedback.
   if (await handleControlCommand(thread, trimmed, opts).catch(() => false)) return;
 
+  let posting = false;
   // Acknowledge BEFORE the agent starts, cheapest signal first.
   //
   // ORDER AND AWAIT ARE BOTH DELIBERATE (P20 round 1, MAJOR). The first version
@@ -569,19 +576,44 @@ export async function handleAgentMessage(
   const setStatus = (status: TurnStatus): Promise<void> =>
     withTimeout(signals?.setStatus?.(status), opts.statusTimeoutMs ?? STATUS_TIMEOUT_MS);
   try {
-    const stream = genesisStream({
-      baseUrl: opts.baseUrl,
-      threadId: thread.id,
-      text: trimmed,
-      token: opts.token,
-      fetchImpl: opts.fetchImpl,
-      workspaceId: opts.workspaceId,
-    });
+    // Bounded by SILENCE, not by total duration: the timer resets on every chunk,
+    // so a slow-but-progressing turn is never cut off. Without this a wedged
+    // dispatch hangs forever, the catch below never runs, and the channel says
+    // nothing at all — measured on 2026-08-23, where the stream opened and then
+    // produced zero bytes for the 170s a client waited before giving up.
+    // The controller is what actually closes the socket on a stall. Ending the
+    // generator alone leaves the response body reader held, because a generator
+    // suspended on a never-settling await cannot run its own cleanup.
+    const dispatchAbort = new AbortController();
+    // Liveness is measured from SSE FRAMES, not from emitted text. genesisStream
+    // yields only text parts, so a turn inside a long tool call emits nothing while
+    // being entirely healthy — a yield-based bound would abort it.
+    let lastActivity = Date.now();
+    const stream = withStallTimeout(
+      genesisStream({
+        baseUrl: opts.baseUrl,
+        threadId: thread.id,
+        text: trimmed,
+        token: opts.token,
+        fetchImpl: opts.fetchImpl,
+        workspaceId: opts.workspaceId,
+        signal: dispatchAbort.signal,
+        onActivity: () => {
+          lastActivity = Date.now();
+        },
+      }),
+      opts.stallMs,
+      {
+        onStall: () => dispatchAbort.abort(),
+        idleMs: () => Date.now() - lastActivity,
+      },
+    );
     if (opts.streaming === false) {
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
       const chunks = chunkForWhatsapp(reply, opts.chunkTarget);
+      posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
         // from the bot being down, which is the failure mode this whole channel
@@ -595,10 +627,15 @@ export async function handleAgentMessage(
         for (const chunk of chunks) await thread.post(chunk);
       }
     } else {
+      posting = true;
       await thread.post(stream);
     }
     await setStatus("done");
   } catch (e) {
+    // Checked BEFORE classification (BRO-2245 x BRO-2256 merge). A closed
+    // service window IS a posting failure, so classifyDispatchFailure would
+    // reach it only as the catch-all "unknown" — and it has a specific, more
+    // useful diagnosis than that, plus it must NOT post.
     if (isOutsideServiceWindow(e)) {
       // Distinct from an ordinary dispatch failure, and deliberately not
       // followed by a thread.post: the whole nature of this failure is that we
@@ -610,9 +647,16 @@ export async function handleAgentMessage(
       );
       return;
     }
-    console.error("[genesis-bot] dispatch failed", e);
+    // The class goes to the channel; the ERROR ITSELF only ever goes to the log.
+    // A tenant on a shared number must not receive a raw message that could carry
+    // a path, a hostname, or a token fragment.
+    // A failure while POSTING is the channel, not Genesis. Reporting a
+    // channel-side `TypeError("fetch failed")` as "the agent backend is not
+    // reachable" would point an operator at the wrong system entirely.
+    const kind = posting ? "unknown" : classifyDispatchFailure(e);
+    console.error(`[genesis-bot] dispatch failed (${kind})`, e);
     await setStatus("failed");
-    await thread.post("⚠️ Something went wrong handling that — please try again.").catch(() => {});
+    await thread.post(dispatchFailureMessage(kind)).catch(() => {});
   } finally {
     stopTyping();
   }

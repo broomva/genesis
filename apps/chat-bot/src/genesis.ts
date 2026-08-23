@@ -1,3 +1,4 @@
+import { AgentReportedError } from "./dispatch-failure";
 // Bridge the Genesis engine's `/api/chat` (Vercel AI SDK UI message stream) into
 // an `AsyncIterable<string>` that Chat SDK's `thread.post()` streams to a chat
 // platform. The Telegram channel is thin: a message in → this stream out.
@@ -19,6 +20,13 @@ export interface GenesisStreamOptions {
   fetchImpl?: typeof fetch;
   /** AbortSignal to cancel the request. */
   signal?: AbortSignal;
+  /** Called for EVERY SSE frame, including ones this generator does not yield.
+   *
+   *  Liveness and output are different things here: only `text-start`/`text-delta`
+   *  are yielded, so a turn spending minutes in a tool call emits nothing while the
+   *  stream is perfectly healthy. A stall bound driven by yields would abort it.
+   *  This reports the stream is alive; the caller decides what to do with that. */
+  onActivity?: () => void;
   /** Pin the session to a Genesis workspace (BRO-1627 `workspaceId`).
    *  Sticky: the engine binds it at session create and ignores it after, so
    *  every turn sends it and only turn 1 decides. Used to keep a public channel
@@ -117,6 +125,7 @@ export async function* genesisStream(opts: GenesisStreamOptions): AsyncGenerator
   let blocks = 0;
   let errorText: string | undefined;
   for await (const part of parseSse(res.body)) {
+    opts.onActivity?.();
     if (part.type === "text-start") {
       if (blocks > 0) yield "\n\n"; // separate distinct narration blocks
       blocks++;
@@ -127,5 +136,7 @@ export async function* genesisStream(opts: GenesisStreamOptions): AsyncGenerator
       break;
     }
   }
-  if (errorText !== undefined) throw new Error(errorText);
+  // Marked, so the dispatch classifier can attribute this to the AGENT rather
+  // than lumping it with everything else that can throw on the dispatch path.
+  if (errorText !== undefined) throw new AgentReportedError(errorText);
 }
