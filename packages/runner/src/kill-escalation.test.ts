@@ -88,11 +88,15 @@ describe("kill escalation (BRO-2260)", () => {
 
     // ...and the grandchild must actually be gone, not merely detached from us.
     await new Promise((r) => setTimeout(r, 300));
-    const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f ${marker} | wc -l | tr -d ' '`])
+    // BRACKET TRICK, and the reason for it: `pgrep -f <marker>` also matches the
+    // wrapping `bash -c` whose OWN command line contains the marker. That self-match
+    // is invisible on macOS and counted on Linux, so the first version of this
+    // assertion passed locally and failed in CI with "Expected 0, Received 1".
+    // `[b]ro...` matches the survivor's cmdline but not pgrep's own literal one.
+    const pattern = `[${marker[0]}]${marker.slice(1)}`;
+    const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f '${pattern}' | wc -l | tr -d ' '`])
       .stdout.toString()
       .trim();
-    // pgrep matches its own shell on some platforms; anything above 1 is a real
-    // survivor. Assert none.
     expect(Number(survivors)).toBe(0);
   });
 
