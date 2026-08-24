@@ -1,0 +1,14 @@
+[Unit]
+Description=Genesis deployment ingress probe (read-only; diagnoses, never repairs)
+Documentation=https://github.com/broomva/genesis/blob/main/scripts/deploy-probe.sh
+
+[Service]
+Type=oneshot
+# A wrapper script, not an inline `bash -c`. The first version inlined the path
+# selection and the nested quoting silently produced `exec ""` — a 127 that no
+# journal line explained, failing every 10 minutes in a unit that reported
+# "enabled". The wrapper is what picks the repo copy over the installed one.
+ExecStart=__HOME__/.local/bin/genesis-deploy-probe-run.sh
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=120

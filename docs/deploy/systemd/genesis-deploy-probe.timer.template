@@ -1,0 +1,18 @@
+[Unit]
+Description=Run the Genesis ingress probe every 10 minutes
+
+[Timer]
+# WHY A TIMER AT ALL. The probe was merged and nothing ran it — a detector with
+# no consumer, which is the same shape as the voice queue that recorded requests
+# nobody answered (BRO-2284) and the Life-governor whose failure receipts nobody
+# read for 13 days. The consumer here is the operator/agent loop: each pass asks
+# "did this fail since I last looked?" rather than only "is it healthy right now?".
+# That is the gap that made the 2026-08-24 outage silent for 2h20m.
+OnBootSec=3min
+OnUnitActiveSec=10min
+# Do NOT set Persistent=true: a catch-up burst after downtime would probe an
+# ingress that is still coming up and record failures that mean nothing.
+RandomizedDelaySec=45
+
+[Install]
+WantedBy=timers.target
