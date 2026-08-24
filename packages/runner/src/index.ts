@@ -216,11 +216,31 @@ export function tenantEnv(
   base?: Record<string, string>,
 ): Record<string, string> | undefined {
   const home = workspace.home?.trim();
-  if (!home) return base;
-  // ABSOLUTE only. A relative HOME resolves against the child's cwd — the tenant's
-  // own workspace — which would silently place `.claude` inside the directory the
-  // tenant can write, handing it its own settings file.
-  if (!home.startsWith("/")) return base;
+  if (!home) return base; // no request — the one fail-SAFE case
+
+  // ABSOLUTE only, and this THROWS rather than falling back (BRO-2235 follow-up).
+  //
+  // It used to `return base`, which handed the child the OPERATOR's HOME while the
+  // workspace declared isolation. `homeRefusal` in the supervisor now rejects such a
+  // turn before this is reached, so two layers were applying two different rules to
+  // the same input — and that inconsistency is exactly what produced the original
+  // blocker. Cross-model review named the residue: a caller reaching `runAgent`
+  // directly still got the silent fallback, so the "defense in depth" this was
+  // described as was not defense at all.
+  //
+  // One rule now, at both layers: a request that cannot be satisfied is refused, and
+  // only its ABSENCE is safe. This is a backstop that should never fire — the
+  // supervisor refuses first — so throwing costs nothing in the normal path and
+  // converts a silent isolation failure into a loud one for any future caller.
+  //
+  // (Resolving it instead would be worse than either: a relative HOME resolves
+  // against the child's cwd — the tenant's own writable workspace — handing the
+  // tenant the settings file meant to confine it.)
+  if (!home.startsWith("/")) {
+    throw new Error(
+      `tenantEnv: refusing a non-absolute per-tenant HOME (${JSON.stringify(home)}). It cannot be applied, and falling back would run the agent with the operator's HOME while the workspace declares isolation.`,
+    );
+  }
   return { ...(base ?? {}), HOME: home };
 }
 
