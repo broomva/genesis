@@ -136,26 +136,44 @@ export class LocalHost implements ExecutionHost {
         // child closed stdin before we finished writing — proceed; exitCode reports it.
       }
     }
-    // PID-REUSE GUARD (P20 round 2). `kill()` is called from `finally` blocks and
-    // from a watchdog's delayed SIGKILL, so it can fire AFTER the child has been
-    // reaped. Once a pid is freed the OS may reissue it — and with negative-pid
-    // group signalling, a stale handle could deliver SIGKILL to an unrelated
-    // process group that happens to inherit the number. Latch on exit and make
-    // every later kill a no-op.
-    let reaped = false;
+    // SETTLEMENT IS GROUP-WIDE, NOT CHILD-WIDE (P20 round 3).
+    //
+    // The first version of this guard latched on `proc.exited` alone, to avoid
+    // signalling a recycled pid. That was wrong in a way the descendant test did
+    // not cover: on SIGTERM a COMPLIANT leader exits immediately while a
+    // TERM-ignoring descendant keeps running and keeps stdout open. `exited`
+    // resolves, the latch suppresses the escalation's SIGKILL, and the turn — plus
+    // the admission slot it holds — hangs forever. The guard against one hazard
+    // reintroduced the exact hazard it was added beside.
+    //
+    // Both conditions are required, and together they are the group-settled
+    // signal: the direct child is gone AND the stream has ended. A descendant
+    // still holding stdout keeps the stream open, so it can never be silently
+    // suppressed; once both are true nothing of ours is alive and a further
+    // signal could only ever hit a stranger.
+    let exited = false;
+    let streamClosed = false;
     void proc.exited.then(
       () => {
-        reaped = true;
+        exited = true;
       },
       () => {
-        reaped = true;
+        exited = true;
       },
     );
+    const lines = toLines(proc.stdout);
+    const trackedStdout = (async function* () {
+      try {
+        yield* lines;
+      } finally {
+        streamClosed = true;
+      }
+    })();
     return {
-      stdout: toLines(proc.stdout),
+      stdout: trackedStdout,
       exitCode: proc.exited,
       kill: (signal?: NodeJS.Signals) => {
-        if (reaped) return;
+        if (exited && streamClosed) return;
         const sig = signal ?? "SIGTERM";
         // Group first, then the bare pid as a fallback. If the group kill throws
         // (ESRCH — the leader already reaped, or `detached` silently stopped

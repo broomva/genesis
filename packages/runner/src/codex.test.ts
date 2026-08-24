@@ -639,14 +639,25 @@ describe("runCodex turn bounds (BRO-2260)", () => {
   // NEGATIVE CONTROL: unbounded must stay unbounded, or the two tests above would
   // pass for a runner that killed every turn regardless of configuration.
   test("with no bounds configured the codex runner does not reap", async () => {
+    // Capture the handle the RUN actually owns (P20 round 3 minor). The first
+    // version released a freshly-created fake handle instead, which left the real
+    // run pending forever — a leak inside the test that proves nothing about
+    // cleanup and would eventually surface as a hung suite.
     const host = new WedgedHost();
+    let owned: SpawnHandle | undefined;
+    const spawn = host.spawnStream.bind(host);
+    host.spawnStream = (cmd: string[], opts?: ExecOpts) => {
+      owned = spawn(cmd, opts);
+      return owned;
+    };
     const run = runCodex({ prompt: "hi", cwd: "/tmp/does-not-matter", host, worktree: false });
     const settled = await Promise.race([
       run.then(() => "settled").catch(() => "settled"),
       new Promise((r) => setTimeout(() => r("still-running"), 300)),
     ]);
     expect(settled).toBe("still-running");
-    host.spawnStream([]).kill(); // release the pending run
-    run.catch(() => {});
+    expect(owned).toBeDefined();
+    owned?.kill(); // release the run this test actually started
+    await run.catch(() => {});
   });
 });

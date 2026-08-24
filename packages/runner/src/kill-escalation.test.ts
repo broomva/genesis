@@ -111,6 +111,35 @@ describe("kill escalation (BRO-2260)", () => {
     expect(Number(survivors)).toBe(0);
   });
 
+  // P20 round 3 blocker, and the regression it named: a COMPLIANT leader exits on
+  // SIGTERM while a TERM-ignoring descendant keeps running and keeps stdout open.
+  // The first exit-latch treated the leader's exit as settlement and suppressed the
+  // escalation's SIGKILL, hanging the turn — and the admission slot — forever.
+  test("leader exits on SIGTERM but a TERM-ignoring descendant does not hang the turn", async () => {
+    const marker = `bro2260-leader-${process.pid}-${Date.now()}`;
+    const h = new LocalHost().spawnStream([
+      "bash",
+      "-c",
+      `bash -c 'trap "" TERM; while true; do echo ${marker}; sleep 0.05; done' & wait`,
+    ]);
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Exactly what the watchdog does: polite signal, then escalate.
+    h.kill(); // leader obeys and exits; descendant ignores and holds stdout
+    setTimeout(() => h.kill("SIGKILL"), 200);
+
+    expect(await streamEndsWithin(h, 4000)).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 300));
+    const pattern = `[${marker[0]}]${marker.slice(1)}`;
+    const probe = Bun.spawnSync(["bash", "-c", "command -v pgrep >/dev/null"]);
+    expect(probe.exitCode).toBe(0);
+    const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f '${pattern}' | wc -l | tr -d ' '`])
+      .stdout.toString()
+      .trim();
+    expect(Number(survivors)).toBe(0);
+  });
+
   test("kill() defaults to SIGTERM, and the signal argument is honoured", async () => {
     const term = new LocalHost().spawnStream(["bash", "-c", "sleep 30"]);
     setTimeout(() => term.kill(), 50);
