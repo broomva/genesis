@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExecutionHost } from "@genesis/host";
 import type { RunResult } from "@genesis/runner";
 import { STACK_AGENTS } from "./agent-stack";
 import { InMemoryStore } from "./store";
