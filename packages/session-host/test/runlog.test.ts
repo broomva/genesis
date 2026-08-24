@@ -113,3 +113,134 @@ describe("RunLogger — structured console summary", () => {
     expect(() => logger.observe(ev("s6", { kind: "turn.complete" } as IREvent))).not.toThrow();
   });
 });
+
+/**
+ * BRO-2268 — status coalescing.
+ *
+ * Found by watching the live box, not by reading code: one session's trace had
+ * reached 2.4 GB — 1,710,404 records spanning ~40 days, and a 500k-line sample was
+ * 100% `kind:"status"`. The statusline is a POLL firing roughly every two seconds
+ * for the life of a session, and every fire was appended (~60 MB/day/session).
+ *
+ * They also had no reader: `summarize` has no `case "status"`, so they fell to
+ * `default: return`. Persisted forever, summarised never.
+ *
+ * Coalesced rather than dropped — cost/context/CLI version are exactly what explains
+ * a session after the fact. Every CHANGE is kept; only repeats of an unchanged
+ * payload are suppressed, and a heartbeat still lands so a quiet stretch stays
+ * distinguishable from a gap.
+ */
+describe("RunLogger — status coalescing (BRO-2268)", () => {
+  const status = (sessionId: string, over: Record<string, unknown> = {}) =>
+    ({
+      sessionId,
+      observedAt: 1,
+      surface: "statusline",
+      kind: "status",
+      model: "Opus",
+      costUsd: 1,
+      contextUsedPct: 5,
+      cliVersion: "2.1.191",
+      raw: { poll: Math.random() },
+      ...over,
+    }) as unknown as IREvent;
+
+  function coalescing(statusMinIntervalMs = 60_000) {
+    const dir = mkdtempSync(join(tmpdir(), "gen-runlog-c-"));
+    let t = 0;
+    const logger = new RunLogger({
+      dir,
+      log: () => {},
+      now: () => t,
+      statusMinIntervalMs,
+    });
+    const at = (ms: number) => {
+      t = ms;
+    };
+    return { dir, logger, at };
+  }
+
+  test("an unchanged status poll is written ONCE, not once per poll", () => {
+    const { dir, logger, at } = coalescing();
+    // 60 polls two seconds apart — the real cadence — inside one interval.
+    for (let i = 0; i < 60; i++) {
+      at(i * 2_000);
+      logger.observe(status("s1"));
+    }
+    // 0ms and 60_000ms qualify; the 58 between them are repeats.
+    expect(traceFor(dir, "s1").length).toBe(2);
+  });
+
+  test("`raw` alone changing does NOT defeat coalescing", () => {
+    // raw carries per-poll timing, so including it in the signature would make every
+    // event unique and coalesce nothing — the bug this fix would have shipped with.
+    const { dir, logger, at } = coalescing();
+    at(0);
+    logger.observe(status("s1", { raw: { a: 1 } }));
+    at(1_000);
+    logger.observe(status("s1", { raw: { a: 2 } }));
+    expect(traceFor(dir, "s1").length).toBe(1);
+  });
+
+  test.each([
+    ["costUsd", { costUsd: 2 }],
+    ["contextUsedPct", { contextUsedPct: 9 }],
+    ["model", { model: "Sonnet" }],
+    ["cliVersion", { cliVersion: "2.2.0" }],
+  ])("a CHANGE in %s is always kept", (_name, over) => {
+    const { dir, logger, at } = coalescing();
+    at(0);
+    logger.observe(status("s1"));
+    at(1_000); // well inside the interval — kept because the payload moved
+    logger.observe(status("s1", over));
+    expect(traceFor(dir, "s1").length).toBe(2);
+  });
+
+  test("a heartbeat still lands, so a quiet stretch is not a gap", () => {
+    const { dir, logger, at } = coalescing(10_000);
+    for (const ms of [0, 5_000, 10_000, 15_000, 20_000]) {
+      at(ms);
+      logger.observe(status("s1"));
+    }
+    expect(traceFor(dir, "s1").length).toBe(3); // 0, 10_000, 20_000
+  });
+
+  test("sessions coalesce independently", () => {
+    const { dir, logger, at } = coalescing();
+    at(0);
+    logger.observe(status("s1"));
+    at(1_000);
+    logger.observe(status("s2")); // same payload, DIFFERENT session — must be kept
+    expect(traceFor(dir, "s1").length).toBe(1);
+    expect(traceFor(dir, "s2").length).toBe(1);
+  });
+
+  test("NON-status events are never coalesced", () => {
+    const { dir, logger, at } = coalescing();
+    for (let i = 0; i < 5; i++) {
+      at(i);
+      logger.observe(ev("s1", { kind: "message.assistant", text: "same" } as IREvent));
+    }
+    expect(traceFor(dir, "s1").length).toBe(5);
+  });
+
+  test("statusMinIntervalMs=0 disables coalescing entirely", () => {
+    const { dir, logger, at } = coalescing(0);
+    for (let i = 0; i < 5; i++) {
+      at(i);
+      logger.observe(status("s1"));
+    }
+    expect(traceFor(dir, "s1").length).toBe(5);
+  });
+
+  test("the per-session signature map is released when the session ends", () => {
+    // Same leak shape the turn tally was fixed for: keyed by sessionId, it would
+    // otherwise grow for the life of the process.
+    const { logger, at } = coalescing();
+    at(0);
+    logger.observe(status("s1"));
+    logger.observe(ev("s1", { kind: "session.lifecycle", phase: "ended" } as IREvent));
+    const held = (logger as unknown as { lastStatus: Map<string, unknown> }).lastStatus;
+    expect(held.size).toBe(0);
+  });
+});

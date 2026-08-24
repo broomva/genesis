@@ -21,6 +21,9 @@ export interface RunLoggerOptions {
   log?: (line: string) => void;
   /** Wall clock (ms). Injectable for tests. Default Date.now. */
   now?: () => number;
+  /** Minimum ms between two PERSISTED `status` events whose payload is unchanged.
+   *  See {@link RunLogger.persist}. 0 disables coalescing (persist every one). */
+  statusMinIntervalMs?: number;
 }
 
 /** A logger that observes the IR firehose. Wire as the engine `observer`. */
@@ -28,6 +31,9 @@ export class RunLogger {
   private readonly dir: string;
   private readonly log: (line: string) => void;
   private readonly now: () => number;
+  private readonly statusMinIntervalMs: number;
+  /** Per-session last PERSISTED status: its payload signature + when. */
+  private readonly lastStatus = new Map<string, { sig: string; at: number }>();
   /** Per-session running tallies for turn summaries. */
   private readonly turns = new Map<
     string,
@@ -39,6 +45,7 @@ export class RunLogger {
     this.dir = opts.dir;
     this.log = opts.log ?? ((l) => console.log(l));
     this.now = opts.now ?? (() => Date.now());
+    this.statusMinIntervalMs = opts.statusMinIntervalMs ?? 60_000;
   }
 
   /** Count of in-flight turn tallies (test/diagnostic — must not leak). */
@@ -55,7 +62,43 @@ export class RunLogger {
 
   // --- persistence -------------------------------------------------------
 
+  /** Should this `status` event be written, or is it a repeat of the last one?
+   *
+   *  MEASURED, not hypothetical (BRO-2268). One session's trace on the live box
+   *  reached 2.4 GB — 1,710,404 records over ~40 days, of which a 500k-line sample
+   *  was 100% `kind:"status"`. The statusline is a POLL: it fires roughly every two
+   *  seconds for as long as the session lives, and every fire was appended.
+   *
+   *  Those records also had no reader. `summarize` has no `case "status"`, so they
+   *  fall to `default: return` — they were never summarised, never logged, and never
+   *  used in a turn tally. Pure write amplification at ~60 MB/day/session.
+   *
+   *  They are not worthless, though, which is why this coalesces rather than drops:
+   *  cost, context-used and CLI version are exactly what you want when explaining a
+   *  session after the fact. Keeping every CHANGE preserves that history; keeping
+   *  every POLL just repeats it. A heartbeat still lands every
+   *  `statusMinIntervalMs` so a long quiet stretch is distinguishable from a gap.
+   *
+   *  `raw` is deliberately excluded from the signature: it carries the full
+   *  statusline payload including per-poll timing, so including it would make every
+   *  event unique and coalesce nothing. */
+  private shouldPersistStatus(event: IREvent, ts: number): boolean {
+    if (event.kind !== "status") return true;
+    if (this.statusMinIntervalMs <= 0) return true;
+    const sig = JSON.stringify([
+      event.model,
+      event.costUsd,
+      event.contextUsedPct,
+      event.cliVersion,
+    ]);
+    const prev = this.lastStatus.get(event.sessionId);
+    if (prev && prev.sig === sig && ts - prev.at < this.statusMinIntervalMs) return false;
+    this.lastStatus.set(event.sessionId, { sig, at: ts });
+    return true;
+  }
+
   private persist(event: IREvent, ts: number): void {
+    if (!this.shouldPersistStatus(event, ts)) return;
     try {
       if (!this.dirReady) {
         mkdirSync(this.dir, { recursive: true });
@@ -85,6 +128,9 @@ export class RunLogger {
         // crash/end before turn.complete would otherwise orphan the entry.
         if (event.phase === "ended" || event.phase === "crashed") {
           this.turns.delete(event.sessionId);
+          // Same leak shape the turn tally above was fixed for: this map is keyed by
+          // sessionId and would otherwise grow for the life of the process.
+          this.lastStatus.delete(event.sessionId);
         }
         return;
       case "message.user":
