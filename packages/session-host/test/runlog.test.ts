@@ -355,12 +355,16 @@ describe("RunLogger — status coalescing failure modes (BRO-2268)", () => {
     ["negative-infinity", Number.NEGATIVE_INFINITY],
   ])("a non-finite interval (%s) falls back to the default", (_n, v) => {
     const { dir, logger, at } = harness(v as number);
-    for (let i = 0; i < 10; i++) {
-      at(i * 1_000);
+    // MUST cross the 60s default, or the Infinity arm is vacuous: without a poll at
+    // or beyond the boundary, "unvalidated Infinity" and "validated 60s" retain the
+    // same single record and the test passes under the defect it exists to catch.
+    // (codex MINOR 2 — the arm was exactly that before this line.)
+    for (const ms of [0, 1_000, 2_000, 60_000, 61_000, 120_000]) {
+      at(ms);
       logger.observe(status("s1"));
     }
-    // Default 60s: only the first lands inside a 9s span. NaN would keep all 10;
-    // Infinity would also keep only 1, so the NaN arm is the load-bearing one.
-    expect(traceFor(dir, "s1").length).toBe(1);
+    // Validated 60s keeps 0, 60_000, 120_000. Unvalidated: NaN keeps all six
+    // (every comparison false), Infinity keeps only the first.
+    expect(traceFor(dir, "s1").length).toBe(3);
   });
 });
