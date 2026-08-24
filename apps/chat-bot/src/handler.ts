@@ -20,7 +20,12 @@ import {
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 import { withStallTimeout } from "./stall-timeout";
-import { FENCE_OVERHEAD, balanceFences, markdownToWhatsApp } from "./whatsapp-format";
+import {
+  FENCE_OVERHEAD,
+  balanceFences,
+  markdownToWhatsApp,
+  residualMarkdown,
+} from "./whatsapp-format";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -627,7 +632,21 @@ export async function handleAgentMessage(
       // and a closing fence, and a chunk pushed past the transport cap is
       // REJECTED — the reply then simply never arrives.
       const target = (opts.chunkTarget ?? CHUNK_TARGET) - FENCE_OVERHEAD;
-      const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(reply), target));
+      const rendered = markdownToWhatsApp(reply);
+      // Standing regression check for BRO-2267, which shipped raw `**bold**`,
+      // `##` and `|---|` to real phones. That defect was caught only by a human
+      // reading delivered messages; every test still passed, because they assert
+      // what the converter emits for a fixed input rather than that nothing
+      // leaks on live traffic. This asks the second question on every reply.
+      // Marker NAMES and a length only — never the message text, which would put
+      // user content in the journal to catch a formatting bug.
+      const leaked = residualMarkdown(rendered);
+      if (leaked.length > 0) {
+        console.warn(
+          `[genesis-bot] MARKDOWN LEAK — ${leaked.join(", ")} survived conversion and is headed for delivery unrendered (BRO-2267 regression). thread=${thread.id} chars=${rendered.length}`,
+        );
+      }
+      const chunks = balanceFences(chunkForWhatsapp(rendered, target));
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable

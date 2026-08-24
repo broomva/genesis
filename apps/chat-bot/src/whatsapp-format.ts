@@ -288,3 +288,56 @@ export function balanceFences(chunks: readonly string[]): string[] {
   }
   return out;
 }
+
+/** Markdown that should NOT survive markdownToWhatsApp, by name.
+ *
+ *  WHY THIS EXISTS. BRO-2267 shipped raw `**bold**`, `##` headings and `|---|`
+ *  table rules to real phones, and the only thing that caught it was a human
+ *  reading delivered messages one by one. The unit tests all passed: they assert
+ *  what the converter emits for a fixed input, which is a different question
+ *  from "does anything leak on live traffic". This asks the second question on
+ *  every reply, so a regression lands in the journal instead of on a phone.
+ *
+ *  THE HARD PART IS NOT DETECTION, IT IS SILENCE. A warning that fires on
+ *  correct output gets muted within a week, and then it is worse than nothing.
+ *  Review round 1 found the first version did exactly that: it stripped fenced
+ *  blocks but not INLINE code, so an ordinary reply containing `f(**kwargs)`,
+ *  `2**n` or `**\/*.test.ts` warned every time. Inline spans are far more common
+ *  in these replies than fences. So, before scanning, this removes
+ *
+ *    - fenced blocks, ``` and ~~~ alike, an unterminated fence meaning code to
+ *      the end (the first version handled ``` only);
+ *    - inline code spans;
+ *
+ *  and requires a matched `**` pair on one line WHOSE OPENER SITS AT A WORD
+ *  BOUNDARY. Round 1 stopped at "matched pair", which was not enough: review
+ *  round 2 produced `The branches take 2**n and 3**m steps.` — correct technical
+ *  prose in which two independent operators pair up. Real emphasis opens after
+ *  a line start, whitespace or opening punctuation, never mid-token, so that
+ *  boundary separates `**Bold**` from `2**n`, `a**b + c**d` and `**kwargs`
+ *  alike. BOTH ends need anchoring, which round 3 established: with only the
+ *  opener anchored, `The expression f(**kwargs) costs 2**n steps.` still paired
+ *  the boundary opener after `(` with the mid-token closer in `2**n`. So the
+ *  closer must not follow whitespace AND must not be followed by a word
+ *  character — a real `**Bold**` ends at a space, punctuation or end of line. */
+export function residualMarkdown(rendered: string): string[] {
+  // Fenced regions first: ``` or ~~~, an unterminated fence swallowing the rest.
+  // Replaced with a SPACE, not a newline — joining with "\n" fabricated line
+  // starts, turning `text ```x``` ## literal` into a false heading (round 1).
+  let scan = rendered.replace(/(^|\n)[ \t]{0,3}(```|~~~)[\s\S]*?(\n[ \t]{0,3}\2|$)/g, "$1 ");
+  // Then inline spans, so `**kwargs` inside backticks is not a leak.
+  scan = scan.replace(/`[^`\n]*`/g, " ");
+
+  const found: string[] = [];
+  // A MATCHED pair on one line. `**Bold**` matches; `2**n` and `**kwargs` do not.
+  if (/(^|[\s([{<>"'])\*\*[^\s*](?:[^*\n]*[^\s*])?\*\*(?![\w*])/m.test(scan))
+    found.push("**bold**");
+  // ATX heading at line start. WhatsApp has no heading syntax at all.
+  if (/^[ \t]{0,3}#{1,6}[ \t]+\S/m.test(scan)) found.push("#heading");
+  // A table delimiter row. [ \t] rather than \s: \s matches \n, so the first
+  // version could span lines and call `|\n-\n|` a delimiter row (round 1).
+  if (/^[ \t]*\|[ \t:|-]{0,200}-[ \t:|-]{0,200}\|[ \t]*$/m.test(scan)) found.push("|table|");
+  // `[text](url)` — WhatsApp renders bare URLs, never link syntax.
+  if (/\[[^\]\n]{1,200}\]\((?:https?:\/\/|\/)[^)\s]{1,500}\)/.test(scan)) found.push("[link](url)");
+  return found;
+}
