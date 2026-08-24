@@ -1605,6 +1605,12 @@ describe("HOME guards are observable, not just present (BRO-2235)", () => {
       run: spawn.run,
       hostProvider: new CountingProvider("vps"),
     });
+    // HYDRATE THE REGISTRY FIRST. `loadRegistry` is async and runs on dispatch, so a
+    // supervisor that has never dispatched still has an EMPTY registry — which made
+    // the strict-resolution check return before the home guard, and the deletability
+    // sweep correctly reported the guard SURVIVED. Without this line the test passes
+    // for the wrong reason.
+    await titler.listWorkspaces();
     await (
       titler as unknown as {
         generateTitleAsync: (t: string, u: string, r: string) => Promise<void>;
