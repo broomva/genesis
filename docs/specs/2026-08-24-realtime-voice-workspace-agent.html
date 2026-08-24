@@ -3,7 +3,7 @@
 meta:
   slug: realtime-voice-workspace-agent
   ticket: (new epic — file as BRO-XXXX) · relates BRO-2228 (voice channel), BRO-2284 (voice delivery), BRO-1620 (engines), BRO-1567/1627 (threads/workspace)
-  status: design — revision 4 (post Strata A rounds 1-3: 2/10 → 3/10 → 6/10)
+  status: design — revision 5 (post Strata A rounds 1-4: 2/10 → 3/10 → 6/10 → 6/10)
   date: 2026-08-24
   decisions:
     - architecture = OPTION C — realtime voice front, Genesis as an async dispatch, narration via contextual updates
@@ -20,9 +20,11 @@ meta:
     - r3 — EventLog is ADDITIVE; Hub's turn schema is re-published by an adapter until the PWA moves
     - r3 — runId is client-generated (an idempotency key must precede its request); one active run per thread
     - r3 — Phase 0 gains a decision table: measurement (4) failing means Option C fails, fallback is Option A
-    - r4 — CONFUSED DEPUTY CLOSED: dispatch needs a single-use token minted by a real user utterance,
-      voided on use/expiry/any-payload-arrival; the tool takes NO arguments, so the model picks whether
-      to dispatch and never what — the dispatched text is the dock's transcript of that utterance
+    - r4 — the tool takes NO arguments: the model picks WHETHER to dispatch, never WHAT
+    - r5 — authority is NOT derived from speech ("fresh speech is presence, not consent"). A dispatch
+      capability is minted by an explicit GESTURE (a second dock control), issued by POST
+      /api/voice/capability bound to (threadId, sha256(transcript), utteranceId) TTL 60s, and BURNED
+      by the BFF — so the invariant holds at the execution authority, not only in the browser
     - r4 — seq carries a boot EPOCH (in-memory log + persisted client mark = suppressed events on restart)
     - r4 — gap recovery reads GET /threads/:id/runs/:runId, a named snapshot, not "current run state"
   research:
@@ -45,6 +47,8 @@ meta:
     - strata-A r3 — FAIL 6/10 · asked defect-or-depth; answered DEFECTIVE with ONE architectural
       decision named: prompt discipline standing in for an authorization boundary. 12/13 dispositions
       FIXED; every remaining finding self-labelled [DEPTH]
+    - strata-A r4 — FAIL 6/10 · 6/6 dispositions FIXED; gate DOES NOT HOLD — an utterance-minted token
+      proves presence, not consent, and the BFF never consumed the capability
 -->
 <html lang="en">
 <head>
@@ -92,12 +96,12 @@ meta:
 
 <body><div class="wrap">
 
-<div class="kick">Genesis · design spec · revision 4</div>
+<div class="kick">Genesis · design spec · revision 5</div>
 <h1>Realtime voice, wired to the workspace session</h1>
 <p class="sub">A voice you can interrupt, that dispatches real work into your Genesis session and narrates it while it runs — without pretending the voice model is the agent doing the work.</p>
 
 <div class="card warn">
-<p><strong>Revision 4.</strong> Three rounds of cross-model adversarial review: <strong>2/10 → 3/10 → 6/10</strong>. Round 1 found the spec had built its narration design on an event stream that reaches no browser. Round 2 found that four of revision 2's own fixes were fresh contradictions. Round 3 found the one that mattered most and had survived all three drafts: <strong>the voice model reads untrusted workspace text and holds the tool that starts work</strong>. A prompt instruction is not an authorization boundary. This revision closes that with a gate in code — a single-use authorization token minted by a real user utterance, and a dispatch tool that takes no arguments, so the model chooses <em>whether</em> to dispatch and never <em>what</em>. The full ledger is at the foot of the document.</p>
+<p><strong>Revision 5.</strong> Four rounds of cross-model adversarial review: <strong>2/10 → 3/10 → 6/10 → 6/10</strong>. Round 1 found the spec had built its narration design on an event stream that reaches no browser. Round 2 found four of revision 2's own fixes were fresh contradictions. Round 3 named the defect that had survived every draft — the voice model reads untrusted workspace text and holds the tool that starts work — and revision 4 answered it with a token minted whenever a user finished speaking. Round 4 broke that in one sentence: <strong>fresh speech is presence, not consent.</strong> A user saying "yes" to a narration question mints a valid token that an injection already in context can spend. So authority no longer comes from speech. It is minted by an explicit gesture, issued and burned by the server, and bound to the exact text it authorises. The full ledger is at the foot of the document.</p>
 </div>
 
 <h2>The problem this exists to solve</h2>
@@ -201,7 +205,7 @@ meta:
 
 <h2>The load-bearing assumption — and it is still an assumption</h2>
 <div class="card warn">
-<p><code>dispatch_to_workspace</code> is a <em>client</em> tool that fires the dispatch and returns within milliseconds — <code>{ accepted: true, runId, summary: "dispatched to broomva/genesis" }</code>. It takes no arguments: what gets dispatched is the dock's transcript of the authorizing utterance, never a string the model composed. Nothing is held open, so nothing depends on an undocumented vendor timeout. That part is sound.</p>
+<p><code>dispatch_to_workspace</code> is a <em>client</em> tool that fires the dispatch and returns within milliseconds — <code>{ accepted: true, runId, summary: "dispatched to broomva/genesis" }</code>. It takes no arguments: what gets dispatched is the transcript the capability was minted from, never a string the model composed. Nothing is held open, so nothing depends on an undocumented vendor timeout. That part is sound.</p>
 <p>What revision 1 asserted and could not support is the next sentence: <em>"the conversation continues normally."</em> Returning a tool result hands control back to the model mid-turn, and every realtime API this design could sit on will generate <em>something</em> at that point. The honest statement is:</p>
 <table>
 <tr><th>Claim</th><th>Status</th></tr>
@@ -227,7 +231,7 @@ meta:
 <table>
 <tr><th>State</th><th>Mic</th><th>ElevenLabs session</th></tr>
 <tr><td>Idle, dock open</td><td>closed</td><td>closed — nothing bills</td></tr>
-<tr><td>Push-to-talk held</td><td>open</td><td>open</td></tr>
+<tr><td><em>talk</em> or <em>dispatch</em> held</td><td>open</td><td>open</td></tr>
 <tr><td>Released, no run active</td><td>closed</td><td>open, 90-second idle timer</td></tr>
 <tr><td>Released, run active</td><td>closed</td><td><strong>held open for the run</strong> + 90s</td></tr>
 <tr><td>Run exceeds the session cap (10 min, clocked per run)</td><td>closed</td><td>closed — result lands on screen, dock shows <em>ready, not spoken</em></td></tr>
@@ -267,14 +271,22 @@ meta:
 </ul>
 <p class="note">This does not make the voice model trustworthy. It makes the blast radius bounded and the failure legible: the screen always holds the authoritative record, and the spoken layer is explicitly a narration of it.</p>
 
-<h3>The confused deputy, and the gate that closes it</h3>
-<p>Everything above is exposure control, and revision 3 stopped there — which left the real hole. The same model that reads untrusted workspace text also holds <code>dispatch_to_workspace</code>. A hostile string in a file, a crafted test-failure message, or the agent's own output can reach it as a payload and ask it to start work. "Treat payloads as data" is a probability, not a permission check, and <em>one active run per thread</em> does not help: the injected dispatch simply waits for the current run to end and is then accepted as normal.</p>
-<p>The gate cannot live in the prompt, so it lives in the callback — which is our code, running in our page. Two rules, both deterministic:</p>
-<ul>
-<li><strong>A dispatch needs a fresh, user-originated authorization.</strong> When a user utterance ends, the dock mints a single-use token valid for 30 seconds. The <code>dispatch_to_workspace</code> callback consumes one or refuses. A token is void on use, on expiry, and <em>on the arrival of any event payload into the vendor context after it was minted</em> — so an injected payload cannot ride a token a real utterance just created.</li>
-<li><strong>The model chooses whether to dispatch. It never chooses what.</strong> The tool takes no text argument. The dispatched text is the transcript of the utterance that minted the token, supplied by the dock. The worst an injection can achieve is therefore dispatching the user's own last words — which they just said, and which the dock renders on screen before the run starts.</li>
-</ul>
-<p>This is the difference between hoping a model behaves and arranging that its misbehaviour cannot reach the workspace. A refused dispatch is narrated rather than swallowed — "I can't start work you didn't ask for" — so an injection attempt is visible instead of silent.</p>
+<h3>The confused deputy, and the capability that closes it</h3>
+<p>Everything above is exposure control, and it left the real hole. The same model that reads untrusted workspace text also holds <code>dispatch_to_workspace</code>. A hostile string in a file, a crafted test-failure message, or the agent's own output can reach it as a payload and ask it to start work. "Treat payloads as data" is a probability, not a permission check, and <em>one active run per thread</em> does not help: the injected dispatch waits for the current run to end and is then accepted as normal.</p>
+<p>Revision 4 tried to close this by minting a short-lived token whenever a user utterance ended. Review round 4 defeated it in one sentence, and the sentence is worth keeping: <strong>fresh speech is presence, not consent.</strong> A user answering "yes" to a narration question mints a perfectly valid token, and an injection already sitting in the model's context can spend it. The token proved that someone had spoken recently — never that they had asked for work.</p>
+<p>So authority is not derived from speech at all. It is minted by an explicit gesture, issued by the server, and bound to the exact text it authorises.</p>
+<table>
+<tr><th>Step</th><th>Who</th><th>What</th></tr>
+<tr><td>1</td><td>User</td><td>Holds the dock's <strong>dispatch</strong> control — a second affordance beside <em>talk</em>. Choosing it <em>is</em> the consent; nothing infers intent from words.</td></tr>
+<tr><td>2</td><td>Dock</td><td>On release, shows the transcript and asks the BFF for a capability, sending the transcript and the thread.</td></tr>
+<tr><td>3</td><td>BFF</td><td>Authorizes the principal against the thread and issues a single-use capability bound to <code>(threadId, sha256(transcript), utteranceId)</code>, TTL 60s, recorded server-side.</td></tr>
+<tr><td>4</td><td>Model</td><td>May call <code>dispatch_to_workspace()</code>. It takes no arguments. It may also decline — the model can still refuse work, it simply cannot originate it.</td></tr>
+<tr><td>5</td><td>Dock</td><td>Presents the capability with the transcript it was minted from. No capability in hand ⇒ the call is refused before any network access.</td></tr>
+<tr><td>6</td><td>BFF</td><td>Burns the capability, verifies the transcript hash matches, dispatches. A replay, a mismatched transcript, or an expired capability is rejected at the authority, not in the browser.</td></tr>
+</table>
+<p>Two properties follow that the token version did not have. <strong>The decision to start work is made by a hand on a control, not by a model reading text</strong> — an injection cannot manufacture a gesture. And <strong>the invariant is enforced where execution happens.</strong> Revision 4 asserted a system-wide rule that only the browser checked, which is a membrane against the vendor rather than an authorization boundary; a capability the BFF itself burns is the boundary. The client-side refusal survives as defence in depth: it stops a bad call one hop earlier and makes it visible.</p>
+<p class="note">Two refusals, two different messages, because conflating them lies to the user. <em>"You didn't ask for that"</em> — no capability was ever minted, i.e. an injection attempt, surfaced in the dock as a warning. <em>"That expired — press dispatch again"</em> — a real request whose capability aged out. Both are rendered on screen unconditionally; speaking them is best-effort, since the ability to make the agent speak on demand is itself a phase 0 measurement.</p>
+<p class="note"><strong>What this costs:</strong> starting work is no longer hands-free. That is the correct trade for an action that mutates a git worktree, and conversation — asking where the run is, hearing it narrated, interrupting — stays fully hands-free. It also dissolves the question of what happens across tabs, reloads and reconnects: a capability is server-issued and single-use, so a reload simply loses it and the user presses the control again.</p>
 </div>
 
 <h2>What must be built</h2>
@@ -289,7 +301,7 @@ meta:
 <tr><td>(2) a contextual update reaches only the <em>next</em> turn</td><td>Progress narration is dead as designed. Fall back to short turns via <code>sendUserMessage</code> at a fixed cadence — noisier, still useful. Re-score before building.</td></tr>
 <tr><td>(3) a burst on one <code>contextId</code> is not deduplicated as documented</td><td>The dock rate-limits to one update per 5s and coalesces itself. Cheap; no architectural change.</td></tr>
 <tr><td>(4) <code>sendUserMessage</code> cannot reliably cause speech</td><td><strong>Option C fails.</strong> There is no terminal delivery, and the honest fallback is Option A — voice as an I/O skin, with the answer read on completion.</td></tr>
-<tr><td>(5) the "payloads are data" instruction does not hold against a hostile string</td><td>Result text is never spoken verbatim; the agent reports type and length and points at the screen. Degrades the feature, does not kill it.</td></tr>
+<tr><td>(5) the "payloads are data" instruction does not hold against a hostile string</td><td>Expected, and already assumed — the capability gate does not depend on it. Result text is never spoken verbatim; the agent reports type and length and points at the screen. Degrades the feature, does not kill it.</td></tr>
 <tr><td>(6) iOS forces speaker output</td><td>Affordance change only: headphone guidance, or desktop-first launch. Not a gate.</td></tr>
 </table>
 </div></div>
@@ -300,7 +312,7 @@ meta:
 </div></div>
 
 <div class="phase"><div class="pnum">2</div><div>
-<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId }</code> — where <code>text</code> came from the dock's transcript, not from the voice model — authorizes the principal <em>against that thread</em>, forwards, returns immediately. The <code>runId</code> is generated by the client, because an idempotency key must exist before the request it protects. The server records it <em>before</em> dispatching the work, in the same critical section as the active-run check, so the window in which a crash could duplicate execution is the window in which no work has started. A repeat returns the original outcome. <strong>One active run per thread</strong>: a dispatch arriving while a run is in flight is rejected with a distinct code, and the agent says so rather than starting a second worker in the same worktree. Note what this guard does <em>not</em> do — it does not make a dispatch legitimate, which is the job of the authorization gate above.
+<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId, capability }</code>, burns the capability, verifies <code>sha256(text)</code> against the hash it was minted with, authorizes the principal <em>against that thread</em>, forwards, returns immediately. Its sibling <code>POST /api/voice/capability</code> is what issues one, and it is the only place a dispatch can be authorized. The <code>runId</code> is generated by the client, because an idempotency key must exist before the request it protects. The server records it <em>before</em> dispatching the work, in the same critical section as the active-run check, so the window in which a crash could duplicate execution is the window in which no work has started. A repeat returns the original outcome. <strong>One active run per thread</strong>: a dispatch arriving while a run is in flight is rejected with a distinct code, and the agent says so rather than starting a second worker in the same worktree. Note what this guard does <em>not</em> do — it does not make a dispatch legitimate, which is the job of the authorization gate above.
 </div></div>
 
 <div class="phase"><div class="pnum">3</div><div>
@@ -324,7 +336,7 @@ meta:
 <tr><td>Returning a client-tool result forces a spoken turn</td><td>Kills the premise that dispatch is silent and the conversation flows on</td><td>Phase 0 measurement (1) — architectural, not cosmetic</td></tr>
 <tr><td>A superseded update already shaped an in-flight sentence</td><td>Stale progress narrated after completion</td><td><strong>Not eliminable.</strong> <code>seq</code> + the terminal-state rule bound it to one in-flight utterance; the dock marks the run complete on screen regardless of what is still being said</td></tr>
 <tr><td>Reconnect loses the run</td><td>The user hears nothing and cannot tell working from dead</td><td>Bounded replay buffer + <code>?since=seq</code>; phase 5 tests it by pulling the network</td></tr>
-<tr><td>Event payloads carry hostile or sensitive text</td><td>Prompt injection into a speaking model; secrets shipped to a vendor</td><td>Truncate, delimit, redact in the projection; test the instruction in phase 0</td></tr>
+<tr><td>Event payloads carry hostile or sensitive text</td><td>Prompt injection into a speaking model; secrets shipped to a vendor</td><td>Truncate, delimit, redact in the projection; test the instruction in phase 0. <strong>Injection cannot start work</strong> — a dispatch requires a server-issued capability minted by a physical gesture. It can still make the agent <em>say</em> something false, which the screen contradicts</td></tr>
 <tr><td>The voice agent claims work it did not do</td><td>A confident wrong summary reads as the workspace agent's word</td><td>Bounded; not eliminated. The screen is authoritative; phase 5 diffs speech against the event log</td></tr>
 <tr><td>Voice-only turns exist only at the vendor</td><td>Context the user gave by voice is missing when the thread resumes</td><td>Non-dispatching utterances are appended to the thread transcript as <code>voice-aside</code> parts via <code>POST /api/threads/:id/aside</code>, keyed by utterance id so a retry cannot duplicate them. A <em>dispatching</em> utterance is not mirrored — it already arrives as the run's user input, and mirroring it too would feed the worker its own prompt twice</td></tr>
 <tr><td>iOS forces speaker output on <code>getUserMedia</code></td><td>May be unusable in the intended context</td><td>Phase 0 measurement (6); degrades to push-to-talk or headphones</td></tr>
@@ -362,13 +374,16 @@ meta:
 <tr><td>1</td><td>A — codex-cli 0.149.1 (cross-vendor)</td><td><span class="pill p-no">FAIL 2/10</span></td><td>5 blockers · 13 major · 5 minor</td></tr>
 <tr><td>2</td><td>A — same, dispositions verified</td><td><span class="pill p-no">FAIL 3/10</span></td><td>6 fixed · 6 partial · 4 not fixed · 0 new defects</td></tr>
 <tr><td>3</td><td>A — plus the defect-or-depth meta-question</td><td><span class="pill p-risk">FAIL 6/10</span></td><td>12 of 13 fixed · 1 blocker, architectural</td></tr>
+<tr><td>4</td><td>A — adversarial, aimed at the new gate</td><td><span class="pill p-risk">FAIL 6/10</span></td><td>6 of 6 fixed · gate DOES NOT HOLD · 1 blocker</td></tr>
 </table>
 <p class="note"><strong>Round 1 — blockers upheld and fixed:</strong> no event transport at narration granularity (understated by the reviewer — the events reach no subscriber at all); the final answer had no mechanism to be spoken; permission resolution had no other half; thread authorization was asserted by reference to a function that does not do it; the client-tool turn behaviour was an inference presented as settled. None rejected. <strong>Reviewer error corrected:</strong> the claim that no transport exists at all — <code>Hub</code> plus <code>GET /ws</code> exist but carry turn-granular messages with no cursor and no gate, which is why the conclusion held anyway.</p>
 <p class="note"><strong>Round 2 — what it caught that round 1 could not.</strong> Four defects were <em>introduced by revision 2's own fixes</em>, and that is the finding worth recording: <em>(i)</em> a push-to-talk cost control that ended the session narration needed; <em>(ii)</em> "takes a turn" kept as a requirement after its mechanism was deleted; <em>(iii)</em> the seq rule promoted to "correctness" when it cannot retract an in-flight utterance any better than supersede can; <em>(iv)</em> "replaces <code>Hub</code>" ignoring that the text UI consumes it. Also upheld: length and safety collapsed into one threshold; a privacy claim the browser boundary does not deliver; a <code>runId</code> assigned in two places; an in-tree claim stated more strongly than the grep that produced it. <strong>Reframed rather than accepted:</strong> the reviewer's merge condition was an end-to-end prototype passing adversarial tests. That is a request for the artifact this document exists to authorise, not a defect in it — which is why phase 0 now carries a decision table binding each measurement to a named consequence, including the one that fails Option C outright.</p>
 </div>
 
 <p class="note"><strong>Round 3 — the meta-question, and the finding it produced.</strong> Rounds 1 and 2 both closed by demanding an end-to-end prototype, which a design spec cannot be. Round 3 was asked to state plainly whether it was scoring a <em>defective artifact</em> or an <em>unexhausted surface</em>, and to label every finding <code>[DEFECT]</code> or <code>[DEPTH]</code>. It answered defective and named exactly one decision: prompt discipline was standing in for an authorization boundary while the same model held <code>dispatch_to_workspace</code>. Its scenario — a hostile payload asks for a dispatch, the one-active-run guard merely delays it until the current run ends — is correct, and it survived three drafts because every previous round had spent itself on transport and delivery. The score moved 3 → 6 in the same round, which is the signal that the earlier rounds had been scoring depth. <strong>Everything else in round 3 was labelled <code>[DEPTH]</code> and fixed anyway</strong> where the fix was a decision rather than an essay: a boot epoch on <code>seq</code> (an in-memory log restarting under a client mark that survives is a real bug the persistence introduced), a named snapshot endpoint behind the gap path, the idempotency record taken before dispatch rather than after, and the mirroring rule made explicit that a <em>dispatching</em> utterance is not mirrored or the worker reads its own prompt twice.</p>
-<div class="foot">Genesis · Realtime voice workspace agent · design · revision 4 · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Source facts verified in-tree at <code>8cc05ff</code>; vendor behaviours marked unverified are measured in phase 0, not assumed.</div>
+<p class="note"><strong>Round 4 — the gate was built and then broken.</strong> Every round-3 disposition was confirmed fixed, and the score held at 6 because round 4 attacked something else: the token minted by a completed utterance. Its blocker — <em>"every completed utterance mints authority while the untrusted model decides whether that utterance meant dispatch"</em> — is the same confused deputy re-entering by an adjacent door, and dispatching the user's own words does not bound the damage when "yes" answers a narration question in one context and authorises a destructive proposal in another. It also caught that the invariant was asserted system-wide but enforced only in the browser, while the BFF — the actual execution authority — took caller-supplied text with no capability at all. Revision 5's answer moves minting off speech entirely and onto a physical control, and puts the burn at the BFF. That dissolves four of round 4's <code>[DEPTH]</code> findings rather than patching them: "arrival into the vendor context" stops being a boundary anything depends on, and token lifetime across tabs, reloads and reconnects stops being a question, because a server-issued single-use capability is simply lost on reload and re-minted by another press. Two findings were fixed as stated: a refusal message that lied when a legitimate request had merely expired, and a risks row that described the injection surface without mentioning the gate.</p>
+<p class="note"><strong>On the round budget.</strong> Four rounds, scores 2 · 3 · 6 · 6. The plateau at 6 is not the stop condition it usually is: round 4 confirmed every prior disposition and found a <em>different</em> defect in the same security-sensitive surface, which is the pattern where an adjacent edge opens as the previous one closes. That converges under continued re-verification; it does not converge by stopping. Round 5 tests the capability design. If it does not move above 6, the honest read is that the remaining findings are depth, and the decision to build phase 0 belongs to a human rather than to another round.</p>
+<div class="foot">Genesis · Realtime voice workspace agent · design · revision 5 · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Source facts verified in-tree at <code>8cc05ff</code>; vendor behaviours marked unverified are measured in phase 0, not assumed.</div>
 
 </div></body>
 </html>
