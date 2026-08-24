@@ -404,9 +404,10 @@ const { app, websocket } = build({
   voiceSecret,
   voicePrincipals,
   enqueueVoice,
-  // Enables the operator view. Independent of voiceSecret: the queue is worth
-  // inspecting even on a deploy where the phone channel is switched off.
-  voiceQueueDir,
+  // Only when the channel is configured. Passing it unconditionally meant a
+  // deploy with no voice at all still answered 200 with an empty queue, so the
+  // panel rendered an empty box instead of self-hiding as documented.
+  voiceQueueDir: voiceSecret ? voiceQueueDir : undefined,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes

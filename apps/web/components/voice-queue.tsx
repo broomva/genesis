@@ -61,22 +61,45 @@ export function VoiceQueue({ open }: { open: boolean }) {
   const [entries, setEntries] = useState<VoiceQueueEntry[] | null>(null);
   const [available, setAvailable] = useState(true);
   const [loading, setLoading] = useState(false);
+  /** A real failure, as opposed to "voice is not configured here". */
+  const [error, setError] = useState<string | null>(null);
+  /** The server could not read a journal — the numbers below are incomplete. */
+  const [degraded, setDegraded] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/voice/queue", { cache: "no-store" });
-      if (!res.ok) {
-        // 404 = the channel is off. Anything else is also not worth a scary box
-        // in a settings sheet; the panel simply does not appear.
+      if (res.status === 404) {
+        // The channel is not configured here — the api does not register the
+        // route at all. Nothing to show, and nothing wrong.
         setAvailable(false);
         return;
       }
-      const body = (await res.json()) as { entries?: VoiceQueueEntry[] };
+      if (!res.ok) {
+        // Anything ELSE is a real failure and must not masquerade as "no voice
+        // configured": silently removing a diagnostic panel during an outage is
+        // exactly when an operator needs it. 401 usually means the api has no
+        // GENESIS_TOKEN, without which this route is deliberately not served.
+        setAvailable(true);
+        setError(
+          res.status === 401
+            ? "Not authorised. This panel needs GENESIS_TOKEN set on the engine."
+            : `Could not load the queue (HTTP ${res.status}).`,
+        );
+        return;
+      }
+      const body = (await res.json()) as {
+        entries?: VoiceQueueEntry[];
+        degraded?: string;
+      };
       setEntries(body.entries ?? []);
+      setDegraded(body.degraded ?? null);
+      setError(null);
       setAvailable(true);
-    } catch {
-      setAvailable(false);
+    } catch (e) {
+      setAvailable(true);
+      setError(e instanceof Error ? e.message : "Could not reach the queue.");
     } finally {
       setLoading(false);
     }
@@ -97,7 +120,13 @@ export function VoiceQueue({ open }: { open: boolean }) {
         <span>Phone requests</span>
         {loading ? <Spinner className="size-3" /> : null}
       </div>
-      {entries && entries.length === 0 ? (
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {degraded ? (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Incomplete: {degraded}. Some rows may be wrong.
+        </p>
+      ) : null}
+      {!error && entries && entries.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           Nothing yet. A call recorded here is answered over WhatsApp.
         </p>

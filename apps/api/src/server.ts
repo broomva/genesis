@@ -381,14 +381,40 @@ export function build(opts: BuildOpts) {
   //
   // Same bearer gate as /threads, and see voiceQueueDir above for why the path is
   // NOT under /voice.
-  if (opts.voiceQueueDir) {
+  //
+  // FAILS CLOSED, unlike every other route here. `unauthorized()` returns false
+  // when no token is configured — a deliberate convenience for the local/dev
+  // case — and this process binds 0.0.0.0, so on a tokenless deploy anyone who
+  // can reach the port reads callers' phone numbers and request text without
+  // ever passing the BFF. Reusing that helper for a route carrying PII would
+  // inherit a fail-open default I have no business inheriting, so the route is
+  // NOT REGISTERED at all without a token, and the panel self-hides. Set
+  // GENESIS_TOKEN to turn it on. (P20 round 1, BLOCKER.)
+  if (opts.voiceQueueDir && opts.token) {
     const voiceQueueDir = opts.voiceQueueDir;
+    const token = opts.token;
     app.get("/admin/voice/queue", async (c) => {
-      if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-      const entries = readQueueStatus(voiceQueueDir);
+      const auth = c.req.header("authorization");
+      const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.query("token");
+      // Compared explicitly rather than through unauthorized(): the point is that
+      // an absent token can never mean "allow" on this route.
+      if (!bearer || bearer !== token) return c.json({ error: "unauthorized" }, 401);
+      const { entries: all, degraded } = readQueueStatus(voiceQueueDir);
+      // Bounded. Both journals are append-only and never compacted, so an
+      // unbounded response would ship an ever-growing PII history to render at
+      // most a dozen rows.
+      const rawLimit = Number(c.req.query("limit"));
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
       const counts: Record<string, number> = {};
-      for (const e of entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
-      return c.json({ entries, counts });
+      for (const e of all) counts[e.status] = (counts[e.status] ?? 0) + 1;
+      return c.json({
+        entries: all.slice(0, limit),
+        counts,
+        total: all.length,
+        // Present only when a journal could not be read — the client shows it
+        // rather than rendering a confidently wrong "everything is pending".
+        ...(degraded ? { degraded } : {}),
+      });
     });
   }
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   appendFileSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -165,7 +166,9 @@ describe("readQueueStatus — the operator view", () => {
   test("a ticket nobody has touched is pending", () => {
     const d = tmp();
     q(d, [t("v-1")]);
-    expect(readQueueStatus(d)).toMatchObject([{ id: "v-1", status: "pending", attempts: 0 }]);
+    expect(readQueueStatus(d).entries).toMatchObject([
+      { id: "v-1", status: "pending", attempts: 0 },
+    ]);
   });
 
   const CASES: Array<{
@@ -217,7 +220,7 @@ describe("readQueueStatus — the operator view", () => {
         terminal: c.terminal,
       },
     ]);
-    expect(readQueueStatus(d)[0]?.status).toBe(c.expected);
+    expect(readQueueStatus(d).entries[0]?.status).toBe(c.expected);
   });
 
   test("a closed window surfaces its REASON — the whole point of this view", () => {
@@ -234,19 +237,22 @@ describe("readQueueStatus — the operator view", () => {
         terminal: false,
       },
     ]);
-    expect(readQueueStatus(d)[0]).toMatchObject({ status: "retrying", reason: "window-closed" });
+    expect(readQueueStatus(d).entries[0]).toMatchObject({
+      status: "retrying",
+      reason: "window-closed",
+    });
   });
 
   test("newest first — an operator asks what JUST happened", () => {
     const d = tmp();
     q(d, [t("v-old"), t("v-new")]);
-    expect(readQueueStatus(d).map((e) => e.id)).toEqual(["v-new", "v-old"]);
+    expect(readQueueStatus(d).entries.map((e) => e.id)).toEqual(["v-new", "v-old"]);
   });
 
   test("a stable id appearing twice is shown ONCE", () => {
     const d = tmp();
     q(d, [t("v-1"), t("v-1")]);
-    expect(readQueueStatus(d)).toHaveLength(1);
+    expect(readQueueStatus(d).entries).toHaveLength(1);
   });
 
   test("a truncated or malformed line does not hide the tickets around it", () => {
@@ -254,11 +260,11 @@ describe("readQueueStatus — the operator view", () => {
     q(d, [t("v-1")]);
     appendFileSync(join(d, VOICE_QUEUE_FILE), '{"id":"v-2","request":"partial\n');
     q(d, [t("v-3")]);
-    expect(readQueueStatus(d).map((e) => e.id)).toEqual(["v-3", "v-1"]);
+    expect(readQueueStatus(d).entries.map((e) => e.id)).toEqual(["v-3", "v-1"]);
   });
 
   test("missing files are an empty queue, not a crash", () => {
-    expect(readQueueStatus(join(tmp(), "nope"))).toEqual([]);
+    expect(readQueueStatus(join(tmp(), "nope")).entries).toEqual([]);
   });
 
   test("an entry written BEFORE `terminal` existed still classifies", () => {
@@ -266,7 +272,7 @@ describe("readQueueStatus — the operator view", () => {
     const d = tmp();
     q(d, [t("v-1")]);
     h(d, [{ id: "v-1", at: "x", disposition: "delivered", attempts: 1 }]);
-    expect(readQueueStatus(d)[0]?.status).toBe("delivered");
+    expect(readQueueStatus(d).entries[0]?.status).toBe("delivered");
   });
 });
 
@@ -281,5 +287,59 @@ describe("DRIFT GUARD: the two apps must name the same file", () => {
     );
     const m = src.match(/export const HANDLED_FILE\s*=\s*"([^"]+)"/);
     expect(m?.[1]).toBe(HANDLED_FILE);
+  });
+});
+
+describe("a journal that cannot be read must not read as 'all pending'", () => {
+  test("an unreadable delivered.jsonl is reported DEGRADED, not silently empty", () => {
+    // The failure mode this prevents: the view confidently showing every ticket
+    // pending — the opposite of the truth — and hiding the very failures it was
+    // built to surface.
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    mkdirSync(join(d, HANDLED_FILE), { recursive: true }); // a directory: read fails
+    const r = readQueueStatus(d);
+    expect(r.degraded).toContain(HANDLED_FILE);
+    expect(r.entries).toHaveLength(1);
+  });
+
+  test("a healthy read reports no degradation", () => {
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    expect(readQueueStatus(d).degraded).toBeUndefined();
+  });
+
+  test("a LEGACY exhausted failure is abandoned, not 'retrying'", () => {
+    // Written before `terminal` existed. The consumer treats attempts >= cap as
+    // terminal; the view must agree or it promises a retry that never comes.
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    appendFileSync(
+      join(d, HANDLED_FILE),
+      `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts: 3 })}\n`,
+    );
+    expect(readQueueStatus(d).entries[0]?.status).toBe("abandoned");
+  });
+
+  test("a LEGACY failure UNDER the cap is still retrying", () => {
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    appendFileSync(
+      join(d, HANDLED_FILE),
+      `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts: 1 })}\n`,
+    );
+    expect(readQueueStatus(d).entries[0]?.status).toBe("retrying");
   });
 });

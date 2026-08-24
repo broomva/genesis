@@ -84,6 +84,12 @@ export const VOICE_QUEUE_FILE = "queue.jsonl";
  *  below pins them together. */
 export const HANDLED_FILE = "delivered.jsonl";
 
+/** Only for rows written BEFORE HandledEntry gained `terminal`. Current rows
+ *  carry the flag, so this is never consulted for them — which is the point:
+ *  duplicating the consumer's cap is a drift risk, and confining it to legacy
+ *  rows keeps that risk from growing. */
+const MAX_ATTEMPTS_FALLBACK = 3;
+
 /** Build the enqueue sink. The directory is created ONCE here rather than per
  *  append: /voice/request runs with a caller on the line, so the hot path is one
  *  append and nothing else. */
@@ -144,14 +150,19 @@ function isHandled(v: unknown): v is RawHandled {
  *  operator opening this is asking "what just happened", not "what happened
  *  first". Tolerant of both files for the same reason parseQueue is: they are
  *  being appended to by another process while this reads them. */
-export function readQueueStatus(dir: string): VoiceQueueEntry[] {
+export function readQueueStatus(dir: string): { entries: VoiceQueueEntry[]; degraded?: string } {
+  let degraded: string | undefined;
   const readLines = (name: string): unknown[] => {
     const p = join(dir, name);
     if (!existsSync(p)) return [];
     let raw: string;
     try {
       raw = readFileSync(p, "utf8");
-    } catch {
+    } catch (e) {
+      // NOT silently empty. An unreadable delivered.jsonl would otherwise make
+      // every ticket look "pending" — the view confidently reporting the opposite
+      // of the truth, and hiding precisely the failures it exists to surface.
+      degraded = `${name} could not be read: ${e instanceof Error ? e.message : e}`;
       return [];
     }
     const out: unknown[] = [];
@@ -182,13 +193,20 @@ export function readQueueStatus(dir: string): VoiceQueueEntry[] {
 
     const h = handled.get(t.id);
     const [kind, reason] = (h?.disposition ?? "").split(":");
+    // An entry written before `terminal` existed has none, and reading that as
+    // "will retry" tells the operator the opposite of what the consumer will do —
+    // it treats attempts >= its cap as terminal. Re-derive when the flag is
+    // absent. MAX_ATTEMPTS_FALLBACK duplicates the consumer's cap and is used
+    // ONLY for those legacy rows; current rows carry `terminal` and never reach it.
+    const exhausted =
+      h?.terminal === undefined ? (h?.attempts ?? 0) >= MAX_ATTEMPTS_FALLBACK : h.terminal;
     const status: VoiceStatus = !h
       ? "pending"
       : kind === "delivered"
         ? "delivered"
         : kind === "undeliverable"
           ? "undeliverable"
-          : h.terminal
+          : exhausted
             ? "abandoned"
             : "retrying";
 
@@ -204,5 +222,6 @@ export function readQueueStatus(dir: string): VoiceQueueEntry[] {
       ...(reason ? { reason } : {}),
     });
   }
-  return entries.reverse();
+  entries.reverse();
+  return degraded ? { entries, degraded } : { entries };
 }
