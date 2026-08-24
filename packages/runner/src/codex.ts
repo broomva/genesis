@@ -51,6 +51,7 @@ import {
   removeWorktree,
   scrubAgentEnv,
 } from "./index";
+import { TurnReapedError, startWatchdog } from "./watchdog";
 
 function codexRunId(): string {
   return `codex-${Math.floor(performance.now()).toString(36)}-${process.pid.toString(36)}`;
@@ -426,8 +427,23 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
     ? { ...initialState, sessionId: opts.resumeSessionId }
     : initialState;
   let exitCode = -1;
+  // The SAME bounds as the claude runner (BRO-2260, Codex P20 blocker 3). Without
+  // this, the advertised idle/total policy varied silently by engine: a wedged
+  // codex turn held its admission slot and its compute forever, which at
+  // perWorkspace=1 locks that workspace out permanently.
+  const startedAtMs = Date.now();
+  let escalation: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = startWatchdog({
+    idleTimeoutMs: opts.idleTimeoutMs,
+    maxTurnMs: opts.maxTurnMs,
+    onExpire: () => {
+      handle.kill();
+      escalation = setTimeout(() => handle.kill("SIGKILL"), opts.killGraceMs ?? 5_000);
+    },
+  });
   try {
     for await (const line of handle.stdout) {
+      watchdog.touch();
       for (const event of parseCodexLine(line)) {
         events.push(event);
         state = reduce(state, event);
@@ -435,6 +451,13 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
       }
     }
     exitCode = await handle.exitCode;
+    if (watchdog.reason) {
+      throw new TurnReapedError(
+        watchdog.reason,
+        Date.now() - startedAtMs,
+        watchdog.reason === "idle" ? (opts.idleTimeoutMs ?? 0) : (opts.maxTurnMs ?? 0),
+      );
+    }
   } catch (err) {
     handle.kill();
     if (worktreePath && !worktreePersistent) {
@@ -442,6 +465,8 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
     }
     throw err;
   } finally {
+    watchdog.dispose();
+    if (escalation !== undefined) clearTimeout(escalation);
     handle.kill();
   }
 

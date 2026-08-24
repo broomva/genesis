@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ExecutionHost } from "@genesis/host";
 import type { RunResult } from "@genesis/runner";
 import { STACK_AGENTS } from "./agent-stack";
+import { TurnRejectedError } from "./concurrency";
 import { InMemoryStore } from "./store";
 import {
   Supervisor,
@@ -1152,6 +1153,30 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect(r.started()).toBe(3);
     r.releaseAll();
     await Promise.all([a, b, c]);
+  });
+
+  // Codex P20 major: a refusal must be FREE of side effects, or "just resend" is
+  // a lie — the resend lands in a thread the refusal already corrupted.
+  test("a refused turn records NO history and leaves the session untouched (BRO-2260)", async () => {
+    const r = blockingRunner();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: r.run,
+      concurrency: { perWorkspace: 1 },
+    });
+    const first = sup.dispatch("t-a", "one");
+    await Bun.sleep(5);
+    await expect(sup.dispatch("t-b", "refused message")).rejects.toThrow(TurnRejectedError);
+
+    // No user turn recorded for the refused thread.
+    expect(await sup.history("t-b")).toEqual([]);
+    // ...and it did not acquire a title from the message it never processed.
+    const session = await sup.resolve("t-b");
+    expect(session.title).toBeUndefined();
+    expect(session.phase).toBe("idle");
+
+    r.releaseAll();
+    await first;
   });
 
   test("turn bounds are forwarded to the runner (BRO-2260)", async () => {

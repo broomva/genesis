@@ -180,3 +180,73 @@ describe("dispatchFailureMessage — tenant-visible, and must leak nothing", () 
     for (const k of KINDS) expect(dispatchFailureMessage(k).length).toBeLessThan(200);
   });
 });
+
+// ── BRO-2260 cross-package contract ──────────────────────────────────────────
+// The supervisor's bounded-turn errors reach this classifier as agent-reported
+// text. Classification anchors on their message PREFIX, which means a reworded
+// message in @genesis/core or @genesis/runner would silently degrade the channel
+// back to "the agent failed" — the exact regression this ticket removed.
+//
+// So pin the REAL error objects, not hand-written strings. A string fixture would
+// keep passing after the source message changed, which is the failure mode this
+// test exists to prevent.
+import { TurnRejectedError } from "../../../packages/core/src/concurrency";
+import { TurnReapedError } from "../../../packages/runner/src/watchdog";
+
+/** Wrap as the stream does: a dispatch error arrives agent-reported. */
+class AgentReportedLike extends Error {
+  // The duck-typed flag the classifier actually checks (see `isAgentReported`).
+  readonly isAgentReported = true;
+  constructor(m: string) {
+    super(m);
+    this.name = "AgentReportedError";
+  }
+}
+
+describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => {
+  test("a per-workspace refusal classifies as capacity", () => {
+    const real = new TurnRejectedError("workspace", 1);
+    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity");
+  });
+
+  test("a global refusal classifies as capacity", () => {
+    const real = new TurnRejectedError("global", 2);
+    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity");
+  });
+
+  test("both reap reasons classify as turn-timeout", () => {
+    for (const reason of ["idle", "total"] as const) {
+      const real = new TurnReapedError(reason, 1_800_000, 1_800_000);
+      expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("turn-timeout");
+    }
+  });
+
+  test("the messages are actionable and disclose nothing about the box", () => {
+    for (const kind of ["capacity", "turn-timeout"] as const) {
+      const m = dispatchFailureMessage(kind);
+      expect(m.length).toBeGreaterThan(20);
+      expect(m).toMatch(/again|smaller/i);
+      // No paths, hosts, workspace ids or counts — a shared number is read by
+      // people who are not the operator.
+      expect(m).not.toMatch(/\/home|ws-|localhost|127\.0\.0\.1|genesis-/);
+    }
+  });
+
+  // NEGATIVE CONTROL: an ordinary agent failure must still be agent-error, or the
+  // two new branches would be swallowing everything and the tests above would pass
+  // for the wrong reason.
+  test("an ordinary agent error is still agent-error", () => {
+    expect(classifyDispatchFailure(new AgentReportedLike("Tool use failed: ENOENT"))).toBe(
+      "agent-error",
+    );
+    expect(classifyDispatchFailure(new AgentReportedLike("boom"))).toBe("agent-error");
+  });
+
+  // A mid-string match would let agent output pick its own classification.
+  test("the prefixes are anchored, not substring-matched", () => {
+    const smuggled = new AgentReportedLike(
+      "I tried to run it and the tool said: You already have 1 turn running.",
+    );
+    expect(classifyDispatchFailure(smuggled)).toBe("agent-error");
+  });
+});

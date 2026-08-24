@@ -29,11 +29,18 @@ RestartSec=10
 # runaway turn degrades that tenant's turn, never the channel.
 #
 # Sized for a 2 vCPU / 8 GB box. 150% of 200% leaves a core for the bot, the web
-# app, tailscaled and sshd. GENESIS_MAX_TURNS defaults to 2 because a measured
-# turn is 1.2-1.9 GB RSS and two fit under MemoryMax while three do not -- if you
-# change MemoryMax, change that too, or the cap stops matching the memory.
-MemoryHigh=3G
-MemoryMax=4G
+# app, tailscaled and sshd.
+#
+# MEMORY ARITHMETIC (corrected by P20). MemoryMax charges the WHOLE cgroup, not
+# just the turns: the api's own bun process holds ~0.5 GB before any turn starts.
+# At the measured upper bound two turns are 3.8 GB + 0.5 GB = 4.3 GB, which does
+# NOT fit under a 4 GB ceiling -- the first version of this file said it did, and
+# would have traded an explainable refusal for an OOM kill mid-answer. 6 GB fits
+# two upper-bound turns with headroom and still leaves ~2 GB of the 8 GB box for
+# the bot, the web app, tailscaled and sshd. GENESIS_MAX_TURNS is derived from
+# this number -- change one, change the other.
+MemoryHigh=4G
+MemoryMax=6G
 CPUQuota=150%
 TasksMax=512
 

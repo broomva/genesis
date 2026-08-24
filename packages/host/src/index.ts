@@ -111,6 +111,16 @@ export class LocalHost implements ExecutionHost {
       stdin: opts?.input !== undefined ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "ignore",
+      // DETACHED so the child leads its own process GROUP (BRO-2260). Killing the
+      // direct pid is not enough: an agent turn is `claude` -> `bash` -> `git
+      // clone`, and MEASURED here, SIGKILL on the parent left the grandchild alive
+      // AND the stdout stream open, so the reader waited forever. With its own
+      // group, `kill(-pgid)` reaps the whole tree in one call.
+      //
+      // Verified on this platform: `detached: true` yields pgid === child pid and
+      // a pgid distinct from ours, which is what makes the negative-pid kill below
+      // safe — it can never address the group this process lives in.
+      detached: true,
     });
     if (opts?.input !== undefined && proc.stdin) {
       // Write the whole payload then close stdin so the child sees EOF and starts.
@@ -129,7 +139,28 @@ export class LocalHost implements ExecutionHost {
     return {
       stdout: toLines(proc.stdout),
       exitCode: proc.exited,
-      kill: (signal?: NodeJS.Signals) => proc.kill(signal ?? "SIGTERM"),
+      kill: (signal?: NodeJS.Signals) => {
+        const sig = signal ?? "SIGTERM";
+        // Group first, then the bare pid as a fallback. If the group kill throws
+        // (ESRCH — the leader already reaped, or `detached` silently stopped
+        // working) we still terminate the direct child, so this is never worse
+        // than the old behaviour. `pid > 1` guards the "kill everything" pid 0/-1
+        // footgun, which would take the whole server down.
+        const pid = proc.pid;
+        if (typeof pid === "number" && pid > 1) {
+          try {
+            process.kill(-pid, sig);
+            return;
+          } catch {
+            // fall through to the single-process kill
+          }
+        }
+        try {
+          proc.kill(sig);
+        } catch {
+          // already gone — kill() must never throw into a caller's `finally`
+        }
+      },
     };
   }
 

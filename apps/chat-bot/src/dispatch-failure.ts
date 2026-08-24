@@ -33,8 +33,31 @@ export type DispatchFailure =
   | "backend-error"
   | "unauthorized"
   | "timeout"
+  | "capacity"
+  | "turn-timeout"
   | "agent-error"
   | "unknown";
+
+/** Message prefixes the SUPERVISOR generates for a bounded turn (BRO-2260).
+ *
+ *  These travel the same stream as agent output, so they arrive wrapped as an
+ *  agent-reported error and were classified `agent-error` — the sender saw
+ *  "the agent failed" instead of "you already have a turn running", and the whole
+ *  point of refusing-with-a-reason was lost.
+ *
+ *  ANCHORED AT THE START, deliberately: an agent can print anything, including
+ *  these words, so a substring match anywhere would let tenant text pick its own
+ *  classification. Anchoring is not proof of provenance — a tenant CAN still make
+ *  the agent begin its error with one of these strings. That is accepted: both
+ *  branches map to a FIXED, benign, operator-authored message that discloses
+ *  nothing. The worst outcome is a misleading "try again shortly", not a leak.
+ *
+ *  CONTRACT: these must stay in sync with TurnRejectedError / TurnReapedError in
+ *  @genesis/core and @genesis/runner. `dispatch-failure.test.ts` pins the real
+ *  error objects against this list, so editing a message there fails the test
+ *  here rather than silently degrading to "agent-error" in production. */
+const CAPACITY_PREFIXES = ["You already have", "The server is at capacity"];
+const TURN_TIMEOUT_PREFIXES = ["This turn was stopped:"];
 
 /** Codes that mean "nothing answered".
  *
@@ -117,7 +140,13 @@ function classify(e: unknown): DispatchFailure {
   // an exact copy of the transport messages below, or an object carrying a `code`.
   // Checking shapes first let the agent's payload decide its own classification,
   // which is attacker-influenced input steering an operator-facing diagnosis.
-  if (isAgentReported(e)) return "agent-error";
+  if (isAgentReported(e)) {
+    const text = e instanceof Error ? e.message : String(e ?? "");
+    const t = text.trimStart();
+    if (CAPACITY_PREFIXES.some((p) => t.startsWith(p))) return "capacity";
+    if (TURN_TIMEOUT_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout";
+    return "agent-error";
+  }
 
   const codes = codesOf(e);
   const msg = e instanceof Error ? e.message : String(e ?? "");
@@ -163,6 +192,12 @@ export function dispatchFailureMessage(kind: DispatchFailure): string {
       return "⚠️ This channel is not authorised to reach the agent backend. That needs an operator to fix; retrying will not help.";
     case "backend-error":
       return "⚠️ The agent backend returned an error. This is an outage on my side — please try again shortly.";
+    case "capacity":
+      // No detail beyond "busy": the count and the owning workspace are another
+      // tenant's business on a shared number.
+      return "⏳ I'm still working on your previous message. Wait for that reply, then send this again.";
+    case "turn-timeout":
+      return "⏳ That took too long and I stopped it. Nothing was saved. Try again with a smaller step — for example, one file or one command at a time.";
     case "agent-error":
       return "⚠️ The agent failed while handling that. Please try again, and rephrase if it keeps happening.";
     default:

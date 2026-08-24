@@ -30,7 +30,7 @@ import {
   runAgent,
 } from "@genesis/runner";
 import { seedAgentStack } from "./agent-stack";
-import { type ConcurrencyLimits, TurnGate } from "./concurrency";
+import { type ConcurrencyLimits, TurnGate, type TurnSlot } from "./concurrency";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, TokenUsage, Turn, Workspace } from "./types";
 import { InMemoryWorkspaceRepository, type WorkspaceRepository } from "./workspace-repository";
@@ -772,96 +772,97 @@ export class Supervisor {
       session.noWorktree === false && defaultNoWorktree
         ? true
         : (session.noWorktree ?? defaultNoWorktree);
-    await this.store.addTurn({ sessionId: session.id, role: "user", text });
-
-    // Derive a thread title from the first user turn (BRO-1592) — persisted with
-    // the phase write below, so the drawer shows a stable label instead of a
-    // running last-text preview. Never overwrites a title once set (or renamed).
-    // This is the INSTANT provisional; an LLM title upgrades it after the turn
-    // (BRO-1665), fired once — on the turn that first titles the thread.
-    const titledThisTurn = !session.title;
-    if (!session.title) session.title = deriveTitle(text);
-    // Bind the engine STICKY on the first turn (BRO-1620), reused for every later
-    // turn — so flipping the global default never reroutes a thread with a live
-    // session. A brand-new thread (never ran) takes the client's requested engine;
-    // an EXISTING thread with no engine (a pre-BRO-1620 row) is bound to the DEFAULT
-    // instead, preserving the engine it actually ran under (the deploy's
-    // GENESIS_ENGINE) so it can't be silently rerouted + lose --resume continuity.
-    if (!session.engine) {
-      const neverRan = session.agentSessionId === undefined;
-      const requested = turnOpts?.engine;
-      session.engine =
-        neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
-    }
-    // BRO-2235. Placement is load-bearing three ways.
-    //
-    // AFTER the engine binding above: the binding decides whether `home` will
-    // actually travel, so a workspace can be correct and the turn still unisolated
-    // purely from which engine the thread landed on.
-    //
-    // BEFORE `phase = "running"` is persisted: a refusal here leaves the session in
-    // whatever phase it already held. Refusing after the write stranded it in
-    // "running" permanently — the row never returns to a runnable state.
-    //
-    // BEFORE the host lease: this throw is outside the try/finally that releases
-    // one, so refusing costs no host and leaks nothing.
-    const preLeaseRefusal = homeRefusal(workspace, session.engine ?? this.defaultEngine);
-    if (preLeaseRefusal) throw new Error(preLeaseRefusal);
-
-    session.phase = "running";
-    await this.store.upsertSession(session);
-
-    // Engine-agnostic turn logging (BRO-1519) — ties thread → session → outcome
-    // in the api log, for the print engine + /message too.
-    const startedAt = Date.now();
-    console.log(`[genesis] dispatch ▶ thread=${threadId} session=${session.id}`);
-
-    // Lease a host for THIS session (e.g. its own per-session microVM).
-    const lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
-    // Resolve the runner for this thread's (now-bound) engine; the default + the
-    // built-in print runner are the safety net (engine was validated at bind time,
-    // so this always hits the first — the fallbacks just satisfy the type checker).
-    const run =
-      this.runners[session.engine ?? this.defaultEngine] ??
-      this.runners[this.defaultEngine] ??
-      runAgent;
+    // ADMIT FIRST (BRO-2260, Codex P20 major). Admission used to sit just before
+    // the spawn — after the user turn was recorded, the heuristic title derived,
+    // the phase persisted and a host leased. A refused message therefore left a
+    // permanent unprocessed history entry, supplied the thread's title forever,
+    // moved the session to a failed phase, and could provision a host purely to
+    // reject it. Refusing has to be free of side effects, or "just resend" is a
+    // lie: the resend lands in a thread the refusal already corrupted.
+    const slot = this.gate.acquire(workspace.id);
     try {
-      // Workspace-availability guard (BRO-1629 slice 4 / BRO-1630 RC3): refuse to
-      // run into a rootPath that has vanished from disk (deleted out-of-band, an
-      // unmounted volume). Without this, a LOCAL spawn falls back to the process
-      // cwd (e.g. /home/agent) and the agent silently runs in the WRONG place —
-      // the "working directory isn't a git repo" symptom. The error names the
-      // workspace, never its rootPath (that path must not leak past the engine).
-      //
-      // Scope — LOCAL hosts only (a `microvm` host runs the repo INSIDE the VM, so
-      // a local existsSync of rootPath is meaningless and would false-positive).
-      // KNOWN GAP (P20 #2): a `vps` host runs over ssh with rootPath as a REMOTE
-      // path — a vanished remote dir reproduces this exact bug, but a local
-      // existsSync can't see it; it needs a remote `test -d` via host.exec. VpsHost
-      // is not yet wired into the api (only LocalHost + microVM ship today), so
-      // this is latent — tracked for when vps is instantiated (BRO-1631).
-      // BRO-2235, second half: the host is only known once leased. Inside the try,
-      // so the finally releases the lease this refusal abandons.
-      const hostRefusal = homeRefusal(
-        workspace,
-        session.engine ?? this.defaultEngine,
-        lease.host.kind,
-      );
-      if (hostRefusal) throw new Error(hostRefusal);
-      if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
-        throw new Error(
-          `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
-        );
+      await this.store.addTurn({ sessionId: session.id, role: "user", text });
+
+      // Derive a thread title from the first user turn (BRO-1592) — persisted with
+      // the phase write below, so the drawer shows a stable label instead of a
+      // running last-text preview. Never overwrites a title once set (or renamed).
+      // This is the INSTANT provisional; an LLM title upgrades it after the turn
+      // (BRO-1665), fired once — on the turn that first titles the thread.
+      const titledThisTurn = !session.title;
+      if (!session.title) session.title = deriveTitle(text);
+      // Bind the engine STICKY on the first turn (BRO-1620), reused for every later
+      // turn — so flipping the global default never reroutes a thread with a live
+      // session. A brand-new thread (never ran) takes the client's requested engine;
+      // an EXISTING thread with no engine (a pre-BRO-1620 row) is bound to the DEFAULT
+      // instead, preserving the engine it actually ran under (the deploy's
+      // GENESIS_ENGINE) so it can't be silently rerouted + lose --resume continuity.
+      if (!session.engine) {
+        const neverRan = session.agentSessionId === undefined;
+        const requested = turnOpts?.engine;
+        session.engine =
+          neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
       }
-      // Admission (BRO-2260) — AFTER the workspace guards so a refusal names a
-      // real workspace, and immediately before the spawn so a slot is never held
-      // across the store writes above. Throws TurnRejectedError, which the api
-      // surfaces to the sender: a refusal that says why is recoverable, an
-      // unbounded queue is not (Kapso drops a message after 3 timed-out retries).
-      const slot = this.gate.acquire(workspace.id);
-      let result: RunResult;
+      // BRO-2235. Placement is load-bearing three ways.
+      //
+      // AFTER the engine binding above: the binding decides whether `home` will
+      // actually travel, so a workspace can be correct and the turn still unisolated
+      // purely from which engine the thread landed on.
+      //
+      // BEFORE `phase = "running"` is persisted: a refusal here leaves the session in
+      // whatever phase it already held. Refusing after the write stranded it in
+      // "running" permanently — the row never returns to a runnable state.
+      //
+      // BEFORE the host lease: this throw is outside the try/finally that releases
+      // one, so refusing costs no host and leaks nothing.
+      const preLeaseRefusal = homeRefusal(workspace, session.engine ?? this.defaultEngine);
+      if (preLeaseRefusal) throw new Error(preLeaseRefusal);
+
+      session.phase = "running";
+      await this.store.upsertSession(session);
+
+      // Engine-agnostic turn logging (BRO-1519) — ties thread → session → outcome
+      // in the api log, for the print engine + /message too.
+      const startedAt = Date.now();
+      console.log(`[genesis] dispatch ▶ thread=${threadId} session=${session.id}`);
+
+      // Lease a host for THIS session (e.g. its own per-session microVM).
+      const lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+      // Resolve the runner for this thread's (now-bound) engine; the default + the
+      // built-in print runner are the safety net (engine was validated at bind time,
+      // so this always hits the first — the fallbacks just satisfy the type checker).
+      const run =
+        this.runners[session.engine ?? this.defaultEngine] ??
+        this.runners[this.defaultEngine] ??
+        runAgent;
       try {
-        result = await run({
+        // Workspace-availability guard (BRO-1629 slice 4 / BRO-1630 RC3): refuse to
+        // run into a rootPath that has vanished from disk (deleted out-of-band, an
+        // unmounted volume). Without this, a LOCAL spawn falls back to the process
+        // cwd (e.g. /home/agent) and the agent silently runs in the WRONG place —
+        // the "working directory isn't a git repo" symptom. The error names the
+        // workspace, never its rootPath (that path must not leak past the engine).
+        //
+        // Scope — LOCAL hosts only (a `microvm` host runs the repo INSIDE the VM, so
+        // a local existsSync of rootPath is meaningless and would false-positive).
+        // KNOWN GAP (P20 #2): a `vps` host runs over ssh with rootPath as a REMOTE
+        // path — a vanished remote dir reproduces this exact bug, but a local
+        // existsSync can't see it; it needs a remote `test -d` via host.exec. VpsHost
+        // is not yet wired into the api (only LocalHost + microVM ship today), so
+        // this is latent — tracked for when vps is instantiated (BRO-1631).
+        // BRO-2235, second half: the host is only known once leased. Inside the try,
+        // so the finally releases the lease this refusal abandons.
+        const hostRefusal = homeRefusal(
+          workspace,
+          session.engine ?? this.defaultEngine,
+          lease.host.kind,
+        );
+        if (hostRefusal) throw new Error(hostRefusal);
+        if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
+          throw new Error(
+            `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
+          );
+        }
+        const result = await run({
           prompt: text,
           cwd: workspace.rootPath,
           // Turn bounds (BRO-2260). Two clocks: `idle` catches a wedged child,
@@ -903,89 +904,91 @@ export class Supervisor {
             onState?.(state, event);
           },
         });
+
+        if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
+        // Capture the cwd's branch (BRO-1664) — refreshes each turn (worktree branch or
+        // the root repo's current branch). Only when the run resolved one; a non-git cwd
+        // or a transient failure keeps the last-known value.
+        if (result.branch) session.branch = result.branch;
+        session.phase = result.state.phase;
+        await this.store.upsertSession(session);
+
+        const reply = result.state.lastText ?? "(no output)";
+        const usage = result.state.usage;
+        const costUsd = result.state.costUsd;
+        const durationMs = Date.now() - startedAt; // server-measured run time (BRO-1610)
+        // Persist the ordered timeline + thinking estimate (BRO-1607) alongside
+        // usage/cost (BRO-1597) + run time (BRO-1610) so a reloaded thread rebuilds
+        // tool blocks, text interleaving, the reasoning indicator, and "Xm Ys".
+        const parts = result.state.parts;
+        await this.store.addTurn({
+          sessionId: session.id,
+          role: "agent",
+          text: reply,
+          usage,
+          costUsd,
+          durationMs,
+          parts: parts && parts.length > 0 ? parts : undefined,
+          thinkingTokens: result.state.thinkingTokens,
+          reasoned: result.state.reasoned,
+          // Verbatim prose only when the deployment provides it (BRO-1608) — "" under
+          // subscription auth, so the reload falls back to the indicator note.
+          reasoning: result.state.reasoning?.trim() ? result.state.reasoning : undefined,
+        });
+
+        // Upgrade the instant heuristic title to an LLM-generated one (BRO-1665) — once,
+        // on the first turn, with a real reply to summarize. Fire-and-forget: it must
+        // never add latency to (or fail) the turn; the drawer poll surfaces the new
+        // title a moment later. A failure keeps the heuristic.
+        if (this.generateTitles && titledThisTurn && reply && result.state.lastText !== undefined) {
+          void this.generateTitleAsync(threadId, text, reply);
+        }
+
+        // Keep a per-session worktree across turns (resume continuity); only
+        // discard a one-shot per-run worktree.
+        if (result.worktreePath && !result.worktreePersistent) {
+          await removeWorktree(
+            workspace.rootPath,
+            result.worktreePath,
+            result.branch,
+            lease.host,
+          ).catch((e) => console.error(`[genesis] worktree cleanup failed: ${e}`));
+        }
+
+        const elapsed = (durationMs / 1000).toFixed(1);
+        const noOutput = result.state.lastText === undefined ? " NO-OUTPUT" : "";
+        console.log(
+          `[genesis] dispatch ✓ thread=${threadId} phase=${result.state.phase}${noOutput} ` +
+            `reply=${reply.length}c ${elapsed}s`,
+        );
+        return { session, reply, phase: result.state.phase, usage, costUsd, durationMs };
+      } catch (e) {
+        // A THROWN dispatch error (the availability guard, a host-lease failure, a
+        // runner that throws) bypasses the runner's own F20 reconcile, which would
+        // otherwise leave the session persisted as `phase: "running"` — a PHANTOM
+        // spinner in the UI that never resolves (BRO-1630 P20 #1). The in-process
+        // catch runs (unlike a process crash, which boot reconcile handles), so
+        // reset the truth to `blocked` here. Best-effort: a failing upsert must not
+        // mask the original error.
+        if (session.phase === "running") {
+          session.phase = "blocked";
+          await this.store.upsertSession(session).catch(() => {});
+        }
+        // Full server-side detail (BRO-1519) — previously the error was swallowed
+        // and only a generic "Something went wrong" reached the user.
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+        console.error(
+          `[genesis] dispatch ✖ thread=${threadId} session=${session.id} ${elapsed}s — ` +
+            `${e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e)}`,
+        );
+        throw e;
       } finally {
-        slot.release();
+        await lease.release?.().catch((e) => console.error(`[genesis] host release failed: ${e}`));
       }
-
-      if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
-      // Capture the cwd's branch (BRO-1664) — refreshes each turn (worktree branch or
-      // the root repo's current branch). Only when the run resolved one; a non-git cwd
-      // or a transient failure keeps the last-known value.
-      if (result.branch) session.branch = result.branch;
-      session.phase = result.state.phase;
-      await this.store.upsertSession(session);
-
-      const reply = result.state.lastText ?? "(no output)";
-      const usage = result.state.usage;
-      const costUsd = result.state.costUsd;
-      const durationMs = Date.now() - startedAt; // server-measured run time (BRO-1610)
-      // Persist the ordered timeline + thinking estimate (BRO-1607) alongside
-      // usage/cost (BRO-1597) + run time (BRO-1610) so a reloaded thread rebuilds
-      // tool blocks, text interleaving, the reasoning indicator, and "Xm Ys".
-      const parts = result.state.parts;
-      await this.store.addTurn({
-        sessionId: session.id,
-        role: "agent",
-        text: reply,
-        usage,
-        costUsd,
-        durationMs,
-        parts: parts && parts.length > 0 ? parts : undefined,
-        thinkingTokens: result.state.thinkingTokens,
-        reasoned: result.state.reasoned,
-        // Verbatim prose only when the deployment provides it (BRO-1608) — "" under
-        // subscription auth, so the reload falls back to the indicator note.
-        reasoning: result.state.reasoning?.trim() ? result.state.reasoning : undefined,
-      });
-
-      // Upgrade the instant heuristic title to an LLM-generated one (BRO-1665) — once,
-      // on the first turn, with a real reply to summarize. Fire-and-forget: it must
-      // never add latency to (or fail) the turn; the drawer poll surfaces the new
-      // title a moment later. A failure keeps the heuristic.
-      if (this.generateTitles && titledThisTurn && reply && result.state.lastText !== undefined) {
-        void this.generateTitleAsync(threadId, text, reply);
-      }
-
-      // Keep a per-session worktree across turns (resume continuity); only
-      // discard a one-shot per-run worktree.
-      if (result.worktreePath && !result.worktreePersistent) {
-        await removeWorktree(
-          workspace.rootPath,
-          result.worktreePath,
-          result.branch,
-          lease.host,
-        ).catch((e) => console.error(`[genesis] worktree cleanup failed: ${e}`));
-      }
-
-      const elapsed = (durationMs / 1000).toFixed(1);
-      const noOutput = result.state.lastText === undefined ? " NO-OUTPUT" : "";
-      console.log(
-        `[genesis] dispatch ✓ thread=${threadId} phase=${result.state.phase}${noOutput} ` +
-          `reply=${reply.length}c ${elapsed}s`,
-      );
-      return { session, reply, phase: result.state.phase, usage, costUsd, durationMs };
-    } catch (e) {
-      // A THROWN dispatch error (the availability guard, a host-lease failure, a
-      // runner that throws) bypasses the runner's own F20 reconcile, which would
-      // otherwise leave the session persisted as `phase: "running"` — a PHANTOM
-      // spinner in the UI that never resolves (BRO-1630 P20 #1). The in-process
-      // catch runs (unlike a process crash, which boot reconcile handles), so
-      // reset the truth to `blocked` here. Best-effort: a failing upsert must not
-      // mask the original error.
-      if (session.phase === "running") {
-        session.phase = "blocked";
-        await this.store.upsertSession(session).catch(() => {});
-      }
-      // Full server-side detail (BRO-1519) — previously the error was swallowed
-      // and only a generic "Something went wrong" reached the user.
-      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-      console.error(
-        `[genesis] dispatch ✖ thread=${threadId} session=${session.id} ${elapsed}s — ` +
-          `${e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e)}`,
-      );
-      throw e;
     } finally {
-      await lease.release?.().catch((e) => console.error(`[genesis] host release failed: ${e}`));
+      // Held from before the first side effect to after the last one, so the slot
+      // covers the whole turn rather than only the spawn.
+      slot.release();
     }
   }
 
@@ -1003,6 +1006,7 @@ export class Supervisor {
     const print = this.runners.print;
     if (!print) return;
     let lease: HostLease | undefined;
+    let titleSlot: TurnSlot | undefined;
     try {
       const session = await this.store.findSessionByThread(threadId);
       if (!session) return;
@@ -1023,6 +1027,16 @@ export class Supervisor {
       // that inlines untrusted tenant text, which makes it the worse one to leave
       // unisolated. Returning (not throwing) because a title is optional.
       if (homeRefusal(workspace, "print", lease.host.kind)) return;
+      // ADMIT the title spawn too (BRO-2260, Codex P20 blocker 2). It calls
+      // `runners.print` directly, so it bypassed the gate entirely: every completed
+      // turn could start another invisible `claude -p`, unbounded, on the same box
+      // the gate was added to protect. A title is optional, so a refusal SKIPS it
+      // rather than throwing — real turns must always outrank cosmetics.
+      try {
+        titleSlot = this.gate.acquire(workspace.id);
+      } catch {
+        return;
+      }
       // Bound the call (P20): a hung `claude -p` must not hold the lease / dangle a
       // promise forever. The late rejection is swallowed so it can't unhandled-reject.
       const runP = print({
@@ -1056,6 +1070,12 @@ export class Supervisor {
         // and skills, which is the exact hole --strict-mcp-config was added to
         // close, one layer down.
         home: workspace.home,
+        // A REAL bound, not just a race (BRO-2260). `withTimeout` below abandons
+        // the promise; it does not kill the child. A hung title spawn therefore
+        // outlived its own timeout forever, holding memory in the same cgroup as
+        // live turns. These bounds make the child actually die.
+        maxTurnMs: TITLE_TIMEOUT_MS,
+        idleTimeoutMs: TITLE_TIMEOUT_MS,
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
@@ -1071,6 +1091,7 @@ export class Supervisor {
         `[genesis] title generation failed (thread=${threadId}): ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
+      titleSlot?.release();
       await lease?.release?.().catch(() => {});
     }
   }

@@ -22,6 +22,14 @@
 // user resends. Same-thread turns are already serialized by the supervisor's
 // per-thread chain, so this gate only ever sees genuinely CONCURRENT work.
 
+/** Coerce a configured limit to a non-negative integer; anything else is 0
+ *  (= unbounded), because a gate that admits NOTHING is an outage and a typo must
+ *  not be able to cause one. */
+function normalizeLimit(v: number | undefined): number {
+  if (v === undefined || !Number.isFinite(v)) return 0;
+  return Math.max(0, Math.floor(v));
+}
+
 /** A held admission. Call `release()` exactly once, in a `finally`. */
 export interface TurnSlot {
   release(): void;
@@ -68,8 +76,13 @@ export class TurnGate {
     // (= unbounded) rather than admitting nothing, because a gate that silently
     // refuses EVERY turn is an outage, and an outage caused by a typo in an env
     // var is worse than the unbounded behaviour this replaces.
-    this.perWorkspace = Math.max(0, Math.floor(limits.perWorkspace ?? 0));
-    this.globalLimit = Math.max(0, Math.floor(limits.global ?? 0));
+    // `Number.isFinite` FIRST (Codex P20 minor): `Math.floor(NaN)` is NaN and
+    // `Math.floor(Infinity)` is Infinity, and both make every `>=` comparison
+    // false — i.e. silently unbounded, from a programmatic caller that thought it
+    // was setting a limit. Coerce them to 0 explicitly so "unbounded" is always a
+    // decision, never an accident.
+    this.perWorkspace = normalizeLimit(limits.perWorkspace);
+    this.globalLimit = normalizeLimit(limits.global);
   }
 
   /** Current in-flight count, box-wide. Exposed for logging and tests. */

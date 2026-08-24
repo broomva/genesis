@@ -93,6 +93,17 @@ describe("TurnGate — degenerate configuration", () => {
     }
   });
 
+  // Codex P20 minor: Math.floor(NaN) is NaN and Math.floor(Infinity) is Infinity;
+  // both make every comparison false, so a programmatic caller that thought it set
+  // a limit silently got none.
+  test("NaN and Infinity are treated as unbounded deliberately, not accidentally", () => {
+    for (const v of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const g = new TurnGate({ perWorkspace: v, global: v });
+      for (let i = 0; i < 10; i++) g.acquire("ws-1");
+      expect(g.active).toBe(10);
+    }
+  });
+
   test("a fractional limit floors rather than admitting forever", () => {
     const g = new TurnGate({ perWorkspace: 2.9 });
     g.acquire("ws-1");

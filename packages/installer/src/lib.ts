@@ -165,6 +165,33 @@ export function renderSystemdUnit(i: InstallInputs, p: Paths, which: "api" | "bo
   const start = which === "api" ? p.apiStart : p.botStart;
   const desc = which === "api" ? "Genesis api (Hono/Bun)" : "Genesis Telegram bot";
   const after = which === "bot" ? "\nAfter=genesis-api.service\nWants=genesis-api.service" : "";
+  // Tenant compute bound on the API unit ONLY (BRO-2275 / BRO-2260). genesis-api
+  // spawns every tenant `claude -p` turn as a child, so its cgroup IS the tenant
+  // compute surface.
+  //
+  // This lives HERE, not only in docs/deploy/systemd/*.template: the template is
+  // reference material, `genesis install` is what actually creates units, and a
+  // limit that exists only in the doc is a limit fresh deployments do not have.
+  // The running box was hardened by hand and every new install was silently
+  // weaker — configuration drift with no signal, which is the shape this ticket
+  // exists to remove.
+  //
+  // NOT on genesis-bot: the bot owns the webhook listener, and that listener
+  // answering inside the channel's delivery timeout is the property that must
+  // survive a tenant saturating the box. A runaway turn should degrade that
+  // tenant's turn, never the channel.
+  const limits =
+    which === "api"
+      ? `
+# Tenant compute bound (BRO-2275/BRO-2260). Sized for a 2 vCPU / 8 GB host; raise
+# together with GENESIS_MAX_TURNS, which is derived from MemoryMax (a measured turn
+# is 1.2-1.9 GB RSS, and the API process itself holds ~0.5 GB on top).
+MemoryHigh=4G
+MemoryMax=6G
+CPUQuota=150%
+TasksMax=512
+`
+      : "";
   return `[Unit]
 Description=${desc}
 After=network-online.target${after}
@@ -176,7 +203,7 @@ ExecStart=/bin/bash "${start}"
 WorkingDirectory=${i.repoDir}
 Restart=on-failure
 RestartSec=10
-
+${limits}
 [Install]
 WantedBy=default.target
 `;
