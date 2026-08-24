@@ -12,5 +12,37 @@ WorkingDirectory=__REPO__
 Restart=on-failure
 RestartSec=10
 
+# Tenant compute bound (BRO-2275, shipped to the box as a drop-in on 2026-08-24;
+# carried here by BRO-2260 so a fresh install is not silently weaker than the
+# running one). genesis-api spawns every tenant `claude -p` turn as a child, so
+# this cgroup IS the whole tenant compute surface.
+#
+# 2026-08-23: a tenant cloned a 197 MB repo and asked the agent to run it. CPU sat
+# at 100% and memory near 8 GB of 8.59 for two and a half hours. Nothing was
+# OOM-killed -- the box simply had no capacity left, the webhook listener could not
+# answer inside Kapso's timeout, and three messages were lost for good (Kapso
+# retries three times, then drops).
+#
+# DELIBERATELY NOT ON genesis-bot. The bot owns the webhook listener, and that
+# listener answering in time is the property that must survive a tenant saturating
+# the box. Bounding compute while leaving ingress unbounded is the design: a
+# runaway turn degrades that tenant's turn, never the channel.
+#
+# Sized for a 2 vCPU / 8 GB box. 150% of 200% leaves a core for the bot, the web
+# app, tailscaled and sshd.
+#
+# MEMORY ARITHMETIC (corrected by P20). MemoryMax charges the WHOLE cgroup, not
+# just the turns: the api's own bun process holds ~0.5 GB before any turn starts.
+# At the measured upper bound two turns are 3.8 GB + 0.5 GB = 4.3 GB, which does
+# NOT fit under a 4 GB ceiling -- the first version of this file said it did, and
+# would have traded an explainable refusal for an OOM kill mid-answer. 6 GB fits
+# two upper-bound turns with headroom and still leaves ~2 GB of the 8 GB box for
+# the bot, the web app, tailscaled and sshd. GENESIS_MAX_TURNS is derived from
+# this number -- change one, change the other.
+MemoryHigh=4G
+MemoryMax=6G
+CPUQuota=150%
+TasksMax=512
+
 [Install]
 WantedBy=default.target

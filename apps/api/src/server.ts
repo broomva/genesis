@@ -1,5 +1,6 @@
 import {
   type AgentEvent,
+  type ConcurrencyLimits,
   type EngineControl,
   type Store,
   Supervisor,
@@ -116,6 +117,12 @@ export interface BuildOpts {
   /** Run the agent directly in the workspace (no per-session worktree) —
    *  required for workspaces with nested git repos (BRO-1512). */
   noWorktree?: boolean;
+  /** Turn admission bounds (BRO-2260) — forwarded verbatim to the Supervisor. */
+  concurrency?: ConcurrencyLimits;
+  /** Kill a turn after this long with no stream output (BRO-2260). */
+  turnIdleTimeoutMs?: number;
+  /** Kill a turn after this long in total (BRO-2260). */
+  turnMaxMs?: number;
   /** Additional selectable workspaces beyond the default (BRO-1627) — the
    *  boot-discovered registry (GENESIS_PROJECTS_ROOT scan + GENESIS_WORKSPACES
    *  override). SEEDS the repository when empty; surfaced via GET /workspaces. */
@@ -149,6 +156,9 @@ export function build(opts: BuildOpts) {
     extraArgs: opts.extraArgs,
     remoteCwd: opts.remoteCwd,
     noWorktree: opts.noWorktree,
+    concurrency: opts.concurrency,
+    turnIdleTimeoutMs: opts.turnIdleTimeoutMs,
+    turnMaxMs: opts.turnMaxMs,
     trace: opts.trace,
     store: opts.store,
     run: opts.run,

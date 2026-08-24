@@ -33,8 +33,37 @@ export type DispatchFailure =
   | "backend-error"
   | "unauthorized"
   | "timeout"
+  | "capacity-own"
+  | "capacity-server"
+  | "turn-timeout"
   | "agent-error"
   | "unknown";
+
+/** Message prefixes the SUPERVISOR generates for a bounded turn (BRO-2260).
+ *
+ *  These travel the same stream as agent output, so they arrive wrapped as an
+ *  agent-reported error and were classified `agent-error` — the sender saw
+ *  "the agent failed" instead of "you already have a turn running", and the whole
+ *  point of refusing-with-a-reason was lost.
+ *
+ *  ANCHORED AT THE START, deliberately: an agent can print anything, including
+ *  these words, so a substring match anywhere would let tenant text pick its own
+ *  classification. Anchoring is not proof of provenance — a tenant CAN still make
+ *  the agent begin its error with one of these strings. That is accepted: both
+ *  branches map to a FIXED, benign, operator-authored message that discloses
+ *  nothing. The worst outcome is a misleading "try again shortly", not a leak.
+ *
+ *  CONTRACT: these must stay in sync with TurnRejectedError / TurnReapedError in
+ *  @genesis/core and @genesis/runner. `dispatch-failure.test.ts` pins the real
+ *  error objects against this list, so editing a message there fails the test
+ *  here rather than silently degrading to "agent-error" in production. */
+// SPLIT BY SCOPE (P20 round 2). One "capacity" class told every refused sender to
+// "wait for your previous reply" — but a GLOBAL refusal comes from another
+// workspace holding the last slot, so a first-ever message was told to wait for a
+// reply that does not exist and never will.
+const CAPACITY_OWN_PREFIXES = ["You already have"];
+const CAPACITY_SERVER_PREFIXES = ["The server is at capacity"];
+const TURN_TIMEOUT_PREFIXES = ["This turn was stopped:"];
 
 /** Codes that mean "nothing answered".
  *
@@ -117,7 +146,14 @@ function classify(e: unknown): DispatchFailure {
   // an exact copy of the transport messages below, or an object carrying a `code`.
   // Checking shapes first let the agent's payload decide its own classification,
   // which is attacker-influenced input steering an operator-facing diagnosis.
-  if (isAgentReported(e)) return "agent-error";
+  if (isAgentReported(e)) {
+    const text = e instanceof Error ? e.message : String(e ?? "");
+    const t = text.trimStart();
+    if (CAPACITY_OWN_PREFIXES.some((p) => t.startsWith(p))) return "capacity-own";
+    if (CAPACITY_SERVER_PREFIXES.some((p) => t.startsWith(p))) return "capacity-server";
+    if (TURN_TIMEOUT_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout";
+    return "agent-error";
+  }
 
   const codes = codesOf(e);
   const msg = e instanceof Error ? e.message : String(e ?? "");
@@ -163,6 +199,19 @@ export function dispatchFailureMessage(kind: DispatchFailure): string {
       return "⚠️ This channel is not authorised to reach the agent backend. That needs an operator to fix; retrying will not help.";
     case "backend-error":
       return "⚠️ The agent backend returned an error. This is an outage on my side — please try again shortly.";
+    case "capacity-own":
+      return "⏳ I'm still working on your previous message. Wait for that reply, then send this again.";
+    case "capacity-server":
+      // NOT "your previous message" — this refusal is caused by someone else's
+      // work, and may be the sender's FIRST message. No detail beyond "busy":
+      // who holds the slot is another tenant's business on a shared number.
+      return "⏳ I'm at capacity right now — this isn't about anything you sent. Try again in a minute.";
+    case "turn-timeout":
+      // Does NOT say "nothing was saved" (P20 round 2): that was false. The user
+      // turn is persisted, and anything the agent already wrote to files or ran as
+      // a command survives the kill. Promising a clean slate would make a resend
+      // duplicate real mutations.
+      return "⏳ That took too long, so I stopped it part-way — some of the work may already be done. Tell me to check before repeating it, and try a smaller step next time.";
     case "agent-error":
       return "⚠️ The agent failed while handling that. Please try again, and rephrase if it keeps happening.";
     default:

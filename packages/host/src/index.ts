@@ -29,12 +29,33 @@ export interface ExecResult {
   stderr: string;
 }
 
+/** How long after a handle settles its kills are still delivered (BRO-2260).
+ *
+ *  Long enough to cover the runner's own `finally` and its SIGKILL escalation
+ *  (5s), and far shorter than any realistic pid-recycling interval.
+ *
+ *  MEASURED on the production host rather than assumed: `pid_max` is 4,194,304 and
+ *  the box averages 1.69 forks/sec (126,611 forks over 74,928s of uptime). Wrapping
+ *  the pid space therefore takes on the order of 29 DAYS; this window is 30
+ *  SECONDS. Inside it roughly 51 pids are issued out of four million, so a signal
+ *  delivered here cannot reach a recycled pid. If this ever runs somewhere with a
+ *  small `pid_max` and a very high fork rate, shorten it — the number is a
+ *  consequence of those two facts, not a preference. */
+const SETTLE_GRACE_MS = 30_000;
+
 export interface SpawnHandle {
   /** Line-oriented stdout stream (NDJSON-ready). */
   stdout: AsyncIterable<string>;
   /** Resolves with the process exit code. */
   exitCode: Promise<number>;
-  kill(): void;
+  /** Terminate the child. Defaults to SIGTERM.
+   *
+   *  A caller that must GUARANTEE termination has to escalate: a child which
+   *  traps SIGTERM keeps its stdout open, and a reader sitting in
+   *  `for await (… of handle.stdout)` then waits forever. Measured on this host:
+   *  `bash -c "trap '' TERM; …"` survived `kill()` and the stream never ended.
+   *  See the escalation in the runner's watchdog (BRO-2260). */
+  kill(signal?: NodeJS.Signals): void;
 }
 
 export interface ExecutionHost {
@@ -104,6 +125,16 @@ export class LocalHost implements ExecutionHost {
       stdin: opts?.input !== undefined ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "ignore",
+      // DETACHED so the child leads its own process GROUP (BRO-2260). Killing the
+      // direct pid is not enough: an agent turn is `claude` -> `bash` -> `git
+      // clone`, and MEASURED here, SIGKILL on the parent left the grandchild alive
+      // AND the stdout stream open, so the reader waited forever. With its own
+      // group, `kill(-pgid)` reaps the whole tree in one call.
+      //
+      // Verified on this platform: `detached: true` yields pgid === child pid and
+      // a pgid distinct from ours, which is what makes the negative-pid kill below
+      // safe — it can never address the group this process lives in.
+      detached: true,
     });
     if (opts?.input !== undefined && proc.stdin) {
       // Write the whole payload then close stdin so the child sees EOF and starts.
@@ -119,7 +150,89 @@ export class LocalHost implements ExecutionHost {
         // child closed stdin before we finished writing — proceed; exitCode reports it.
       }
     }
-    return { stdout: toLines(proc.stdout), exitCode: proc.exited, kill: () => proc.kill() };
+    // SETTLEMENT IS GROUP-WIDE, NOT CHILD-WIDE (P20 round 3).
+    //
+    // The first version of this guard latched on `proc.exited` alone, to avoid
+    // signalling a recycled pid. That was wrong in a way the descendant test did
+    // not cover: on SIGTERM a COMPLIANT leader exits immediately while a
+    // TERM-ignoring descendant keeps running and keeps stdout open. `exited`
+    // resolves, the latch suppresses the escalation's SIGKILL, and the turn — plus
+    // the admission slot it holds — hangs forever. The guard against one hazard
+    // reintroduced the exact hazard it was added beside.
+    //
+    // CORRECTED (P20 round 5): child-exit plus stdout-closure does NOT prove the
+    // group is gone — a descendant that redirects its output closes the stream and
+    // keeps running, which is the regression in kill-escalation.test.ts. These two
+    // conditions only mark when the handle STOPPED BEING USED; the kill guard below
+    // is a time window from that moment, not a claim about the group.
+    let exited = false;
+    let streamClosed = false;
+    let settledAt: number | undefined;
+    const markSettled = () => {
+      if (exited && streamClosed && settledAt === undefined) settledAt = Date.now();
+    };
+    void proc.exited.then(
+      () => {
+        exited = true;
+        markSettled();
+      },
+      () => {
+        exited = true;
+        markSettled();
+      },
+    );
+    const lines = toLines(proc.stdout);
+    const trackedStdout = (async function* () {
+      try {
+        yield* lines;
+      } finally {
+        streamClosed = true;
+        markSettled();
+      }
+    })();
+    return {
+      stdout: trackedStdout,
+      exitCode: proc.exited,
+      kill: (signal?: NodeJS.Signals) => {
+        // SUPPRESS ONLY LONG AFTER SETTLEMENT (P20 round 4).
+        //
+        // Round 3 replaced an exit-only latch with `exited && streamClosed`. Round
+        // 4 found the hole that leaves: a descendant which does `exec >/dev/null`
+        // CLOSES stdout, so the stream ends, the handle reads as settled, and the
+        // caller's final kill is suppressed while that process keeps running.
+        // Reproduced independently — the descendant survived. That is the incident's
+        // own shape (a build or clone that redirects its output), so suppressing
+        // there defeats the purpose of the bound.
+        //
+        // The hazard the latch exists for is a signal sent LONG after the handle is
+        // finished, once the OS may have reissued the pid. A kill issued moments
+        // after settlement — the runner's `finally`, or its escalation timer — is
+        // not that. So the guard is a time window, not a state flag: within
+        // SETTLE_GRACE_MS every kill still goes through, and only a genuinely stale
+        // one is dropped. A pid cannot realistically be recycled inside that window.
+        if (settledAt !== undefined && Date.now() - settledAt > SETTLE_GRACE_MS) return;
+        const sig = signal ?? "SIGTERM";
+        // Group first, then the bare pid as a fallback. If the group kill throws
+        // (ESRCH — the leader already reaped, or `detached` silently stopped
+        // working) we still terminate the direct child, so this is never worse
+        // than the old behaviour. `pid > 1` guards the "kill everything" pid 0/-1
+        // footgun, which would take the whole server down.
+        const pid = proc.pid;
+        if (typeof pid === "number" && pid > 1) {
+          try {
+            process.kill(-pid, sig);
+            return;
+          } catch {
+            // fall through to the single-process kill
+          }
+        }
+        try {
+          proc.kill(sig);
+        } catch {
+          // already gone — kill() must never throw into a caller's `finally`
+        }
+      },
+    };
   }
 
   async exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult> {

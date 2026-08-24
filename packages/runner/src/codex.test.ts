@@ -566,3 +566,133 @@ describe("runCodex", () => {
     expect(r.state.error).toContain("without a result");
   });
 });
+
+// ── BRO-2260: the codex runner is bounded too (P20 round 2 "unproven claim") ──
+//
+// Codex round 2 flagged blocker 3's fix as UNPROVEN because the diff wired the
+// watchdog into codex.ts without a regression test. This is that test: a host
+// whose stream never ends and never exits until it is killed — the wedged shape.
+describe("runCodex turn bounds (BRO-2260)", () => {
+  /** A host whose child streams forever and only ends when killed. */
+  class WedgedHost implements ExecutionHost {
+    readonly kind = "local" as const;
+    readonly credentialTier = "subscription" as const;
+    killed: NodeJS.Signals[] = [];
+    async exec(cmd: string[]): Promise<ExecResult> {
+      if (cmd.includes("--show-toplevel")) return { code: 0, stdout: "/repo\n", stderr: "" };
+      if (cmd[1] === "rev-parse") return { code: 0, stdout: "true\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    async readFile() {
+      return "";
+    }
+    async writeFile() {}
+    spawnStream(_cmd: string[], _opts?: ExecOpts): SpawnHandle {
+      let stop!: () => void;
+      const stopped = new Promise<void>((r) => {
+        stop = r;
+      });
+      const self = this;
+      return {
+        stdout: (async function* () {
+          // Emit one real line so the session id is seeded, then go quiet.
+          yield '{"type":"thread.started","thread_id":"t-wedged"}';
+          await stopped;
+        })(),
+        exitCode: stopped.then(() => 137),
+        kill(signal?: NodeJS.Signals) {
+          self.killed.push(signal ?? "SIGTERM");
+          stop();
+        },
+      };
+    }
+  }
+
+  test("a wedged codex turn is reaped by the idle clock, not left hanging", async () => {
+    const host = new WedgedHost();
+    await expect(
+      runCodex({
+        prompt: "hi",
+        cwd: "/tmp/does-not-matter",
+        host,
+        worktree: false,
+        idleTimeoutMs: 60,
+      }),
+    ).rejects.toThrow(/stopped/i);
+    expect(host.killed.length).toBeGreaterThan(0);
+  });
+
+  // P20 round 5 was RIGHT and I had claimed otherwise: the kill-escalation
+  // regression schedules SIGKILL by hand against LocalHost, so it exercises the
+  // HOST's latch and not the RUNNER's escalate-on-reap branch. Deleting that branch
+  // left it green. This test covers the branch itself — a reaped turn must end with
+  // a forced SIGKILL, not merely the polite signal, because a descendant that
+  // closed stdout would otherwise survive.
+  test("the reap path FORCES a SIGKILL, not just the polite signal", async () => {
+    const host = new WedgedHost();
+    await expect(
+      runCodex({
+        prompt: "hi",
+        cwd: "/tmp/does-not-matter",
+        host,
+        worktree: false,
+        maxTurnMs: 60,
+        killGraceMs: 5_000, // long enough that the timer canNOT be what delivers it
+      }),
+    ).rejects.toThrow(/stopped/i);
+    expect(host.killed).toContain("SIGKILL");
+  });
+
+  // NEGATIVE CONTROL: a turn that ends normally must NOT be force-killed, or the
+  // assertion above would pass for a runner that SIGKILLs unconditionally.
+  test("a normal codex turn is not force-killed", async () => {
+    const host = new FakeLocalHost(FIXTURE_ANSWER.split("\n"));
+    const killed: NodeJS.Signals[] = [];
+    const inner = host.spawnStream.bind(host);
+    host.spawnStream = (cmd: string[], opts?: ExecOpts) => {
+      const h = inner(cmd, opts);
+      return { ...h, kill: (s?: NodeJS.Signals) => killed.push(s ?? "SIGTERM") };
+    };
+    await runCodex({ prompt: "hi", cwd: "/repo", host, worktree: false, maxTurnMs: 60_000 });
+    expect(killed).not.toContain("SIGKILL");
+  });
+
+  test("the total clock reaps a codex turn that is never idle", async () => {
+    const host = new WedgedHost();
+    await expect(
+      runCodex({
+        prompt: "hi",
+        cwd: "/tmp/does-not-matter",
+        host,
+        worktree: false,
+        maxTurnMs: 60,
+      }),
+    ).rejects.toThrow(/stopped/i);
+    expect(host.killed.length).toBeGreaterThan(0);
+  });
+
+  // NEGATIVE CONTROL: unbounded must stay unbounded, or the two tests above would
+  // pass for a runner that killed every turn regardless of configuration.
+  test("with no bounds configured the codex runner does not reap", async () => {
+    // Capture the handle the RUN actually owns (P20 round 3 minor). The first
+    // version released a freshly-created fake handle instead, which left the real
+    // run pending forever — a leak inside the test that proves nothing about
+    // cleanup and would eventually surface as a hung suite.
+    const host = new WedgedHost();
+    let owned: SpawnHandle | undefined;
+    const spawn = host.spawnStream.bind(host);
+    host.spawnStream = (cmd: string[], opts?: ExecOpts) => {
+      owned = spawn(cmd, opts);
+      return owned;
+    };
+    const run = runCodex({ prompt: "hi", cwd: "/tmp/does-not-matter", host, worktree: false });
+    const settled = await Promise.race([
+      run.then(() => "settled").catch(() => "settled"),
+      new Promise((r) => setTimeout(() => r("still-running"), 300)),
+    ]);
+    expect(settled).toBe("still-running");
+    expect(owned).toBeDefined();
+    owned?.kill(); // release the run this test actually started
+    await run.catch(() => {});
+  });
+});
