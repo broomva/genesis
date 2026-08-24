@@ -55,15 +55,24 @@ describe("tenantEnv", () => {
     expect(tenantEnv({ home: "/t/h" }, { A: "1" })).toEqual({ A: "1", HOME: "/t/h" });
   });
 
-  // A relative HOME resolves against the CHILD'S CWD — the tenant's own workspace —
-  // so `.claude` would land somewhere the tenant can write, handing it its own
-  // settings file. That is the opposite of the isolation this exists for.
+  // THE NAME OF THIS TEST USED TO CONTRADICT ITSELF: "is REFUSED, falling back to
+  // base" — and what it asserted was the fallback. A relative HOME resolves against
+  // the CHILD'S CWD, the tenant's own writable workspace, so `.claude` would land
+  // where the tenant can rewrite it. Falling back instead handed the child the
+  // OPERATOR's HOME while the workspace declared isolation. Neither is acceptable,
+  // and calling one of them a refusal is how it survived review.
   test.each([["home"], ["./home"], ["../escape"], ["t/home"]])(
-    "relative home %p is REFUSED, falling back to base",
+    "relative home %p throws — it is neither applied nor silently dropped",
     (h) => {
-      expect(tenantEnv({ home: h }, { A: "1" })).toEqual({ A: "1" });
+      expect(() => tenantEnv({ home: h }, { A: "1" })).toThrow(/non-absolute/);
     },
   );
+
+  // The boundary between the two rules, pinned: absence is safe, malformation is not.
+  test("a blank home is still SAFE while a malformed one is not", () => {
+    expect(tenantEnv({ home: "   " }, { A: "1" })).toEqual({ A: "1" });
+    expect(() => tenantEnv({ home: " ./x " }, { A: "1" })).toThrow(/non-absolute/);
+  });
 
   test("HOME wins over a base that already set it", () => {
     expect(tenantEnv({ home: "/t/h" }, { HOME: "/home/agent" })).toEqual({ HOME: "/t/h" });
@@ -106,10 +115,20 @@ describe("per-tenant HOME reaches the spawn (BRO-2235)", () => {
   // here, resolving it would put HOME inside the child's cwd — the tenant's own
   // writable directory — handing the tenant its own .claude/settings.json. Dropping
   // it is the lesser of two bad outcomes, not a good one.
-  test("a relative home is dropped, not resolved against the child cwd", async () => {
-    const opts = await run("relative/home");
-    expect(opts?.env?.HOME).toBe(scrubAgentEnv().HOME);
-    expect(opts?.env?.HOME).not.toContain("relative/home");
+  // NOW GENUINELY A BACKSTOP. This previously asserted that a relative home fell
+  // back to the operator's HOME and called that defense in depth. Cross-model review
+  // was right that it was not: the supervisor refused such a turn, `tenantEnv`
+  // silently allowed it, and a caller reaching `runAgent` directly got the silent
+  // fallback. Two layers, two rules, on the input that caused the original blocker.
+  //
+  // One rule now: only the ABSENCE of a home is safe; an unsatisfiable request is
+  // refused at every layer that can see it.
+  test("a relative home REFUSES at the runner too, not just the supervisor", async () => {
+    await expect(run("relative/home")).rejects.toThrow(/non-absolute/);
+  });
+
+  test("the refusal names the offending value so an operator can fix it", async () => {
+    await expect(run("./nope")).rejects.toThrow(/\.\/nope/);
   });
 
   test("HOME is layered ON the scrubbed env — PATH survives, secrets stay scrubbed", async () => {
