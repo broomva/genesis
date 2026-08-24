@@ -392,6 +392,9 @@ const { app, websocket } = build({
   concurrency: {
     perWorkspace: intFromEnv("GENESIS_MAX_TURNS_PER_WORKSPACE", 1),
     global: intFromEnv("GENESIS_MAX_TURNS", 2),
+    // Cosmetic spawns get their own small ceiling so they are bounded without
+    // ever queueing behind — or in front of — real work.
+    titles: intFromEnv("GENESIS_MAX_TITLE_SPAWNS", 1),
   },
   turnIdleTimeoutMs: intFromEnv("GENESIS_TURN_IDLE_TIMEOUT_MS", 15 * 60_000),
   turnMaxMs: intFromEnv("GENESIS_TURN_MAX_MS", 30 * 60_000),

@@ -1027,16 +1027,20 @@ export class Supervisor {
       // that inlines untrusted tenant text, which makes it the worse one to leave
       // unisolated. Returning (not throwing) because a title is optional.
       if (homeRefusal(workspace, "print", lease.host.kind)) return;
-      // ADMIT the title spawn too (BRO-2260, Codex P20 blocker 2). It calls
-      // `runners.print` directly, so it bypassed the gate entirely: every completed
-      // turn could start another invisible `claude -p`, unbounded, on the same box
-      // the gate was added to protect. A title is optional, so a refusal SKIPS it
-      // rather than throwing — real turns must always outrank cosmetics.
-      try {
-        titleSlot = this.gate.acquire(workspace.id);
-      } catch {
-        return;
-      }
+      // Bound the title spawn on its OWN budget (BRO-2260; blocker 2 found by P20
+      // round 1, then corrected by round 2).
+      //
+      // Round 1: titling called `runners.print` directly and so bypassed the gate
+      // entirely — every completed turn could start another invisible `claude -p`.
+      // Round 2: gating it on the TURN budget was worse than the hole it closed.
+      // Titling starts the instant a turn finishes, so at perWorkspace=1 it
+      // deterministically took the slot the turn had just released and the user's
+      // very next message was refused — by cosmetics.
+      //
+      // A separate ceiling gives both properties: decoration is bounded, and it can
+      // never refuse real work. `undefined` means "no budget" → skip silently.
+      titleSlot = this.gate.acquireTitle();
+      if (!titleSlot) return;
       // Bound the call (P20): a hung `claude -p` must not hold the lease / dangle a
       // promise forever. The late rejection is swallowed so it can't unhandled-reject.
       const runP = print({
@@ -1077,7 +1081,13 @@ export class Supervisor {
         maxTurnMs: TITLE_TIMEOUT_MS,
         idleTimeoutMs: TITLE_TIMEOUT_MS,
       });
-      runP.catch(() => {}); // a rejection after the timeout must not escape
+      // Release on the CHILD's settlement, not the race's (P20 round 2). Losing the
+      // race below returns while the child is still being killed — the escalation
+      // has a grace period — so releasing in the outer `finally` would hand the
+      // budget back while the process it accounts for is still alive.
+      const held = titleSlot;
+      titleSlot = undefined;
+      runP.catch(() => {}).finally(() => held.release());
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
       const title = sanitizeTitle(result.state.lastText);
       if (!title) return;

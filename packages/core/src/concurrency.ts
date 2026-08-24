@@ -54,6 +54,17 @@ export interface ConcurrencyLimits {
   readonly perWorkspace?: number;
   /** Max simultaneous turns across every workspace. Omit/0 → unbounded. */
   readonly global?: number;
+  /** Max simultaneous COSMETIC spawns (title generation) box-wide. Omit/0 →
+   *  unbounded.
+   *
+   *  A SEPARATE budget, not a share of the turn budget (P20 round 2). Titling was
+   *  first gated on the same counter as real turns, which produced a new and
+   *  worse failure than the one it fixed: titling starts the instant a turn
+   *  finishes, so at perWorkspace=1 it deterministically held the slot and the
+   *  user's very next message was refused — by cosmetics. Real work must never
+   *  queue behind decoration, and decoration must still be bounded, so it gets
+   *  its own small ceiling. */
+  readonly titles?: number;
 }
 
 /**
@@ -68,8 +79,10 @@ export interface ConcurrencyLimits {
 export class TurnGate {
   private readonly perWorkspace: number;
   private readonly globalLimit: number;
+  private readonly titleLimit: number;
   private readonly byWorkspace = new Map<string, number>();
   private inFlight = 0;
+  private titlesInFlight = 0;
 
   constructor(limits: ConcurrencyLimits = {}) {
     // Negative or fractional configuration is a mistake, not a limit. Floor at 0
@@ -83,6 +96,7 @@ export class TurnGate {
     // decision, never an accident.
     this.perWorkspace = normalizeLimit(limits.perWorkspace);
     this.globalLimit = normalizeLimit(limits.global);
+    this.titleLimit = normalizeLimit(limits.titles);
   }
 
   /** Current in-flight count, box-wide. Exposed for logging and tests. */
@@ -93,6 +107,32 @@ export class TurnGate {
   /** Current in-flight count for one workspace. */
   activeFor(workspaceId: string): number {
     return this.byWorkspace.get(workspaceId) ?? 0;
+  }
+
+  /** In-flight cosmetic spawns. */
+  get activeTitles(): number {
+    return this.titlesInFlight;
+  }
+
+  /**
+   * Admit a COSMETIC spawn, or return undefined.
+   *
+   * Returns rather than throws: a title is optional, and the caller's correct
+   * response to "no" is to skip it silently. It draws on its own budget and
+   * never touches the turn counters, so titling can never refuse a real turn —
+   * which is precisely the regression that came from sharing one counter.
+   */
+  acquireTitle(): TurnSlot | undefined {
+    if (this.titleLimit > 0 && this.titlesInFlight >= this.titleLimit) return undefined;
+    this.titlesInFlight += 1;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.titlesInFlight = Math.max(0, this.titlesInFlight - 1);
+      },
+    };
   }
 
   /**

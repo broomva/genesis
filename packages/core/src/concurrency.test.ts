@@ -144,3 +144,49 @@ describe("TurnGate — accounting integrity", () => {
     for (let i = 0; i < 200; i++) expect(g.activeFor(`ws-${i}`)).toBe(0);
   });
 });
+
+describe("TurnGate — cosmetic (title) budget, P20 round 2", () => {
+  // THE REGRESSION this budget exists for: titling starts the instant a turn
+  // finishes, so sharing the turn counter meant cosmetics deterministically took
+  // the slot and refused the user's very next message.
+  test("a title spawn never consumes a turn slot", () => {
+    const g = new TurnGate({ perWorkspace: 1, global: 1, titles: 1 });
+    const title = g.acquireTitle();
+    expect(title).toBeDefined();
+    // A real turn must still be admitted while a title is in flight.
+    expect(() => g.acquire("ws-1")).not.toThrow();
+    expect(g.active).toBe(1);
+    expect(g.activeTitles).toBe(1);
+  });
+
+  test("a turn in flight never blocks a title, and vice versa", () => {
+    const g = new TurnGate({ perWorkspace: 1, titles: 1 });
+    g.acquire("ws-1");
+    expect(g.acquireTitle()).toBeDefined();
+  });
+
+  // ...but decoration is still BOUNDED — that was the original blocker.
+  test("titles are capped, and refusal is a return not a throw", () => {
+    const g = new TurnGate({ titles: 1 });
+    const a = g.acquireTitle();
+    expect(a).toBeDefined();
+    expect(g.acquireTitle()).toBeUndefined();
+    a?.release();
+    expect(g.acquireTitle()).toBeDefined();
+  });
+
+  test("title release is idempotent", () => {
+    const g = new TurnGate({ titles: 1 });
+    const a = g.acquireTitle();
+    a?.release();
+    a?.release();
+    expect(g.activeTitles).toBe(0);
+    expect(g.acquireTitle()).toBeDefined();
+  });
+
+  test("no titles limit means unbounded, matching the other knobs", () => {
+    const g = new TurnGate({});
+    for (let i = 0; i < 25; i++) expect(g.acquireTitle()).toBeDefined();
+    expect(g.activeTitles).toBe(25);
+  });
+});
