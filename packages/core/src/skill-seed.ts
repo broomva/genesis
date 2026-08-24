@@ -19,6 +19,7 @@ import {
   chmodSync,
   chownSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -99,6 +100,17 @@ export function seedSkills(rootPath: string, opts: SkillSeedOptions): SeedResult
             // Not ours to chmod — the write below throws and the caller sees it.
           }
         }
+      }
+      // Never write through a symlink at the destination. NECESSARY BUT NOT
+      // SUFFICIENT, and saying so matters: readFileSync(dst) and chmodSync(dst)
+      // above already follow a link, and an ANCESTOR directory can be
+      // tenant-controlled because the provisioner creates .claude paths 1775.
+      // A caller passing overwrite on a tenant-adjacent tree is therefore still
+      // unsafe, which is why the provisioner does not. Closing it fully needs
+      // openat/O_NOFOLLOW or write-to-temp-then-rename.
+      if (lstatSync(dst, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        skipped.push(dst);
+        continue;
       }
       writeFileSync(dst, body);
       if (opts.ownership) {

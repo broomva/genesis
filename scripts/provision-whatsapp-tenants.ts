@@ -350,6 +350,22 @@ for (const t of tenants) {
   // permission escalation because `allowed-tools:` frontmatter is a real permission
   // layer. Seeding root-owned 0444 gives the tenant the skill and nobody the layer.
   // Optional: unset GENESIS_TENANT_SKILLS_DIR simply seeds none.
+  // NO overwrite. It was added here to solve a real problem — a corrected skill
+  // never reaches an ALREADY-provisioned tenant, because seedSkills skips a file
+  // whose content differs, which is exactly the operator-edit case — and then
+  // two review rounds found it opens a root-write escape a destination lstat
+  // cannot close:
+  //
+  //   - readFileSync(dst) and chmodSync(dst, 0o644) both run BEFORE any symlink
+  //     check, so root already follows the link and chmods its target;
+  //   - the skill directory sits under a 1775 (group-writable) .claude, so an
+  //     ANCESTOR can be tenant-controlled and checking the final path cannot
+  //     see it.
+  //
+  // Closing that properly needs openat/O_NOFOLLOW or write-to-temp-then-rename
+  // inside the privileged seeder — not something to bolt onto a docs change.
+  // Reverted to the safe behaviour; the propagation problem is real and tracked
+  // on BRO-2309 rather than solved unsafely here.
   const skills = TENANT_SKILLS_DIR
     ? seedSkills(t.dir, {
         sourceDir: TENANT_SKILLS_DIR,
