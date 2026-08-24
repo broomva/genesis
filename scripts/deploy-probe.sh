@@ -40,6 +40,9 @@ API_PORT=${API_PORT:-8787}
 BOT_PORT=${BOT_PORT:-8788}
 WEBHOOK_PATH=${WEBHOOK_PATH:-/webhooks/kapso}
 
+TMPD=$(mktemp -d /tmp/deploy-probe.XXXXXX) || { echo "✗ could not create a temp dir"; exit 1; }
+trap 'rm -rf "$TMPD"' EXIT
+
 FAILED=0
 ok ()  { printf '  ✓ %s\n' "$1"; }
 bad () { printf '  ✗ %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$3"; FAILED=$((FAILED+1)); }
@@ -55,28 +58,31 @@ eq ()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 # reason that has nothing to do with the deployment. Unset it before trusting a
 # red result.
 #
-# Emits "<status>|<body>" so the comparison can include the bytes, not just the
-# code. Two 401s with different bodies are not the same answer.
-fetch_local ()  { curl -s -w '|%{http_code}' --noproxy '*' --max-time 8 \
+# The body goes to a FILE and is compared by hash, never through a shell
+# variable. `$(...)` strips trailing newlines and cannot carry NUL, and ${#var}
+# counts characters rather than bytes — so a shell-string comparison would report
+# "identical" for bodies that differ, which is exactly the false green this probe
+# exists to avoid. cmp reads the files themselves.
+# Prints the status code; writes the body to $2.
+fetch_local ()  { curl -s -o "$2" -w '%{http_code}' --noproxy '*' --max-time 8 \
                     -X POST -H 'content-type: application/json' -d '{}' "$1"; }
-fetch_public () { curl -s -w '|%{http_code}' --max-time 15 \
+fetch_public () { curl -s -o "$2" -w '%{http_code}' --max-time 15 \
                     -X POST -H 'content-type: application/json' -d '{}' "$1"; }
-code_of () { printf '%s' "${1##*|}"; }
-body_of () { printf '%s' "${1%|*}"; }
+size_of () { wc -c < "$1" | tr -d ' '; }
 
 # compare <label> <public-url> <local-url> <expected-code>
 compare () {
   local label=$1 pub=$2 loc=$3 want=$4
-  local praw lraw pc lc pb lb
-  praw=$(fetch_public "$pub"); lraw=$(fetch_local "$loc")
-  pc=$(code_of "$praw"); lc=$(code_of "$lraw")
-  pb=$(body_of "$praw"); lb=$(body_of "$lraw")
+  local pc lc pf lf
+  pf="$TMPD/public.body"; lf="$TMPD/local.body"
+  pc=$(fetch_public "$pub" "$pf"); lc=$(fetch_local "$loc" "$lf")
 
   # Checked FIRST, because 000 == 000 is agreement and would otherwise be
   # reported as a match. Nothing answered; there is no comparison to make.
   if [ "$pc" = "000" ] && [ "$lc" = "000" ]; then
     bad "$label — neither leg answered" "any response" "public=000 local=000"
-    printf '     → the deployment is not answering. This says nothing about the ingress.\n'
+    printf '     → neither request received an HTTP status. Says nothing about which\n'
+    printf '       component is at fault, or whether one is reachable by another route.\n'
     return
   fi
 
@@ -85,11 +91,12 @@ compare () {
     printf '     → a symptom, not a diagnosis. Candidates: the funnel, an http_proxy on the\n'
     printf '       public leg, DNS, TLS, Host-dependent routing, or a change between the two\n'
     printf '       sequential requests. This probe cannot distinguish them.\n'
-  elif [ "$pb" != "$lb" ]; then
-    bad "$label — same status ($pc) but different bodies" "identical bytes" "public=${#pb}B local=${#lb}B"
+  elif ! cmp -s "$pf" "$lf"; then
+    bad "$label — same status ($pc) but different bodies" "identical bytes" \
+        "public=$(size_of "$pf")B local=$(size_of "$lf")B"
     printf '     → an intermediary answering in the backend'"'"'s place would look exactly like this.\n'
   else
-    ok "$label — both legs returned $pc and identical bytes (${#pb}B)"
+    ok "$label — both legs returned $pc, bodies byte-identical ($(size_of "$pf")B)"
   fi
 
   # Independent of the comparison above: agreement is not correctness. An
@@ -99,8 +106,15 @@ compare () {
 }
 
 echo "▶ probing $HOST"
-[ -n "${http_proxy:-${HTTP_PROXY:-}}" ] && \
-  printf '  ! http_proxy is set — the public leg honours it and the local leg does not.\n    A red result may be the proxy. Unset it and re-run.\n'
+# The public leg is HTTPS, so https_proxy/HTTPS_PROXY govern it — the first
+# version watched only http_proxy and would have stayed silent in the case it
+# was written for. ALL_PROXY covers both.
+for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
+  if [ -n "${!v:-}" ]; then
+    printf '  ! %s is set — the public leg honours it, the local leg bypasses it.\n    A red result may be the proxy. Unset it and re-run.\n' "$v"
+    break
+  fi
+done
 
 compare "whatsapp webhook" \
   "https://$HOST:$WEBHOOK_PORT$WEBHOOK_PATH" \
@@ -120,12 +134,17 @@ eq "genesis-api /health is 200" "200" \
 # would have passed even if bad() were broken.
 if [ "${NEGATIVE_CONTROL:-0}" = "1" ]; then
   echo "▶ NEGATIVE CONTROL"
+  # BOTH legs point at loopback, so this control probes NOTHING real. That is
+  # deliberate: the first version aimed its public leg at the live funnel and
+  # then reset FAILED wholesale, which would have erased a genuine failure that
+  # happened to occur during the control's own request. A control that can hide
+  # a real fault is worse than no control.
   before=$FAILED
   compare "negative control" \
-    "https://$HOST:$VOICE_PORT/voice/request" \
+    "http://127.0.0.1:$API_PORT/voice/request" \
     "http://127.0.0.1:1/voice/request" 401
   if [ "$FAILED" -gt "$before" ]; then
-    printf '  ✓ the harness reported red (FAILED %d → %d); subtracting the injected failures\n' "$before" "$FAILED"
+    printf '  ✓ the harness reported red (FAILED %d → %d); discarding the injected failures\n' "$before" "$FAILED"
     FAILED=$before
   else
     printf '  ✗ THE HARNESS CANNOT REPORT RED — a green run from it means nothing\n'
