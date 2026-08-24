@@ -36,7 +36,7 @@ own syntax. Verified conversions:
 | ```` ```lang ```` fence | fence kept, **the language identifier is dropped** |
 | `# Heading` (any level) | a bold line — there are no headings |
 | `- item` | `• item` |
-| `1. item` | numbering kept, including a list that starts at 5 |
+| `1. item` | numbered, from the list's start value — but **renumbered consecutively**, so `1. 3.` arrives as `1. 2.` |
 | `- [x] done` | `• [x] done` — the checkbox stays literal text |
 | `> quote` | unchanged, WhatsApp uses the same syntax |
 | `[label](url)` | `label (url)` |
@@ -44,7 +44,11 @@ own syntax. Verified conversions:
 | `![alt](url)` | **the bare url — alt text is lost** |
 | a GFM table | see below |
 
-Anything not recognised passes through **unchanged** rather than being mangled.
+Most constructs not listed above are rendered plainly rather than mangled, but
+**not everything survives**: a reference-style link loses its destination, and
+backslash escapes are consumed by the parser, so `\*not emphasis\*` reaches the
+person as `*not emphasis*` — which WhatsApp then renders as bold. Prefer inline
+links and avoid relying on escapes.
 
 ### Tables specifically
 
@@ -57,7 +61,7 @@ A table becomes one block per row, not columns:
 - a row with more cells than headers labels the extras by position
 - a header-only table (no body rows) becomes a plain bullet list of the headers
 
-This is why a wide table reads poorly here: every column becomes another labelled
+A wide table therefore expands vertically: every column becomes another labelled
 line under every row.
 
 ## Long replies are split
@@ -67,7 +71,7 @@ which a message is rejected outright. The rendered path reserves ten characters
 for fence balancing, so the effective split is ~990.
 
 A longer reply is therefore delivered as **several separate messages**, in order,
-each one a separate notification. If a fenced code block spans a split, the fence
+each a separate message. If a fenced code block spans a split, the fence
 is closed and reopened so both halves stay monospace.
 
 ## You can only reply, and only for 24 hours

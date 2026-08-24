@@ -9,52 +9,67 @@ import { markdownToWhatsApp } from "./whatsapp-format";
 const SKILL = resolve(import.meta.dir, "../../../tenant-skills/whatsapp-channel/SKILL.md");
 const doc = readFileSync(SKILL, "utf8");
 
-/** Rows of the "You write | They receive" table, as CLAIMS to be checked
- *  against the real renderer.
+/** Rows PARSED OUT OF THE DOCUMENT, keyed by the example in the left column.
  *
- *  WHY THIS EXISTS. Cross-model review found the table had drifted — it claimed
- *  fences were "preserved" while the language identifier is silently dropped,
- *  and described a table shape that is not universal. My own verification had
- *  missed it because I checked the rows I had chosen to write, which cannot
- *  find what I omitted. Asserting the DOC against the CODE is the only version
- *  of that check which can fail for the right reason. */
-const CLAIMS: ReadonlyArray<readonly [input: string, expected: string, note: string]> = [
-  ["**bold**", "*bold*", "bold"],
-  ["*italic*", "_italic_", "italic"],
-  ["***both***", "_*both*_", "nested emphasis"],
-  ["~~strike~~", "~strike~", "strikethrough"],
-  ["`code`", "`code`", "inline code unchanged"],
-  ["# Heading", "*Heading*", "heading becomes a bold line"],
-  ["###### Heading", "*Heading*", "every heading level, same result"],
-  ["- item", "• item", "bullet"],
-  ["> quote", "> quote", "blockquote unchanged"],
-  ["[label](https://x.dev)", "label (https://x.dev)", "link keeps label and url"],
-  ["[https://x.dev](https://x.dev)", "https://x.dev", "label == url collapses"],
-  ["![alt](https://img.dev/a.png)", "https://img.dev/a.png", "image loses alt text"],
-];
+ *  WHY IT READS THE DOC. The previous version asserted the renderer against a
+ *  list hard-coded HERE and never opened SKILL.md — so the table could have said
+ *  anything and every test still passed. Review called that illusory and was
+ *  right: it was the same circularity as checking the rows I had chosen to
+ *  write, moved up one level. The doc is the artifact under test, so the doc is
+ *  what must be read. */
+interface DocRow {
+  readonly input: string;
+  readonly claim: string;
+  readonly line: string;
+}
 
-describe("the skill's conversion table matches the real renderer", () => {
-  for (const [input, expected, note] of CLAIMS) {
-    test(`${note}: ${JSON.stringify(input)}`, () => {
-      expect(markdownToWhatsApp(input)).toBe(expected);
+function parseConversionRows(md: string): DocRow[] {
+  const rows: DocRow[] = [];
+  for (const line of md.split("\n")) {
+    const m = /^\|\s*(.+?)\s*\|\s*(.+?)\s*\|$/.exec(line.trim());
+    if (!m) continue;
+    const [, left, right] = m;
+    if (!left || !right) continue;
+    if (/^-+$/.test(left) || left === "You write") continue;
+    // Only rows whose left cell is a single backticked example are executable
+    // claims; prose rows ("a GFM table") are checked by the table tests below.
+    const code = /^`([^`]+)`$/.exec(left);
+    if (!code?.[1]) continue;
+    rows.push({ input: code[1], claim: right, line });
+  }
+  return rows;
+}
+
+const DOC_ROWS = parseConversionRows(doc);
+
+/** What the right-hand cell asserts, for rows whose claim is a literal output. */
+function expectedOutput(claim: string): string | undefined {
+  const code = /^`([^`]+)`$/.exec(claim.trim());
+  return code?.[1];
+}
+
+describe("every executable row of the doc's table is true of the renderer", () => {
+  test("the table was actually found and parsed", () => {
+    // A parser that silently matches nothing would make every test below vacuous.
+    expect(DOC_ROWS.length).toBeGreaterThanOrEqual(8);
+  });
+
+  for (const row of DOC_ROWS) {
+    const expected = expectedOutput(row.claim);
+    if (expected === undefined) continue; // prose claim, covered elsewhere
+    test(`doc says ${JSON.stringify(row.input)} -> ${JSON.stringify(expected)}`, () => {
+      expect(markdownToWhatsApp(row.input)).toBe(expected);
     });
   }
 
-  test("the fence LANGUAGE is dropped, and the skill says so", () => {
-    // The specific drift review caught: "fences preserved" was true of the
-    // fence and false of its language.
+  test("the fence row states the dropped language, and the renderer drops it", () => {
+    // Not an executable row: its left cell uses four backticks to quote a
+    // three-backtick fence, so the parser correctly skips it. Asserted against
+    // the raw document line instead.
+    const fenceRow = doc.split("\n").find((l) => l.includes("fence") && l.startsWith("|"));
+    expect(fenceRow).toBeDefined();
+    expect(fenceRow).toMatch(/language identifier is dropped/i);
     expect(markdownToWhatsApp("```ts\nx\n```")).toBe("```\nx\n```");
-    expect(doc).toMatch(/language identifier is dropped/i);
-  });
-
-  test("ordered lists keep numbering, and the skill says so", () => {
-    expect(markdownToWhatsApp("5. five")).toContain("5. five");
-    expect(doc).toMatch(/numbering kept/i);
-  });
-
-  test("a task-list checkbox stays literal, and the skill says so", () => {
-    expect(markdownToWhatsApp("- [x] done")).toBe("• [x] done");
-    expect(doc).toMatch(/checkbox stays literal/i);
   });
 });
 
@@ -111,5 +126,24 @@ describe("the no-attachments claim is coupled to the actual interface", () => {
     expect(hasFileChannel).toBe(false);
     // Only while the above holds may the skill assert it.
     expect(doc).toMatch(/cannot send files/i);
+  });
+});
+
+describe("the newly-documented lossy cases are real", () => {
+  test("a backslash escape is consumed, and the doc warns about it", () => {
+    // "Anything not recognised passes through unchanged" was FALSE: the parser
+    // eats the escape, so the asterisk arrives live and WhatsApp bolds it.
+    expect(markdownToWhatsApp("\\*not emphasis\\*")).toBe("*not emphasis*");
+    expect(doc).toMatch(/escapes are consumed/i);
+  });
+
+  test("ordered lists are RENUMBERED consecutively, and the doc says so", () => {
+    // "numbering kept" was too strong: 1./3. becomes 1./2.
+    expect(markdownToWhatsApp("1. one\n3. three")).toBe("1. one\n2. three");
+    expect(doc).toMatch(/renumbered consecutively/i);
+  });
+
+  test("the doc no longer claims everything survives unchanged", () => {
+    expect(doc).not.toMatch(/Anything not recognised passes through \*\*unchanged\*\*/i);
   });
 });
