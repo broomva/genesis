@@ -22,7 +22,15 @@
 // defense in depth, not the boundary.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
 import { TenantStore } from "../apps/chat-bot/src/tenant-store";
@@ -35,6 +43,7 @@ import {
 import { STACK_AGENTS, seedAgentStack } from "../packages/core/src/agent-stack";
 import { seedSkills } from "../packages/core/src/skill-seed";
 import { denyRulesFor } from "./tenant-deny-rules";
+import { assertCredentialed, assertNoStrandedAgentState } from "./tenant-home";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -64,21 +73,6 @@ const PER_HOME = process.env.GENESIS_TENANT_PER_HOME === "1";
  *  Kept beside the manifest so "what the tenant runs as" is one expression. */
 function homeFor(dir: string): string | undefined {
   return PER_HOME ? join(dir, "home") : undefined;
-}
-
-/** FAIL-CLOSED, unlike the runtime. Refuse to hand a tenant a HOME that carries no
- *  credential — that tenant would answer every message with silence and nothing
- *  would report an error. */
-function assertCredentialed(home: string): void {
-  if (existsSync(join(home, ".claude", ".credentials.json"))) return;
-  throw new Error(
-    [
-      `GENESIS_TENANT_PER_HOME=1 but ${home}/.claude/.credentials.json is missing.`,
-      "A tenant with an uncredentialed HOME fails every turn, and `claude -p` exits 0 while",
-      "doing it, so nothing would surface the breakage.",
-      "Seed a credential there (or unset GENESIS_TENANT_PER_HOME) and re-run.",
-    ].join("\n"),
-  );
 }
 
 // The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
@@ -342,8 +336,9 @@ for (const t of tenants) {
   // after would leave a tenant configured to use a home that cannot answer.
   const tenantHome = homeFor(t.dir);
   if (tenantHome) {
-    mkdirSync(join(tenantHome, ".claude"), { recursive: true });
+    mkdirSync(join(tenantHome, ".claude", "projects"), { recursive: true });
     assertCredentialed(tenantHome);
+    assertNoStrandedAgentState(HOME, tenantHome, t.dir);
   }
   // The tenant can WRITE its workspace but does not OWN it, and the sticky bit
   // is what makes that distinction bite. Unlinking a file needs write on the
