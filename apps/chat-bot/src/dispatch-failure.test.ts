@@ -193,22 +193,27 @@ describe("dispatchFailureMessage — tenant-visible, and must leak nothing", () 
 import { TurnRejectedError } from "../../../packages/core/src/concurrency";
 import { TurnReapedError } from "../../../packages/runner/src/watchdog";
 
-/** EVERY DispatchFailure member. The previous list named four of eight, so the
- *  "all kinds" assertions silently skipped half of them — including the two the
- *  same PR had just added (P20 minor). The `satisfies` makes the compiler fail if
- *  a member is added to the union and not listed here, so the gap cannot reopen. */
-const ALL_KINDS = [
-  "backend-unreachable",
-  "backend-error",
-  "unauthorized",
-  "timeout",
-  "capacity-own",
-  "capacity-server",
-  "turn-timeout-idle",
-  "turn-timeout-total",
-  "agent-error",
-  "unknown",
-] as const satisfies readonly DispatchFailure[];
+/** EVERY DispatchFailure member. The first version named four of eight, so the
+ *  "all kinds" assertions silently skipped half — including the two the same PR
+ *  had just added.
+ *
+ *  KEYED BY THE UNION, not `satisfies readonly DispatchFailure[]` (P20 round 2):
+ *  that only checks the listed values ARE members; it does not require every
+ *  member to be listed, so the exact gap it was meant to close stayed open. A
+ *  `Record<DispatchFailure, true>` makes the compiler demand one key per member,
+ *  so adding a union member without listing it here fails typecheck. */
+const ALL_KINDS = Object.keys({
+  "backend-unreachable": true,
+  "backend-error": true,
+  unauthorized: true,
+  timeout: true,
+  "capacity-own": true,
+  "capacity-server": true,
+  "turn-timeout-idle": true,
+  "turn-timeout-total": true,
+  "agent-error": true,
+  unknown: true,
+} satisfies Record<DispatchFailure, true>) as DispatchFailure[];
 
 /** Wrap as the stream does: a dispatch error arrives agent-reported. */
 class AgentReportedLike extends Error {
