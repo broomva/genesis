@@ -136,6 +136,85 @@ export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): st
   return out.filter((c) => c.length > 0);
 }
 
+/** The whole outbound render, as ONE call: convert → leak-check → chunk →
+ *  balance fences. It also EMITS the leak warning, which is the point.
+ *
+ *  It lives HERE rather than in whatsapp-format.ts because chunkForWhatsapp and
+ *  CHUNK_TARGET are defined in this module while the converter and fence helpers
+ *  are in that one; putting it there compiles to a circular import. index.ts
+ *  already imports chunking from ./handler, so a second send path can adopt this
+ *  without a new dependency edge.
+ *
+ *  WHAT THIS DOES AND DOES NOT GUARANTEE. An earlier draft claimed chunks were
+ *  "obtainable only by having run the check". That was false and review said so:
+ *  markdownToWhatsApp, chunkForWhatsapp and balanceFences all remain exported,
+ *  so a caller can still assemble the pipeline by hand. This is a golden path,
+ *  not an enforced invariant.
+ *
+ *  What it does buy is that the check cannot be silently DROPPED by a path that
+ *  uses it. The first draft returned the finding for the caller to log, which
+ *  meant destructuring only `chunks` quietly disabled it — an ignorable warning
+ *  is an absent warning. So the warning is emitted here, and the caller supplies
+ *  the label that makes it useful (a thread id, a voice ticket id) along with
+ *  its chunk target. `warn` is a test seam; production leaves it unset.
+ *
+ *  THE STEP ORDER matters and each ordering was learned from a defect. Convert
+ *  BEFORE chunking or a table splits across messages and loses its rows. Reserve
+ *  FENCE_OVERHEAD or balancing pushes a chunk past the transport cap and the
+ *  message is REJECTED, not truncated. Balance AFTER chunking or a fenced block
+ *  straddling two messages shows an unmatched ``` in one and loses monospace in
+ *  the next. The leak check is the one with no failure signal when omitted — the
+ *  reply still arrives, just with `**` and `##` in it, which is how BRO-2267
+ *  reached phones unnoticed.
+ *
+ *  A NON-EMPTY `leaked` IS RARE BUT REACHABLE, which took a review round to
+ *  establish. residualMarkdown runs on CONVERTED output, and for ordinary
+ *  replies the converter leaves nothing to find — so the first draft's tests
+ *  only ever asserted an empty result, and an implementation returning `[]`
+ *  unconditionally would have passed all of them. Probing found two inputs the
+ *  converter genuinely leaves behind: `|---|` (a delimiter row with no header is
+ *  not a table to the parser, so it survives as literal text) and escaped
+ *  markdown such as `\*\*x\*\*`, which the converter UNESCAPES into `**x**`.
+ *  Both are exercised as positive cases. */
+export interface WhatsappRender {
+  /** Ready to post, in order. */
+  readonly chunks: string[];
+  /** Markdown that survived conversion, by name. Empty is the normal case. */
+  readonly leaked: string[];
+  /** Rendered length. Never the text itself. */
+  readonly chars: number;
+}
+
+export interface RenderOptions {
+  /** Identifies the send in the warning — a thread id or a voice ticket id. */
+  readonly label: string;
+  readonly chunkTarget?: number;
+  /** Injection seam for tests; defaults to console.warn. */
+  readonly warn?: (message: string) => void;
+}
+
+export function renderForWhatsapp(text: string, opts: RenderOptions): WhatsappRender {
+  const rendered = markdownToWhatsApp(text);
+  // Computed BEFORE the chunks, so the code executes the order the comment
+  // claims. Object-literal evaluation ran balanceFences first in the draft —
+  // harmless, since both read `rendered`, but the doc was describing something
+  // the code did not do.
+  const leaked = residualMarkdown(rendered);
+  if (leaked.length > 0) {
+    // Marker NAMES and a length only — never the message text, which would put
+    // user content in the journal to catch a formatting bug.
+    (opts.warn ?? console.warn)(
+      `[genesis-bot] MARKDOWN LEAK — ${leaked.join(", ")} survived conversion and is headed for delivery unrendered (BRO-2267 regression). ${opts.label} chars=${rendered.length}`,
+    );
+  }
+  const target = (opts.chunkTarget ?? CHUNK_TARGET) - FENCE_OVERHEAD;
+  return {
+    chunks: balanceFences(chunkForWhatsapp(rendered, target)),
+    leaked,
+    chars: rendered.length,
+  };
+}
+
 /** Drain an async text stream into one string. */
 export async function drainStream(stream: AsyncIterable<string>): Promise<string> {
   let acc = "";
@@ -618,35 +697,13 @@ export async function handleAgentMessage(
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
-      // Convert BEFORE chunking. WhatsApp shows a plain string verbatim, so the
-      // agent's markdown reached phones as raw `##` and `|---|` pipes
-      // (BRO-2267). Order matters: converting first means a table is rendered
-      // whole and only then split, whereas chunking first could cut a table
-      // across two messages and destroy the row structure. A split emphasis
-      // marker is a cosmetic wart; split data is not.
-      // Render, chunk, then re-balance fences ACROSS chunk boundaries. Each
-      // WhatsApp message is rendered independently by the client, so a fenced
-      // block split in two leaves an unmatched ``` in one message and loses
-      // monospace in the next.
-      // Reserve FENCE_OVERHEAD below the target: balancing may add a reopening
-      // and a closing fence, and a chunk pushed past the transport cap is
-      // REJECTED — the reply then simply never arrives.
-      const target = (opts.chunkTarget ?? CHUNK_TARGET) - FENCE_OVERHEAD;
-      const rendered = markdownToWhatsApp(reply);
-      // Standing regression check for BRO-2267, which shipped raw `**bold**`,
-      // `##` and `|---|` to real phones. That defect was caught only by a human
-      // reading delivered messages; every test still passed, because they assert
-      // what the converter emits for a fixed input rather than that nothing
-      // leaks on live traffic. This asks the second question on every reply.
-      // Marker NAMES and a length only — never the message text, which would put
-      // user content in the journal to catch a formatting bug.
-      const leaked = residualMarkdown(rendered);
-      if (leaked.length > 0) {
-        console.warn(
-          `[genesis-bot] MARKDOWN LEAK — ${leaked.join(", ")} survived conversion and is headed for delivery unrendered (BRO-2267 regression). thread=${thread.id} chars=${rendered.length}`,
-        );
-      }
-      const chunks = balanceFences(chunkForWhatsapp(rendered, target));
+      // One call: convert, leak-check (and warn), chunk, balance. The orderings
+      // are each learned from a defect and the check has no failure signal when
+      // omitted, so both live in renderForWhatsapp rather than at each site.
+      const { chunks } = renderForWhatsapp(reply, {
+        label: `thread=${thread.id}`,
+        chunkTarget: opts.chunkTarget ?? CHUNK_TARGET,
+      });
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable
