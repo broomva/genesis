@@ -22,15 +22,7 @@
 // defense in depth, not the boundary.
 
 import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  chownSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseAllowlist, tenantWorkspaceId } from "../apps/chat-bot/src/allowlist";
 import { TenantStore } from "../apps/chat-bot/src/tenant-store";
@@ -43,11 +35,6 @@ import {
 import { STACK_AGENTS, seedAgentStack } from "../packages/core/src/agent-stack";
 import { seedSkills } from "../packages/core/src/skill-seed";
 import { denyRulesFor } from "./tenant-deny-rules";
-import {
-  assertCredentialed,
-  assertHomeOutsideTenant,
-  assertNoStrandedAgentState,
-} from "./tenant-home";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -57,32 +44,7 @@ const RUNTIME_ROOT =
 const PREFIX = process.env.GENESIS_WHATSAPP_WORKSPACE_PREFIX?.trim() || "ws-wa-";
 const WORKSPACES_DIR =
   process.env.GENESIS_WORKSPACES_DIR ?? join(HOME, ".config/genesis-bot/workspaces");
-// OUTSIDE the tenant workspace, deliberately — the workspace is group-writable by
-// the tenant, so a home under it would let the tenant author its own user-scope
-// settings and sit beside its own credential. `assertHomeOutsideTenant` enforces it.
-const TENANT_HOMES_DIR =
-  process.env.GENESIS_TENANT_HOMES_DIR ?? join(HOME, ".config/genesis-bot/tenant-homes");
 const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
-
-// BRO-2235 — per-tenant HOME. OPT-IN, and deliberately not on by default: pointing
-// a tenant at its own HOME also points it at its own CREDENTIAL, and which credential
-// a tenant should use (the operator's subscription vs a per-tenant API key) is an
-// open operator decision. Enabling this without answering that question breaks every
-// turn for that tenant.
-//
-// Measured, not assumed — `claude -p` under an unprovisioned HOME:
-//     "Not logged in · Please run /login"   and it EXITS 0.
-// A provisioning gap is therefore invisible to any exit-code check, which is why the
-// refusal lives HERE, in the provisioner, where refusing is safe. The runtime
-// (`tenantEnv`) stays fail-SAFE and never removes a working HOME — an outage caused
-// by our own strictness would be worse than the leak it prevents.
-const PER_HOME = process.env.GENESIS_TENANT_PER_HOME === "1";
-
-/** The tenant's own HOME, or undefined when the feature is off.
- *  Kept beside the manifest so "what the tenant runs as" is one expression. */
-function homeFor(id: string): string | undefined {
-  return PER_HOME ? join(TENANT_HOMES_DIR, id) : undefined;
-}
 
 // The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
 const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
@@ -311,9 +273,6 @@ function manifestFor(t: (typeof tenants)[number]): string {
       name: `wa-${t.principal.id}`,
       rootPath: t.dir,
       noWorktree: true,
-      // BRO-2235: omitted entirely when the feature is off, so the manifest a
-      // tenant runs under today is byte-identical to before.
-      ...(homeFor(t.principal.id) ? { home: homeFor(t.principal.id) } : {}),
       // Untrusted principal: the supervisor hardens the spawn (drops inherited
       // MCP). MCP runs outside the filesystem sandbox, so the settings above
       // cannot reach it — without this the tenant holds the operator's Railway,
@@ -339,23 +298,6 @@ for (const t of tenants) {
 
   mkdirSync(t.dir, { recursive: true });
   mkdirSync(WORKSPACES_DIR, { recursive: true });
-  // BRO-2235. Create the tenant's HOME first, then REFUSE if it holds no
-  // credential — before the manifest that would point a live tenant at it is
-  // written. Ordering is the whole point: writing the manifest first and checking
-  // after would leave a tenant configured to use a home that cannot answer.
-  const tenantHome = homeFor(t.principal.id);
-  if (tenantHome) {
-    // Location FIRST: the other two guards are meaningless if the tenant can
-    // rewrite what they validate.
-    assertHomeOutsideTenant(tenantHome, t.dir);
-    mkdirSync(join(tenantHome, ".claude", "projects"), { recursive: true });
-    // root:agent 0750 — the agent must READ its credential, and must never be able
-    // to replace the settings that confine it.
-    chownSync(tenantHome, 0, AGENT_GID);
-    execFileSync("/bin/chmod", ["750", tenantHome]);
-    assertCredentialed(tenantHome);
-    assertNoStrandedAgentState(HOME, tenantHome, t.dir);
-  }
   // The tenant can WRITE its workspace but does not OWN it, and the sticky bit
   // is what makes that distinction bite. Unlinking a file needs write on the
   // PARENT directory, not on the file — so an agent-owned tenant dir lets the
