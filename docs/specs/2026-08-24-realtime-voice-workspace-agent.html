@@ -3,7 +3,7 @@
 meta:
   slug: realtime-voice-workspace-agent
   ticket: (new epic — file as BRO-XXXX) · relates BRO-2228 (voice channel), BRO-2284 (voice delivery), BRO-1620 (engines), BRO-1567/1627 (threads/workspace)
-  status: design — revision 3 (post Strata A rounds 1-2: FAIL 2/10 → FAIL 3/10)
+  status: design — revision 4 (post Strata A rounds 1-3: 2/10 → 3/10 → 6/10)
   date: 2026-08-24
   decisions:
     - architecture = OPTION C — realtime voice front, Genesis as an async dispatch, narration via contextual updates
@@ -20,6 +20,11 @@ meta:
     - r3 — EventLog is ADDITIVE; Hub's turn schema is re-published by an adapter until the PWA moves
     - r3 — runId is client-generated (an idempotency key must precede its request); one active run per thread
     - r3 — Phase 0 gains a decision table: measurement (4) failing means Option C fails, fallback is Option A
+    - r4 — CONFUSED DEPUTY CLOSED: dispatch needs a single-use token minted by a real user utterance,
+      voided on use/expiry/any-payload-arrival; the tool takes NO arguments, so the model picks whether
+      to dispatch and never what — the dispatched text is the dock's transcript of that utterance
+    - r4 — seq carries a boot EPOCH (in-memory log + persisted client mark = suppressed events on restart)
+    - r4 — gap recovery reads GET /threads/:id/runs/:runId, a named snapshot, not "current run state"
   research:
     - developers.openai.com/api/docs/guides/realtime-function-calling — no documented tool-response timeout; concurrency during a pending call unspecified
     - elevenlabs.io/docs/agents-platform/libraries/react — WebRTC for voice; sendContextualUpdate / sendUserMessage / clientTools
@@ -37,6 +42,9 @@ meta:
       no permission round-trip; threadId authorization unstated; client-tool turn behaviour is an inference
     - strata-A r2 — FAIL 3/10 · 6 fixed, 6 partial, 4 not fixed, 0 new defects; 4 blockers were defects
       INTRODUCED by revision 2's own fixes (see the review ledger)
+    - strata-A r3 — FAIL 6/10 · asked defect-or-depth; answered DEFECTIVE with ONE architectural
+      decision named: prompt discipline standing in for an authorization boundary. 12/13 dispositions
+      FIXED; every remaining finding self-labelled [DEPTH]
 -->
 <html lang="en">
 <head>
@@ -84,12 +92,12 @@ meta:
 
 <body><div class="wrap">
 
-<div class="kick">Genesis · design spec · revision 3</div>
+<div class="kick">Genesis · design spec · revision 4</div>
 <h1>Realtime voice, wired to the workspace session</h1>
 <p class="sub">A voice you can interrupt, that dispatches real work into your Genesis session and narrates it while it runs — without pretending the voice model is the agent doing the work.</p>
 
 <div class="card warn">
-<p><strong>Revision 3.</strong> Two rounds of cross-model adversarial review, <strong>2/10</strong> then <strong>3/10</strong>. Round 1 found that the spec built its narration design on an event stream that does not reach the browser at all — true, and worse than the reviewer could see. Round 2 found that four of revision 2's own fixes were contradictions in their own right: a cost control that killed the channel it was funding, a requirement whose mechanism had been deleted while fixing something else, a sequence number promoted to a "correctness" it cannot deliver, and a subsystem that would have broken the text UI to ship a voice feature. This revision fixes those. The review ledger, with every disposition, is at the foot of the document.</p>
+<p><strong>Revision 4.</strong> Three rounds of cross-model adversarial review: <strong>2/10 → 3/10 → 6/10</strong>. Round 1 found the spec had built its narration design on an event stream that reaches no browser. Round 2 found that four of revision 2's own fixes were fresh contradictions. Round 3 found the one that mattered most and had survived all three drafts: <strong>the voice model reads untrusted workspace text and holds the tool that starts work</strong>. A prompt instruction is not an authorization boundary. This revision closes that with a gate in code — a single-use authorization token minted by a real user utterance, and a dispatch tool that takes no arguments, so the model chooses <em>whether</em> to dispatch and never <em>what</em>. The full ledger is at the foot of the document.</p>
 </div>
 
 <h2>The problem this exists to solve</h2>
@@ -154,7 +162,7 @@ meta:
   <rect x="600" y="60" width="360" height="90" rx="9" fill="#182031" stroke="#243043"/>
   <text x="618" y="86" fill="#e6edf7" font-size="15" font-weight="600">web agent</text>
   <text x="618" y="108" fill="#93a1b8" font-size="12.5">speaks · listens · barge-in</text>
-  <text x="618" y="128" fill="#93a1b8" font-size="12.5">clientTool: dispatch_to_workspace</text>
+  <text x="618" y="128" fill="#93a1b8" font-size="12.5">clientTool: dispatch_to_workspace()</text>
 
   <!-- webrtc link -->
   <line x1="424" y1="95" x2="596" y2="95" stroke="#4c8dff" stroke-width="2" marker-end="url(#arb)" marker-start="url(#arb)"/>
@@ -193,7 +201,7 @@ meta:
 
 <h2>The load-bearing assumption — and it is still an assumption</h2>
 <div class="card warn">
-<p><code>dispatch_to_workspace</code> is a <em>client</em> tool that fires the dispatch and returns within milliseconds — <code>{ accepted: true, runId, summary: "dispatched to broomva/genesis" }</code>. Nothing is held open, so nothing depends on an undocumented vendor timeout. That part is sound.</p>
+<p><code>dispatch_to_workspace</code> is a <em>client</em> tool that fires the dispatch and returns within milliseconds — <code>{ accepted: true, runId, summary: "dispatched to broomva/genesis" }</code>. It takes no arguments: what gets dispatched is the dock's transcript of the authorizing utterance, never a string the model composed. Nothing is held open, so nothing depends on an undocumented vendor timeout. That part is sound.</p>
 <p>What revision 1 asserted and could not support is the next sentence: <em>"the conversation continues normally."</em> Returning a tool result hands control back to the model mid-turn, and every realtime API this design could sit on will generate <em>something</em> at that point. The honest statement is:</p>
 <table>
 <tr><th>Claim</th><th>Status</th></tr>
@@ -208,6 +216,7 @@ meta:
 <li>The projection drops any event whose <code>seq</code> is not greater than the highest already narrated for that <code>runId</code> — strictly greater, so a replayed boundary event is not spoken twice.</li>
 <li>After a run's terminal event, every further progress event for that <code>runId</code> is dropped unconditionally.</li>
 <li>The high-water mark is persisted per <code>runId</code> in <code>sessionStorage</code>, so a page reload does not re-narrate a replayed window.</li>
+<li><code>seq</code> carries an <strong>epoch</strong> — the engine's boot id — because the log is in memory and a restart would otherwise reset the counter beneath a client mark that survived. A client seeing a new epoch discards its mark rather than silently suppressing every event below it.</li>
 </ul>
 <p>What that buys is a bounded staleness, stated plainly: <strong>at most one utterance may be in flight when a later event supersedes it.</strong> A progress note can therefore still finish playing after the result has arrived. The design does not pretend otherwise; the screen carries the authoritative state, and the dock marks the run complete the moment the terminal event lands regardless of what is still being spoken.</p>
 </div>
@@ -221,7 +230,7 @@ meta:
 <tr><td>Push-to-talk held</td><td>open</td><td>open</td></tr>
 <tr><td>Released, no run active</td><td>closed</td><td>open, 90-second idle timer</td></tr>
 <tr><td>Released, run active</td><td>closed</td><td><strong>held open for the run</strong> + 90s</td></tr>
-<tr><td>Run exceeds the session cap (10 min)</td><td>closed</td><td>closed — result lands on screen, dock shows <em>ready, not spoken</em></td></tr>
+<tr><td>Run exceeds the session cap (10 min, clocked per run)</td><td>closed</td><td>closed — result lands on screen, dock shows <em>ready, not spoken</em></td></tr>
 </table>
 <p>Push-to-talk gates the <em>microphone</em>, which is what the user is anxious about; the session is what narration needs, and it closes on a timer. Cost is bounded by the cap, and the case where the cap bites is a specified degradation with a visible affordance rather than an unexplained silence.</p>
 </div>
@@ -252,11 +261,20 @@ meta:
 <p>Revision 1 claimed narration is safe because it is "a projection with a fixed vocabulary" and because results are "quoted, not paraphrased". Both are false in the part that matters. The vocabulary is fixed only for the <em>frame</em>; the payload is file paths, tool inputs, error strings and the agent's own output — arbitrary text from a workspace that may contain anything, including instructions aimed at whatever model reads it next. And quoting does not bind a language model: a correct quotation can be wrapped in a confident, wrong spoken claim.</p>
 <ul>
 <li>Payloads are <strong>truncated and delimited</strong>, never interpolated into the instruction region of an update.</li>
-<li>The web agent's prompt is written to treat all event payloads as data to be reported, never as instructions — and that instruction's effectiveness is a <em>measurement in phase 0</em>, not an assumption.</li>
+<li>The web agent's prompt is written to treat all event payloads as data to be reported, never as instructions. <strong>That instruction is a mitigation, not a boundary</strong> — its effectiveness is a phase 0 measurement, and the design below assumes it fails.</li>
 <li>Everything the projection forwards is shipped to a third-party vendor. A redaction pass (known token shapes, absolute home paths, <code>.env</code> contents) runs in the projection rather than as a later hardening step — but it is <strong>pattern-based and therefore incomplete</strong>. A secret with no recognisable shape, pasted into a file and echoed by a tool, will pass through it. The design reduces exposure; it does not eliminate it, and a workspace holding material that must never reach a vendor should not have voice enabled.</li>
 <li>The <code>voice-agent-config.test.ts</code> pattern extends to the web agent: CI fails when the prompt starts promising capabilities the system does not have.</li>
 </ul>
 <p class="note">This does not make the voice model trustworthy. It makes the blast radius bounded and the failure legible: the screen always holds the authoritative record, and the spoken layer is explicitly a narration of it.</p>
+
+<h3>The confused deputy, and the gate that closes it</h3>
+<p>Everything above is exposure control, and revision 3 stopped there — which left the real hole. The same model that reads untrusted workspace text also holds <code>dispatch_to_workspace</code>. A hostile string in a file, a crafted test-failure message, or the agent's own output can reach it as a payload and ask it to start work. "Treat payloads as data" is a probability, not a permission check, and <em>one active run per thread</em> does not help: the injected dispatch simply waits for the current run to end and is then accepted as normal.</p>
+<p>The gate cannot live in the prompt, so it lives in the callback — which is our code, running in our page. Two rules, both deterministic:</p>
+<ul>
+<li><strong>A dispatch needs a fresh, user-originated authorization.</strong> When a user utterance ends, the dock mints a single-use token valid for 30 seconds. The <code>dispatch_to_workspace</code> callback consumes one or refuses. A token is void on use, on expiry, and <em>on the arrival of any event payload into the vendor context after it was minted</em> — so an injected payload cannot ride a token a real utterance just created.</li>
+<li><strong>The model chooses whether to dispatch. It never chooses what.</strong> The tool takes no text argument. The dispatched text is the transcript of the utterance that minted the token, supplied by the dock. The worst an injection can achieve is therefore dispatching the user's own last words — which they just said, and which the dock renders on screen before the run starts.</li>
+</ul>
+<p>This is the difference between hoping a model behaves and arranging that its misbehaviour cannot reach the workspace. A refused dispatch is narrated rather than swallowed — "I can't start work you didn't ask for" — so an injection attempt is visible instead of silent.</p>
 </div>
 
 <h2>What must be built</h2>
@@ -277,12 +295,12 @@ meta:
 </div></div>
 
 <div class="phase"><div class="pnum">1</div><div>
-<strong>The event channel.</strong> The bulk of the work and the part with value independent of voice. Emit IR-granular events from the print engine into a per-thread <code>EventLog</code> that stamps every event with a monotonic <code>seq</code> and with the <code>runId</code> the dispatch carried, retains a bounded window in memory, and serves <code>GET /threads/:id/events?since=&lt;seq&gt;</code> so a reconnecting subscriber resumes rather than restarts. <strong>Additive, not a swap.</strong> The PWA's live chat feed consumes <code>Hub</code>'s <code>{kind:"turn"}</code> schema today; replacing it outright would break the text UI to ship a voice feature. So <code>EventLog</code> is new, and <code>Hub</code>'s three existing messages are re-published from it by an adapter that keeps the old shape byte-identical. <code>Hub</code> retires only after the PWA moves to the new stream, in its own change. Gate the new surface: the BFF route authenticates <em>and</em> checks thread ownership, and the engine's <code>/ws</code> stops accepting an unauthenticated caller-supplied thread id.
-<p class="note"><strong>Replay has a shape, not just a query.</strong> <code>?since=&lt;seq&gt;</code> is <em>exclusive</em>. The window is bounded at 500 events or 30 minutes per thread, whichever is smaller. A cursor older than the window returns <code>{ gap: true, from: &lt;oldest&gt; }</code> rather than a silent partial history, and the dock narrates a gap as "I lost track of the details — here's where it is now" after reading current run state. Catch-up and live-tail are one operation, not two: the subscription is opened first and buffered, the backfill is served into it, and only then is the buffer drained — so an event emitted between the two cannot fall down the crack.</p>
+<strong>The event channel.</strong> The bulk of the work and the part with value independent of voice. Emit IR-granular events from the print engine into a per-thread <code>EventLog</code> that stamps every event with a monotonic <code>seq</code> and with the <code>runId</code> the dispatch carried, retains a bounded window in memory, and serves <code>GET /threads/:id/events?since=&lt;seq&gt;</code> so a reconnecting subscriber resumes rather than restarts. <strong>Additive, not a swap.</strong> The PWA's live chat feed consumes <code>Hub</code>'s <code>{kind:"turn"}</code> schema today; replacing it outright would break the text UI to ship a voice feature. So <code>EventLog</code> is new, and <code>Hub</code>'s three existing messages are re-published from it by an adapter that keeps the old shape byte-identical. <code>Hub</code> retires only after the PWA moves to the new stream, in its own change. Gate the new surface: the BFF route authenticates <em>and</em> checks thread ownership, and the engine's <code>/ws</code> stops accepting an unauthenticated caller-supplied thread id — it takes the same <code>Authorization: Bearer GENESIS_TOKEN</code> the engine's other routes already require, so the only caller that must change is the BFF, which holds that credential today.
+<p class="note"><strong>Replay has a shape, not just a query.</strong> <code>?since=&lt;seq&gt;</code> is <em>exclusive</em>. The window is bounded at 500 events or 30 minutes per thread, whichever is smaller. A cursor older than the window returns <code>{ gap: true, from: &lt;oldest&gt; }</code> rather than a silent partial history, and the dock narrates a gap as "I lost track of the details — here's where it is now" after reading <code>GET /threads/:id/runs/:runId</code>, which returns the run's current phase, its latest <code>seq</code>, and its terminal result if it has one. That endpoint is the snapshot the gap path recovers from; without it "current run state" would be a phrase rather than a call. Catch-up and live-tail are one operation, not two: the subscription is opened first and buffered, the backfill is served into it, and only then is the buffer drained — so an event emitted between the two cannot fall down the crack.</p>
 </div></div>
 
 <div class="phase"><div class="pnum">2</div><div>
-<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId }</code>, authorizes the principal <em>against that thread</em>, forwards, returns immediately. The <code>runId</code> is generated by the client, because an idempotency key must exist before the request it protects. The server records it on first sight and returns the original outcome for any repeat, so a retry after a lost response cannot run the work twice; it is also what ties an event stream back to the utterance that caused it. <strong>One active run per thread</strong>: a dispatch arriving while a run is in flight is rejected with a distinct code, and the agent says so rather than starting a second worker in the same worktree.
+<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId }</code> — where <code>text</code> came from the dock's transcript, not from the voice model — authorizes the principal <em>against that thread</em>, forwards, returns immediately. The <code>runId</code> is generated by the client, because an idempotency key must exist before the request it protects. The server records it <em>before</em> dispatching the work, in the same critical section as the active-run check, so the window in which a crash could duplicate execution is the window in which no work has started. A repeat returns the original outcome. <strong>One active run per thread</strong>: a dispatch arriving while a run is in flight is rejected with a distinct code, and the agent says so rather than starting a second worker in the same worktree. Note what this guard does <em>not</em> do — it does not make a dispatch legitimate, which is the job of the authorization gate above.
 </div></div>
 
 <div class="phase"><div class="pnum">3</div><div>
@@ -304,13 +322,13 @@ meta:
 <table>
 <tr><th>Risk</th><th>Why it matters</th><th>Response</th></tr>
 <tr><td>Returning a client-tool result forces a spoken turn</td><td>Kills the premise that dispatch is silent and the conversation flows on</td><td>Phase 0 measurement (1) — architectural, not cosmetic</td></tr>
-<tr><td>A superseded update already shaped an in-flight sentence</td><td>Stale progress narrated after completion</td><td>Correctness comes from <code>seq</code> + terminal-state rule client-side, never from supersede</td></tr>
+<tr><td>A superseded update already shaped an in-flight sentence</td><td>Stale progress narrated after completion</td><td><strong>Not eliminable.</strong> <code>seq</code> + the terminal-state rule bound it to one in-flight utterance; the dock marks the run complete on screen regardless of what is still being said</td></tr>
 <tr><td>Reconnect loses the run</td><td>The user hears nothing and cannot tell working from dead</td><td>Bounded replay buffer + <code>?since=seq</code>; phase 5 tests it by pulling the network</td></tr>
 <tr><td>Event payloads carry hostile or sensitive text</td><td>Prompt injection into a speaking model; secrets shipped to a vendor</td><td>Truncate, delimit, redact in the projection; test the instruction in phase 0</td></tr>
 <tr><td>The voice agent claims work it did not do</td><td>A confident wrong summary reads as the workspace agent's word</td><td>Bounded; not eliminated. The screen is authoritative; phase 5 diffs speech against the event log</td></tr>
-<tr><td>Voice-only turns exist only at the vendor</td><td>Context the user gave by voice is missing when the thread resumes</td><td>Every voice utterance is mirrored into the thread transcript, dispatching or not</td></tr>
+<tr><td>Voice-only turns exist only at the vendor</td><td>Context the user gave by voice is missing when the thread resumes</td><td>Non-dispatching utterances are appended to the thread transcript as <code>voice-aside</code> parts via <code>POST /api/threads/:id/aside</code>, keyed by utterance id so a retry cannot duplicate them. A <em>dispatching</em> utterance is not mirrored — it already arrives as the run's user input, and mirroring it too would feed the worker its own prompt twice</td></tr>
 <tr><td>iOS forces speaker output on <code>getUserMedia</code></td><td>May be unusable in the intended context</td><td>Phase 0 measurement (6); degrades to push-to-talk or headphones</td></tr>
-<tr><td>Cost per minute of open mic</td><td>An always-listening session bills continuously</td><td>Push-to-talk gates the <em>microphone</em>; the session ends on an idle timer, never on button release — see session lifetime</td></tr>
+<tr><td>Cost per minute of open <em>session</em></td><td>An always-listening session bills continuously</td><td>Push-to-talk gates the <em>microphone</em>; the session ends on an idle timer, never on button release — see session lifetime</td></tr>
 </table>
 </div>
 
@@ -343,12 +361,14 @@ meta:
 <tr><th>Round</th><th>Strata</th><th>Verdict</th><th>Disposition</th></tr>
 <tr><td>1</td><td>A — codex-cli 0.149.1 (cross-vendor)</td><td><span class="pill p-no">FAIL 2/10</span></td><td>5 blockers · 13 major · 5 minor</td></tr>
 <tr><td>2</td><td>A — same, dispositions verified</td><td><span class="pill p-no">FAIL 3/10</span></td><td>6 fixed · 6 partial · 4 not fixed · 0 new defects</td></tr>
+<tr><td>3</td><td>A — plus the defect-or-depth meta-question</td><td><span class="pill p-risk">FAIL 6/10</span></td><td>12 of 13 fixed · 1 blocker, architectural</td></tr>
 </table>
 <p class="note"><strong>Round 1 — blockers upheld and fixed:</strong> no event transport at narration granularity (understated by the reviewer — the events reach no subscriber at all); the final answer had no mechanism to be spoken; permission resolution had no other half; thread authorization was asserted by reference to a function that does not do it; the client-tool turn behaviour was an inference presented as settled. None rejected. <strong>Reviewer error corrected:</strong> the claim that no transport exists at all — <code>Hub</code> plus <code>GET /ws</code> exist but carry turn-granular messages with no cursor and no gate, which is why the conclusion held anyway.</p>
 <p class="note"><strong>Round 2 — what it caught that round 1 could not.</strong> Four defects were <em>introduced by revision 2's own fixes</em>, and that is the finding worth recording: <em>(i)</em> a push-to-talk cost control that ended the session narration needed; <em>(ii)</em> "takes a turn" kept as a requirement after its mechanism was deleted; <em>(iii)</em> the seq rule promoted to "correctness" when it cannot retract an in-flight utterance any better than supersede can; <em>(iv)</em> "replaces <code>Hub</code>" ignoring that the text UI consumes it. Also upheld: length and safety collapsed into one threshold; a privacy claim the browser boundary does not deliver; a <code>runId</code> assigned in two places; an in-tree claim stated more strongly than the grep that produced it. <strong>Reframed rather than accepted:</strong> the reviewer's merge condition was an end-to-end prototype passing adversarial tests. That is a request for the artifact this document exists to authorise, not a defect in it — which is why phase 0 now carries a decision table binding each measurement to a named consequence, including the one that fails Option C outright.</p>
 </div>
 
-<div class="foot">Genesis · Realtime voice workspace agent · design · revision 2 · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Source facts verified in-tree at <code>8cc05ff</code>; vendor behaviours marked unverified are measured in phase 0, not assumed.</div>
+<p class="note"><strong>Round 3 — the meta-question, and the finding it produced.</strong> Rounds 1 and 2 both closed by demanding an end-to-end prototype, which a design spec cannot be. Round 3 was asked to state plainly whether it was scoring a <em>defective artifact</em> or an <em>unexhausted surface</em>, and to label every finding <code>[DEFECT]</code> or <code>[DEPTH]</code>. It answered defective and named exactly one decision: prompt discipline was standing in for an authorization boundary while the same model held <code>dispatch_to_workspace</code>. Its scenario — a hostile payload asks for a dispatch, the one-active-run guard merely delays it until the current run ends — is correct, and it survived three drafts because every previous round had spent itself on transport and delivery. The score moved 3 → 6 in the same round, which is the signal that the earlier rounds had been scoring depth. <strong>Everything else in round 3 was labelled <code>[DEPTH]</code> and fixed anyway</strong> where the fix was a decision rather than an essay: a boot epoch on <code>seq</code> (an in-memory log restarting under a client mark that survives is a real bug the persistence introduced), a named snapshot endpoint behind the gap path, the idempotency record taken before dispatch rather than after, and the mirroring rule made explicit that a <em>dispatching</em> utterance is not mirrored or the worker reads its own prompt twice.</p>
+<div class="foot">Genesis · Realtime voice workspace agent · design · revision 4 · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Source facts verified in-tree at <code>8cc05ff</code>; vendor behaviours marked unverified are measured in phase 0, not assumed.</div>
 
 </div></body>
 </html>
