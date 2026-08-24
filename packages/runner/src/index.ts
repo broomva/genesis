@@ -12,6 +12,9 @@ import {
   reduce,
 } from "@genesis/projection";
 import { resolveClaudeBinary } from "@genesis/session-host";
+import { TurnReapedError, startWatchdog } from "./watchdog";
+
+export { TurnReapedError, startWatchdog, type ReapReason, type Watchdog } from "./watchdog";
 
 /** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
  *  providers; the per-provider arrays below gate which reach which engine —
@@ -66,6 +69,13 @@ export interface RunAttachment {
 }
 
 export interface RunOptions {
+  /** Kill the turn after this long with no stream event (BRO-2260). Omit → no
+   *  idle bound; existing callers keep today's behaviour. */
+  idleTimeoutMs?: number;
+  /** Kill the turn after this long in total, progress or not (BRO-2260). This is
+   *  the clock that catches a turn which keeps emitting while pinning the box —
+   *  an idle timer never fires on that shape. Omit → no total bound. */
+  maxTurnMs?: number;
   prompt: string;
   /** A git repository root; a worktree is cut from here unless worktree=false. */
   cwd: string;
@@ -491,8 +501,21 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   const events: AgentEvent[] = [];
   let state = initialState;
   let exitCode = -1;
+  // Turn watchdog (BRO-2260). Killing the child closes stdout, so the loop below
+  // ends NORMALLY rather than throwing — which is why the reaped check sits after
+  // the loop and not in the catch. Without that, a reaped turn would be reported
+  // as an ordinary non-zero exit and read to the user as a crash.
+  const startedAtMs = Date.now();
+  const watchdog = startWatchdog({
+    idleTimeoutMs: opts.idleTimeoutMs,
+    maxTurnMs: opts.maxTurnMs,
+    onExpire: () => handle.kill(),
+  });
   try {
     for await (const line of handle.stdout) {
+      // Touch on every LINE, not only on parsed events: a child emitting output
+      // we cannot parse is still alive, and reaping it as idle would be wrong.
+      watchdog.touch();
       const event = parseLine(line);
       if (!event) continue;
       events.push(event);
@@ -500,6 +523,13 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
       opts.onState?.(state, event);
     }
     exitCode = await handle.exitCode;
+    if (watchdog.reason) {
+      throw new TurnReapedError(
+        watchdog.reason,
+        Date.now() - startedAtMs,
+        watchdog.reason === "idle" ? (opts.idleTimeoutMs ?? 0) : (opts.maxTurnMs ?? 0),
+      );
+    }
   } catch (err) {
     // Mid-stream failure: kill the child (F14). Remove a per-run worktree (F13),
     // but KEEP a per-session one (a transient turn failure must not destroy the
@@ -510,6 +540,9 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     }
     throw err;
   } finally {
+    // Dispose FIRST: a live timer would otherwise keep firing (and keep the event
+    // loop alive) after the turn has already settled.
+    watchdog.dispose();
     handle.kill(); // idempotent; reaps the child on every exit path (F14)
   }
 

@@ -1041,6 +1041,138 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     expect((await sup.listWorkspaces()).map((w) => w.id)).toContain("ws-bad");
   });
 
+  // ── BRO-2260: turn admission bounds ────────────────────────────────────────
+  //
+  // Two dispatches on DIFFERENT threads are needed to exercise the gate at all:
+  // same-thread turns are already serialized by the per-thread chain, so they can
+  // never be concurrent and the gate would never see them.
+  function blockingRunner(): {
+    run: (o: any) => Promise<RunResult>;
+    releaseAll: () => void;
+    started: () => number;
+  } {
+    let started = 0;
+    const gates: Array<() => void> = [];
+    return {
+      started: () => started,
+      releaseAll: () => {
+        for (const g of gates.splice(0)) g();
+      },
+      run: async () => {
+        started++;
+        await new Promise<void>((res) => gates.push(res));
+        return {
+          state: { phase: "done" as const, sessionId: `s-${started}`, lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    };
+  }
+
+  test("a second concurrent turn in the same workspace is refused (BRO-2260)", async () => {
+    const r = blockingRunner();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: r.run,
+      concurrency: { perWorkspace: 1 },
+    });
+    const first = sup.dispatch("t-a", "one");
+    await Bun.sleep(5);
+    expect(r.started()).toBe(1);
+    await expect(sup.dispatch("t-b", "two")).rejects.toThrow(/already have 1 turn running/i);
+    r.releaseAll();
+    await first;
+  });
+
+  // The POSITIVE half — a gate stuck closed would pass the test above.
+  test("the slot is returned when the turn finishes, so the next one runs (BRO-2260)", async () => {
+    const r = blockingRunner();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: r.run,
+      concurrency: { perWorkspace: 1 },
+    });
+    const first = sup.dispatch("t-a", "one");
+    await Bun.sleep(5);
+    r.releaseAll();
+    await first;
+    const second = sup.dispatch("t-b", "two");
+    await Bun.sleep(5);
+    r.releaseAll();
+    expect((await second).reply).toBe("ok");
+  });
+
+  // The leak that would only show up as an outage much later: a turn that throws
+  // must still give its slot back.
+  test("a FAILING turn still releases its slot (BRO-2260)", async () => {
+    let calls = 0;
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      concurrency: { perWorkspace: 1 },
+      run: async () => {
+        calls++;
+        if (calls === 1) throw new Error("boom");
+        return {
+          state: { phase: "done" as const, sessionId: "s-2", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await expect(sup.dispatch("t-a", "one")).rejects.toThrow("boom");
+    expect((await sup.dispatch("t-b", "two")).reply).toBe("ok");
+  });
+
+  test("the global bound refuses across DIFFERENT workspaces (BRO-2260)", async () => {
+    const r = blockingRunner();
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      run: r.run,
+      workspaceExists: () => true,
+      concurrency: { global: 1 },
+    });
+    await sup.registerWorkspace({ id: "ws-other", name: "other", rootPath: ws.rootPath });
+    const first = sup.dispatch("t-a", "one");
+    await Bun.sleep(5);
+    await expect(
+      sup.dispatch("t-b", "two", undefined, { workspaceId: "ws-other" }),
+    ).rejects.toThrow(/capacity/i);
+    r.releaseAll();
+    await first;
+  });
+
+  test("unbounded by default — the pre-BRO-2260 behaviour is preserved", async () => {
+    const r = blockingRunner();
+    const sup = new Supervisor({ defaultWorkspace: ws, run: r.run });
+    const a = sup.dispatch("t-a", "one");
+    const b = sup.dispatch("t-b", "two");
+    const c = sup.dispatch("t-c", "three");
+    await Bun.sleep(5);
+    expect(r.started()).toBe(3);
+    r.releaseAll();
+    await Promise.all([a, b, c]);
+  });
+
+  test("turn bounds are forwarded to the runner (BRO-2260)", async () => {
+    let seen: { idleTimeoutMs?: number; maxTurnMs?: number } = {};
+    const sup = new Supervisor({
+      defaultWorkspace: ws,
+      turnIdleTimeoutMs: 111,
+      turnMaxMs: 222,
+      run: async (o: any) => {
+        seen = { idleTimeoutMs: o.idleTimeoutMs, maxTurnMs: o.maxTurnMs };
+        return {
+          state: { phase: "done" as const, sessionId: "s", lastText: "ok", turns: 1 },
+          events: [],
+          exitCode: 0,
+        };
+      },
+    });
+    await sup.dispatch("t-a", "go");
+    expect(seen).toEqual({ idleTimeoutMs: 111, maxTurnMs: 222 });
+  });
+
   test("registerWorkspace rejects the reserved default id (BRO-1629)", async () => {
     const sup = new Supervisor({ defaultWorkspace: ws, run: fakeRunner("x") });
     await expect(

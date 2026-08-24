@@ -322,6 +322,24 @@ if (voiceSecret) {
   console.log(`[genesis] voice channel → /voice/* enabled (${queuePath}, ${reach}, ${delivery})`);
 }
 
+/** Read a non-negative integer env var (BRO-2260). Unset or empty → `fallback`.
+ *  An explicit `0` means "no bound" and is honoured. Anything that is not a
+ *  non-negative integer is a configuration MISTAKE: fall back to the safe default
+ *  and say so loudly, rather than silently disabling a limit — a typo in
+ *  `GENESIS_MAX_TURNS` must not become a way to un-bound the box. */
+function intFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    console.error(
+      `[genesis] ${name}=${JSON.stringify(raw)} is not a non-negative integer — using ${fallback}.`,
+    );
+    return fallback;
+  }
+  return n;
+}
+
 const { app, websocket } = build({
   workspaceRoot,
   // Display name for the built-in default workspace (BRO-1672) — label the root
@@ -351,6 +369,32 @@ const { app, websocket } = build({
   // Run directly in the workspace (no worktree) — required for nested-repo
   // workspaces like ~/broomva (BRO-1512). Honored by both engines.
   noWorktree: process.env.GENESIS_NO_WORKTREE === "1",
+  // Turn bounds (BRO-2260). Defaults are DELIBERATE, not "off": the incident that
+  // produced this was an unbounded turn, so an operator who upgrades and sets
+  // nothing must still be protected. Set a var to 0 to opt out explicitly.
+  //
+  // Composes with the BRO-2275 cgroup limits on the genesis-api unit — those cap
+  // what running turns may CONSUME, these cap how many may START and how long any
+  // one may last. Neither substitutes for the other.
+  //
+  // WHY global=2. The unit's MemoryMax is 4G and a `claude -p` turn measured
+  // 1.2-1.9 GB RSS on this box, so two concurrent turns fit under the ceiling and
+  // three do not. A global cap above the memory arithmetic would just move the
+  // failure from a refusal we can explain to a cgroup OOM kill mid-answer that we
+  // cannot. If MemoryMax changes, this number changes with it.
+  //
+  // WHY perWorkspace=1. Same-thread turns are already serialized by the
+  // per-thread chain, so this only bites a principal driving several threads at
+  // once — which is exactly the incident shape. NOTE this also bounds the
+  // OPERATOR'''s own workspaces, not just tenants: a second simultaneous turn in
+  // one workspace is refused rather than queued. That is a deliberate behaviour
+  // change on a 2-vCPU box, and it is why both knobs are env-tunable.
+  concurrency: {
+    perWorkspace: intFromEnv("GENESIS_MAX_TURNS_PER_WORKSPACE", 1),
+    global: intFromEnv("GENESIS_MAX_TURNS", 2),
+  },
+  turnIdleTimeoutMs: intFromEnv("GENESIS_TURN_IDLE_TIMEOUT_MS", 15 * 60_000),
+  turnMaxMs: intFromEnv("GENESIS_TURN_MAX_MS", 30 * 60_000),
   trace: printTrace, // per-event JSONL trace (BRO-1524/1620)
   // Voice intake (BRO-2228). voiceSecret undefined → routes are not registered.
   voiceSecret,

@@ -30,6 +30,7 @@ import {
   runAgent,
 } from "@genesis/runner";
 import { seedAgentStack } from "./agent-stack";
+import { type ConcurrencyLimits, TurnGate } from "./concurrency";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, TokenUsage, Turn, Workspace } from "./types";
 import { InMemoryWorkspaceRepository, type WorkspaceRepository } from "./workspace-repository";
@@ -155,6 +156,14 @@ export interface SupervisorConfig {
    *  stack (BRO-2252). Default: {@link seedAgentStack}. Injected in tests so the
    *  call can be asserted without touching a real filesystem. */
   stackSeeder?: (rootPath: string) => void;
+  /** Bound simultaneous turns per workspace and box-wide (BRO-2260). Omit → the
+   *  pre-BRO-2260 behaviour: unbounded. Composes with, and does not replace, the
+   *  cgroup limits BRO-2275 put on the genesis-api unit. */
+  concurrency?: ConcurrencyLimits;
+  /** Kill a turn after this long with no stream output (BRO-2260). */
+  turnIdleTimeoutMs?: number;
+  /** Kill a turn after this long in total (BRO-2260). */
+  turnMaxMs?: number;
 }
 
 export interface DispatchResult {
@@ -416,6 +425,10 @@ export class Supervisor {
   private readonly warnedMissingWorkspaces = new Set<string>();
   /** Agent-stack seeder (BRO-2252); the real filesystem writer in production. */
   private readonly stackSeeder: (rootPath: string) => void;
+  /** Turn admission gate (BRO-2260). */
+  private readonly gate: TurnGate;
+  private readonly turnIdleTimeoutMs?: number;
+  private readonly turnMaxMs?: number;
 
   constructor(cfg: SupervisorConfig) {
     this.store = cfg.store ?? new InMemoryStore();
@@ -443,6 +456,9 @@ export class Supervisor {
       ((rootPath: string) => {
         seedAgentStack(rootPath);
       });
+    this.gate = new TurnGate(cfg.concurrency ?? {});
+    this.turnIdleTimeoutMs = cfg.turnIdleTimeoutMs;
+    this.turnMaxMs = cfg.turnMaxMs;
     this.defaultWorkspace = cfg.defaultWorkspace;
     // Build the env-derived SEED (BRO-1627 order preserved): default first, then the
     // boot-discovered workspaces (a later extra with the same id wins). The default
@@ -837,43 +853,59 @@ export class Supervisor {
           `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
         );
       }
-      const result = await run({
-        prompt: text,
-        cwd: workspace.rootPath,
-        resumeSessionId: session.agentSessionId,
-        host: lease.host,
-        extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
-        // BRO-2235: the tenant's own HOME, when it has one. Unset leaves the
-        // server's HOME in place, which is the current behaviour.
-        home: workspace.home,
-        // Per-turn model/effort (BRO-1573) override the constructor defaults.
-        model: turnOpts?.model,
-        effort: turnOpts?.effort,
-        remoteCwd: lease.remoteCwd ?? this.remoteCwd,
-        // Stable per-session worktree → reused across turns so claude --resume
-        // finds its cwd-scoped session (multi-turn continuity on LocalHost).
-        // noWorktree → run directly in the workspace (BRO-1512: nested-repo cwd).
-        sessionKey: session.id,
-        worktree: noWorktree ? false : undefined,
-        // Multimodal attachments (BRO-1706) — the runner writes them into the
-        // resolved cwd and appends their paths to the prompt.
-        attachments: turnOpts?.attachments,
-        onState: (state, event) => {
-          session.phase = state.phase;
-          // Tracing is side-channel — a throwing trace hook must NOT fail the
-          // turn (CodeRabbit #18). Guard at the call site, not just in the impl.
-          if (this.trace) {
-            try {
-              this.trace(session.id, event);
-            } catch (e) {
-              console.error(
-                `[genesis] trace hook failed (session=${session.id}): ${e instanceof Error ? e.message : String(e)}`,
-              );
+      // Admission (BRO-2260) — AFTER the workspace guards so a refusal names a
+      // real workspace, and immediately before the spawn so a slot is never held
+      // across the store writes above. Throws TurnRejectedError, which the api
+      // surfaces to the sender: a refusal that says why is recoverable, an
+      // unbounded queue is not (Kapso drops a message after 3 timed-out retries).
+      const slot = this.gate.acquire(workspace.id);
+      let result: RunResult;
+      try {
+        result = await run({
+          prompt: text,
+          cwd: workspace.rootPath,
+          // Turn bounds (BRO-2260). Two clocks: `idle` catches a wedged child,
+          // `max` catches a turn that keeps emitting while pinning the box — the
+          // BRO-2275 shape, which an idle timer would never have fired on.
+          idleTimeoutMs: this.turnIdleTimeoutMs,
+          maxTurnMs: this.turnMaxMs,
+          resumeSessionId: session.agentSessionId,
+          host: lease.host,
+          extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
+          // BRO-2235: the tenant's own HOME, when it has one. Unset leaves the
+          // server's HOME in place, which is the current behaviour.
+          home: workspace.home,
+          // Per-turn model/effort (BRO-1573) override the constructor defaults.
+          model: turnOpts?.model,
+          effort: turnOpts?.effort,
+          remoteCwd: lease.remoteCwd ?? this.remoteCwd,
+          // Stable per-session worktree → reused across turns so claude --resume
+          // finds its cwd-scoped session (multi-turn continuity on LocalHost).
+          // noWorktree → run directly in the workspace (BRO-1512: nested-repo cwd).
+          sessionKey: session.id,
+          worktree: noWorktree ? false : undefined,
+          // Multimodal attachments (BRO-1706) — the runner writes them into the
+          // resolved cwd and appends their paths to the prompt.
+          attachments: turnOpts?.attachments,
+          onState: (state, event) => {
+            session.phase = state.phase;
+            // Tracing is side-channel — a throwing trace hook must NOT fail the
+            // turn (CodeRabbit #18). Guard at the call site, not just in the impl.
+            if (this.trace) {
+              try {
+                this.trace(session.id, event);
+              } catch (e) {
+                console.error(
+                  `[genesis] trace hook failed (session=${session.id}): ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
             }
-          }
-          onState?.(state, event);
-        },
-      });
+            onState?.(state, event);
+          },
+        });
+      } finally {
+        slot.release();
+      }
 
       if (result.state.sessionId) session.agentSessionId = result.state.sessionId;
       // Capture the cwd's branch (BRO-1664) — refreshes each turn (worktree branch or
