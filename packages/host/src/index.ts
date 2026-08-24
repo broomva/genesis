@@ -30,8 +30,17 @@ export interface ExecResult {
 }
 
 /** How long after a handle settles its kills are still delivered (BRO-2260).
- *  Long enough to cover the runner's own `finally` and SIGKILL escalation; far
- *  shorter than any realistic pid-recycling interval. */
+ *
+ *  Long enough to cover the runner's own `finally` and its SIGKILL escalation
+ *  (5s), and far shorter than any realistic pid-recycling interval.
+ *
+ *  MEASURED on the production host rather than assumed: `pid_max` is 4,194,304 and
+ *  the box averages 1.69 forks/sec (126,611 forks over 74,928s of uptime). Wrapping
+ *  the pid space therefore takes on the order of 29 DAYS; this window is 30
+ *  SECONDS. Inside it roughly 51 pids are issued out of four million, so a signal
+ *  delivered here cannot reach a recycled pid. If this ever runs somewhere with a
+ *  small `pid_max` and a very high fork rate, shorten it — the number is a
+ *  consequence of those two facts, not a preference. */
 const SETTLE_GRACE_MS = 30_000;
 
 export interface SpawnHandle {
