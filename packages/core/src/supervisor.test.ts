@@ -1502,3 +1502,97 @@ describe("homeRefusal (BRO-2235)", () => {
     expect(row?.phase).not.toBe("running");
   });
 });
+
+/**
+ * BRO-2235 — the guards must be UNDELETABLE, not merely present.
+ *
+ * Cross-model review (round 3, PASS) left one minor standing and it is the one that
+ * matters given this branch's history: "no integration test would fail if the
+ * post-lease or title guards were deleted." Every defect on this PR was a guard that
+ * read correctly and did not hold, so a guard nothing asserts is exactly what must
+ * not ship.
+ *
+ * These count LEASES and SPAWNS through a fake provider, so each guard's deletion is
+ * observable rather than inferred:
+ *   - pre-lease refusal  -> zero leases taken (it must refuse before spending a host)
+ *   - post-lease refusal -> the lease it abandoned is RELEASED (no leak)
+ *   - title refusal      -> `runners.print` is never invoked
+ */
+describe("HOME guards are observable, not just present (BRO-2235)", () => {
+  const HOME = "/tenants/573/home";
+
+  class CountingProvider {
+    leases = 0;
+    releases = 0;
+    constructor(private readonly kind: "local" | "vps" = "local") {}
+    async resolveHost() {
+      this.leases++;
+      // Only `host.kind` is read before the guard fires, so a stub is honest here —
+      // a real host would add failure modes the guard is not the subject of.
+      const host = { kind: this.kind } as unknown as ExecutionHost;
+      return { host, release: async () => void this.releases++ };
+    }
+  }
+
+  const spawnCounter = () => {
+    let calls = 0;
+    const run = async () => {
+      calls++;
+      return {
+        state: { phase: "done" as const, sessionId: "s", lastText: "A Title", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+    return { run, calls: () => calls };
+  };
+
+  test("PRE-LEASE refusal (bad engine) spends no host at all", async () => {
+    const provider = new CountingProvider();
+    const spawn = spawnCounter();
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store: new InMemoryStore(),
+      run: spawn.run,
+      runners: { interactive: spawn.run },
+      defaultEngine: "interactive",
+      hostProvider: provider,
+    });
+    await expect(sup.dispatch("t-nolease", "q", undefined, {})).rejects.toThrow(/does not carry/);
+    expect(provider.leases).toBe(0); // deleting the pre-lease guard makes this 1
+    expect(spawn.calls()).toBe(0);
+  });
+
+  test("POST-LEASE refusal (bad host) releases the lease it abandoned", async () => {
+    const provider = new CountingProvider("vps");
+    const spawn = spawnCounter();
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store: new InMemoryStore(),
+      run: spawn.run,
+      hostProvider: provider,
+    });
+    await expect(sup.dispatch("t-vps", "q", undefined, {})).rejects.toThrow(/does not deliver it/);
+    expect(provider.leases).toBe(1); // the host clause needs the lease to be known
+    expect(provider.releases).toBe(1); // ...and must not leak it
+    expect(spawn.calls()).toBe(0); // deleting the host guard makes this 1
+  });
+
+  test("TITLE refusal never reaches the print runner", async () => {
+    const provider = new CountingProvider("vps");
+    const spawn = spawnCounter();
+    const store = new InMemoryStore();
+    const sup = new Supervisor({
+      // print engine + a home the vps host cannot deliver: the TURN is refused, so
+      // drive the title path directly — it is the spawn that bypassed the guard.
+      defaultWorkspace: { ...ws, home: HOME },
+      store,
+      run: spawn.run,
+      hostProvider: provider,
+    });
+    await (
+      sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+    ).generateTitleAsync("t-title-guard", "untrusted tenant text", "a reply");
+    expect(spawn.calls()).toBe(0); // deleting the title guard makes this 1
+  });
+});
