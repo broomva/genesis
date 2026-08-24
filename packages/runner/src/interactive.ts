@@ -62,15 +62,27 @@ export interface EngineHub {
  *  crash or a wrong-session resume. Deliberately cwd-scoped (never a global scan):
  *  `claude --resume` is itself cwd-scoped, so a transcript under a different
  *  project dir is not resumable from here. */
-export function resumableTranscriptExists(cwd: string, sessionId: string): boolean {
+export function resumableTranscriptExists(
+  cwd: string,
+  sessionId: string,
+  home: string = homedir(),
+): boolean {
   // NOTE: `[/.]→-` is a KNOWN-INCOMPLETE mirror of Claude's project slugger — it
   // matches every path Claude currently produces (verified against real
   // `~/.claude/projects/` dirs incl. `/.cache`→`--cache`), but Claude may map
   // other characters (`_`, spaces). A mismatch only produces a FALSE NEGATIVE →
   // fresh spawn (the safe direction). Genesis cwds are workspace roots + the
   // `<root>/.genesis-runs/session-<uuid>` worktree path, all covered by this rule.
+  //
+  // `home` IS A PARAMETER, and that is load-bearing (BRO-2235). This resolved
+  // `homedir()` — the SERVER process's home — while the spawned child writes its
+  // transcript under the HOME it was given. Once per-tenant HOME exists those are
+  // different directories, and the two would permanently disagree: the server would
+  // find no transcript and spawn fresh every turn while the child wrote to its own
+  // home. The failure is SILENT — no error, just a tenant that never remembers
+  // anything. The caller must pass the same home it spawns with.
   const slug = cwd.replace(/[/.]/g, "-");
-  return existsSync(join(homedir(), ".claude", "projects", slug, `${sessionId}.jsonl`));
+  return existsSync(join(home, ".claude", "projects", slug, `${sessionId}.jsonl`));
 }
 
 export interface EngineSession {

@@ -33,6 +33,15 @@ export interface Workspace {
    *  workspaceId, so a request-level flag would let the caller choose to be
    *  unconfined. Set from the manifest, server-side, at provisioning time. */
   confined?: boolean;
+  /** Absolute HOME for this workspace's agent spawns (BRO-2235). When set, the
+   *  tenant gets its own `~/.claude` instead of inheriting the operator's — which
+   *  today carries 75 user-scope skills (two declaring `allowed-tools`, a real
+   *  permission layer), the user-scope settings.json, and shared history/sessions.
+   *
+   *  Unset = current behaviour. See `tenantEnv` for why this is fail-SAFE rather
+   *  than fail-closed, and note that changing it relocates the tenant's transcripts,
+   *  so an existing tenant loses `--resume` continuity unless they are migrated. */
+  home?: string;
 }
 
 export interface Session {
