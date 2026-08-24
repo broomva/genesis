@@ -1,9 +1,24 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCaller } from "./voice";
-import { VOICE_QUEUE_FILE, createVoiceQueue, parseVoicePrincipals } from "./voice-queue";
+import type { VoiceStatus } from "./voice-queue";
+import {
+  HANDLED_FILE,
+  VOICE_QUEUE_FILE,
+  createVoiceQueue,
+  parseVoicePrincipals,
+  readQueueStatus,
+} from "./voice-queue";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -129,5 +144,234 @@ describe("createVoiceQueue", () => {
     const lines = readFileSync(file, "utf8").trim().split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0] as string).id).toBe("t-0");
+  });
+});
+
+describe("readQueueStatus — the operator view", () => {
+  const q = (dir: string, lines: object[]) => {
+    for (const l of lines) appendFileSync(join(dir, VOICE_QUEUE_FILE), `${JSON.stringify(l)}\n`);
+  };
+  const h = (dir: string, lines: object[]) => {
+    for (const l of lines) appendFileSync(join(dir, HANDLED_FILE), `${JSON.stringify(l)}\n`);
+  };
+  const t = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    callerId: "573017758620",
+    deliverTo: "573017758620",
+    request: `ask ${id}`,
+    createdAt: "2026-08-24T00:00:00Z",
+    ...over,
+  });
+
+  test("a ticket nobody has touched is pending", () => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    expect(readQueueStatus(d).entries).toMatchObject([
+      { id: "v-1", status: "pending", attempts: 0 },
+    ]);
+  });
+
+  const CASES: Array<{
+    label: string;
+    disposition: string;
+    attempts: number;
+    terminal: boolean;
+    expected: VoiceStatus;
+  }> = [
+    {
+      label: "delivered",
+      disposition: "delivered",
+      attempts: 1,
+      terminal: true,
+      expected: "delivered",
+    },
+    {
+      label: "undeliverable",
+      disposition: "undeliverable",
+      attempts: 1,
+      terminal: true,
+      expected: "undeliverable",
+    },
+    {
+      label: "a retryable failure",
+      disposition: "failed:send",
+      attempts: 1,
+      terminal: false,
+      expected: "retrying",
+    },
+    {
+      label: "an exhausted failure",
+      disposition: "failed:send",
+      attempts: 3,
+      terminal: true,
+      expected: "abandoned",
+    },
+  ];
+
+  test.each(CASES)("$label maps to $expected", (c) => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [
+      {
+        id: "v-1",
+        at: "2026-08-24T00:00:05Z",
+        disposition: c.disposition,
+        attempts: c.attempts,
+        terminal: c.terminal,
+      },
+    ]);
+    expect(readQueueStatus(d).entries[0]?.status).toBe(c.expected);
+  });
+
+  test("a closed window surfaces its REASON — the whole point of this view", () => {
+    // Without the reason an operator sees "failed" and cannot tell a transport
+    // blip from "this person has not messaged us in 24h, and retrying is futile".
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [
+      {
+        id: "v-1",
+        at: "2026-08-24T00:00:05Z",
+        disposition: "failed:window-closed",
+        attempts: 1,
+        terminal: false,
+      },
+    ]);
+    expect(readQueueStatus(d).entries[0]).toMatchObject({
+      status: "retrying",
+      reason: "window-closed",
+    });
+  });
+
+  test("newest first — an operator asks what JUST happened", () => {
+    const d = tmp();
+    q(d, [t("v-old"), t("v-new")]);
+    expect(readQueueStatus(d).entries.map((e) => e.id)).toEqual(["v-new", "v-old"]);
+  });
+
+  test("a stable id appearing twice is shown ONCE", () => {
+    const d = tmp();
+    q(d, [t("v-1"), t("v-1")]);
+    expect(readQueueStatus(d).entries).toHaveLength(1);
+  });
+
+  test("a truncated or malformed line does not hide the tickets around it", () => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    appendFileSync(join(d, VOICE_QUEUE_FILE), '{"id":"v-2","request":"partial\n');
+    q(d, [t("v-3")]);
+    expect(readQueueStatus(d).entries.map((e) => e.id)).toEqual(["v-3", "v-1"]);
+  });
+
+  test("missing files are an empty queue, not a crash", () => {
+    expect(readQueueStatus(join(tmp(), "nope")).entries).toEqual([]);
+  });
+
+  test("an entry written BEFORE `terminal` existed still classifies", () => {
+    // Backward compatibility with records already on disk.
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [{ id: "v-1", at: "x", disposition: "delivered", attempts: 1 }]);
+    expect(readQueueStatus(d).entries[0]?.status).toBe("delivered");
+  });
+});
+
+describe("DRIFT GUARD: the two apps must name the same file", () => {
+  test("api HANDLED_FILE equals chat-bot's, read from ITS SOURCE not copied here", () => {
+    // A copied literal is not a guard — it agrees with itself forever while the
+    // real constant moves. This reads the other app's source, so renaming there
+    // fails here.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "chat-bot", "src", "voice-delivery.ts"),
+      "utf8",
+    );
+    const m = src.match(/export const HANDLED_FILE\s*=\s*"([^"]+)"/);
+    expect(m?.[1]).toBe(HANDLED_FILE);
+  });
+});
+
+describe("a journal that cannot be read must not read as 'all pending'", () => {
+  test("an unreadable delivered.jsonl is reported DEGRADED, not silently empty", () => {
+    // The failure mode this prevents: the view confidently showing every ticket
+    // pending — the opposite of the truth — and hiding the very failures it was
+    // built to surface.
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    mkdirSync(join(d, HANDLED_FILE), { recursive: true }); // a directory: read fails
+    const r = readQueueStatus(d);
+    expect(r.degraded).toContain(HANDLED_FILE);
+    expect(r.entries).toHaveLength(1);
+  });
+
+  test("a healthy read reports no degradation", () => {
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    expect(readQueueStatus(d).degraded).toBeUndefined();
+  });
+
+  test("a LEGACY exhausted failure is abandoned, not 'retrying'", () => {
+    // Written before `terminal` existed. The consumer treats attempts >= cap as
+    // terminal; the view must agree or it promises a retry that never comes.
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    appendFileSync(
+      join(d, HANDLED_FILE),
+      `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts: 3 })}\n`,
+    );
+    expect(readQueueStatus(d).entries[0]?.status).toBe("abandoned");
+  });
+
+  test("a LEGACY failure UNDER the cap is still retrying", () => {
+    const d = tmp();
+    appendFileSync(
+      join(d, VOICE_QUEUE_FILE),
+      `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+    );
+    appendFileSync(
+      join(d, HANDLED_FILE),
+      `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts: 1 })}\n`,
+    );
+    expect(readQueueStatus(d).entries[0]?.status).toBe("retrying");
+  });
+});
+
+describe("DRIFT GUARD: the legacy attempt cap must equal the consumer's", () => {
+  test("MAX_ATTEMPTS_FALLBACK matches chat-bot MAX_ATTEMPTS, read from ITS source", () => {
+    // The fallback only classifies rows written before `terminal` existed, but if
+    // the consumer's cap moves and this does not, those rows silently flip
+    // between "retrying" and "abandoned" — the status lie this was added to fix.
+    // Read, never copied: a copied number agrees with itself forever.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "chat-bot", "src", "voice-delivery.ts"),
+      "utf8",
+    );
+    const m = src.match(/export const MAX_ATTEMPTS\s*=\s*(\d+)/);
+    expect(m?.[1]).toBeDefined();
+    // Exercised through behaviour rather than by exporting the constant: a legacy
+    // row AT the consumer's cap must read "abandoned", one below it "retrying".
+    const cap = Number(m?.[1]);
+    const mk = (attempts: number) => {
+      const d = tmp();
+      appendFileSync(
+        join(d, VOICE_QUEUE_FILE),
+        `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+      );
+      appendFileSync(
+        join(d, HANDLED_FILE),
+        `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts })}\n`,
+      );
+      return readQueueStatus(d).entries[0]?.status;
+    };
+    expect(mk(cap)).toBe("abandoned");
+    expect(mk(cap - 1)).toBe("retrying");
   });
 });

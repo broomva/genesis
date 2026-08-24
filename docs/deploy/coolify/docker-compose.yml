@@ -24,12 +24,20 @@ services:
     environment:
       GENESIS_HOST: local
       GENESIS_WORKSPACE: /workspace
+      # Both services MUST agree on this or tickets are written where nothing reads.
+      GENESIS_VOICE_QUEUE_DIR: /voice
       # Subscription auth (1-year token from `claude setup-token`). Required.
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and set it in .env}
       # Shared bearer bot↔api (gates /message + /threads even if the net is misconfigured).
       GENESIS_TOKEN: ${GENESIS_TOKEN:?set GENESIS_TOKEN in .env (e.g. openssl rand -hex 32)}
     volumes:
       - genesis-data:/data
+      # The voice queue is the ONE path the api and the bot share: the api writes
+      # tickets, the bot drains them. Their /data volumes are deliberately
+      # separate, so without this the api would write into genesis-data and the
+      # consumer would scan genesis-bot-data — intake succeeding while no ticket
+      # could ever reach the consumer.
+      - genesis-voice:/voice
       # The repo(s) the agent operates on. REQUIRED — no silent empty default (an
       # empty /workspace boots healthy but the agent has nothing to work on).
       - ${GENESIS_WORKSPACE_HOST:?set GENESIS_WORKSPACE_HOST to the path of your repos}:/workspace
@@ -62,9 +70,14 @@ services:
       # REQUIRED — fail-closed. Without it the bot refuses to start (no open bot).
       GENESIS_TELEGRAM_ALLOWED_USERS: ${GENESIS_TELEGRAM_ALLOWED_USERS:?set your numeric Telegram chat id}
       GENESIS_BOT_STATE_DIR: /data/state
+      # Must MATCH the api's value above — they are the two ends of one queue.
+      GENESIS_VOICE_QUEUE_DIR: /voice
     volumes:
       - genesis-bot-data:/data
+      - genesis-voice:/voice
 
 volumes:
   genesis-data:
   genesis-bot-data:
+  # Shared by BOTH services — see the mounts above.
+  genesis-voice:

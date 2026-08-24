@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "./server";
@@ -396,5 +396,101 @@ describe("voice routes (BRO-2228)", () => {
       SECRET,
     );
     expect(res.status).toBe(503);
+  });
+});
+
+describe("GET /admin/voice/queue — the PII endpoint's gate (BRO-2284)", () => {
+  const TOKEN = "engine-token-xyz";
+  function queueDir(tickets: object[], handled: object[] = []): string {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "genesis-vq-")));
+    for (const t of tickets) appendFileSync(join(d, "queue.jsonl"), `${JSON.stringify(t)}\n`);
+    for (const h of handled) appendFileSync(join(d, "delivered.jsonl"), `${JSON.stringify(h)}\n`);
+    return d;
+  }
+  const ticket = (id: string) => ({
+    id,
+    callerId: "573017758620",
+    deliverTo: "573017758620",
+    request: `ask ${id}`,
+    createdAt: "2026-08-24T00:00:00Z",
+  });
+  const get = (app: { fetch: (r: Request) => Promise<Response> }, path: string, headers = {}) =>
+    app.fetch(new Request(`http://x${path}`, { headers }));
+
+  test("WITHOUT an engine token the route does not exist at all (404, never open)", async () => {
+    // Fails closed. The shared helper treats an unset token as "allow", which is
+    // fine for a thread list and not for callers' phone numbers.
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      voiceQueueDir: queueDir([ticket("v-1")]),
+    } as never);
+    expect((await get(app as never, "/admin/voice/queue")).status).toBe(404);
+  });
+
+  test("with a token, no credential is 401", async () => {
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      token: TOKEN,
+      voiceQueueDir: queueDir([ticket("v-1")]),
+    } as never);
+    expect((await get(app as never, "/admin/voice/queue")).status).toBe(401);
+  });
+
+  test("a QUERY-STRING token is REJECTED — secrets must not reach logs", async () => {
+    // The shared helper accepts ?token=…; copying that here wrote a live secret
+    // into access logs, proxy logs and browser history. Header only.
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      token: TOKEN,
+      voiceQueueDir: queueDir([ticket("v-1")]),
+    } as never);
+    expect((await get(app as never, `/admin/voice/queue?token=${TOKEN}`)).status).toBe(401);
+  });
+
+  test("a wrong bearer is 401; the right one is 200", async () => {
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      token: TOKEN,
+      voiceQueueDir: queueDir([ticket("v-1")]),
+    } as never);
+    expect(
+      (await get(app as never, "/admin/voice/queue", { authorization: "Bearer nope" })).status,
+    ).toBe(401);
+    expect(
+      (await get(app as never, "/admin/voice/queue", { authorization: `Bearer ${TOKEN}` })).status,
+    ).toBe(200);
+  });
+
+  test("the response is BOUNDED, and says how many there really are", async () => {
+    const many = Array.from({ length: 120 }, (_, i) => ticket(`v-${i}`));
+    const { app } = build({
+      workspaceRoot: "/tmp",
+      token: TOKEN,
+      voiceQueueDir: queueDir(many),
+    } as never);
+    const body = (await (
+      await get(app as never, "/admin/voice/queue", { authorization: `Bearer ${TOKEN}` })
+    ).json()) as { entries: unknown[]; total: number };
+    expect(body.entries).toHaveLength(50); // default
+    expect(body.total).toBe(120);
+
+    const capped = (await (
+      await get(app as never, "/admin/voice/queue?limit=9999", {
+        authorization: `Bearer ${TOKEN}`,
+      })
+    ).json()) as { entries: unknown[] };
+    expect(capped.entries).toHaveLength(120); // min(limit cap 200, available)
+  });
+
+  test("an unreadable journal is reported DEGRADED, not as an empty queue", async () => {
+    const d = queueDir([ticket("v-1")]);
+    mkdirSync(join(d, "delivered.jsonl"), { recursive: true }); // read fails
+    const { app } = build({ workspaceRoot: "/tmp", token: TOKEN, voiceQueueDir: d } as never);
+    const body = (await (
+      await get(app as never, "/admin/voice/queue", { authorization: `Bearer ${TOKEN}` })
+    ).json()) as { degraded?: string };
+    expect(body.degraded).toContain("delivered.jsonl");
+    // ...and does NOT hand the caller the absolute path.
+    expect(body.degraded).not.toContain(d);
   });
 });

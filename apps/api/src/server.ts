@@ -25,6 +25,7 @@ import {
   resolveCaller,
   secretMatches,
 } from "./voice";
+import { readQueueStatus } from "./voice-queue";
 import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
@@ -92,6 +93,17 @@ export interface BuildOpts {
   /** Numbers the voice channel may deliver an answer to. A caller matching one
    *  gets follow-up on that number; everyone else can only leave a message. */
   voicePrincipals?: readonly DeliverablePrincipal[];
+  /** Where the voice queue lives on disk. Enables the OPERATOR view at
+   *  GET /admin/voice/queue — the joined state of tickets and what became of
+   *  them.
+   *
+   *  DELIBERATELY NOT UNDER /voice. The Tailscale Funnel publishes exactly the
+   *  /voice prefix to the internet so an ElevenLabs agent can reach
+   *  /voice/identify and /voice/request. A queue view mounted there would put
+   *  every caller's request text on the public internet behind no secret at all.
+   *  This path sits outside that prefix and is gated like /threads: open on the
+   *  loopback, authenticated at the BFF. */
+  voiceQueueDir?: string;
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
@@ -358,6 +370,54 @@ export function build(opts: BuildOpts) {
         // again in the same change that adds the consumer. (BRO-2228 scope item 4,
         // blocked on #107.)
         followUp: "none",
+      });
+    });
+  }
+
+  // Operator view of the voice queue (BRO-2284). Until this existed the only way
+  // to see a failed delivery was to ssh in and read a journal, which means a
+  // closed 24h service window — the failure most likely to happen and least
+  // likely to be noticed — was effectively invisible.
+  //
+  // Same bearer gate as /threads, and see voiceQueueDir above for why the path is
+  // NOT under /voice.
+  //
+  // FAILS CLOSED, unlike every other route here. `unauthorized()` returns false
+  // when no token is configured — a deliberate convenience for the local/dev
+  // case — and this process binds 0.0.0.0, so on a tokenless deploy anyone who
+  // can reach the port reads callers' phone numbers and request text without
+  // ever passing the BFF. Reusing that helper for a route carrying PII would
+  // inherit a fail-open default I have no business inheriting, so the route is
+  // NOT REGISTERED at all without a token, and the panel self-hides. Set
+  // GENESIS_TOKEN to turn it on. (P20 round 1, BLOCKER.)
+  if (opts.voiceQueueDir && opts.token) {
+    const voiceQueueDir = opts.voiceQueueDir;
+    const token = opts.token;
+    app.get("/admin/voice/queue", async (c) => {
+      // HEADER ONLY. The shared helper also accepts ?token=…, and copying that
+      // here put a live secret somewhere it gets written down: access logs,
+      // proxy logs, browser history, referrers. Tolerable for a thread list;
+      // not for the endpoint that serves callers' phone numbers. Compared
+      // explicitly rather than through unauthorized() so an absent token can
+      // never mean "allow". (P20 round 2, BLOCKER.)
+      const auth = c.req.header("authorization");
+      const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
+      if (!bearer || bearer !== token) return c.json({ error: "unauthorized" }, 401);
+      const { entries: all, degraded } = readQueueStatus(voiceQueueDir);
+      // Bounded. Both journals are append-only and never compacted, so an
+      // unbounded response would ship an ever-growing PII history to render at
+      // most a dozen rows.
+      const rawLimit = Number(c.req.query("limit"));
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const counts: Record<string, number> = {};
+      for (const e of all) counts[e.status] = (counts[e.status] ?? 0) + 1;
+      return c.json({
+        entries: all.slice(0, limit),
+        counts,
+        total: all.length,
+        // Present only when a journal could not be read — the client shows it
+        // rather than rendering a confidently wrong "everything is pending".
+        ...(degraded ? { degraded } : {}),
       });
     });
   }

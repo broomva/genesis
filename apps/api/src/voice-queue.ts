@@ -16,7 +16,7 @@
 // throw into an honest 503 ("could not record the request; please try again")
 // that the agent reads to the caller. Propagating is what makes that 503 true.
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type DeliverablePrincipal, type VoiceTicket, normalizeCallerId } from "./voice";
 
@@ -75,6 +75,21 @@ export function parseVoicePrincipals(raw: string | undefined): DeliverablePrinci
  *  already promised, and the same on-disk convention as the session traces. */
 export const VOICE_QUEUE_FILE = "queue.jsonl";
 
+/** The consumer's log of what became of each ticket.
+ *
+ *  MUST equal apps/chat-bot/src/voice-delivery.ts HANDLED_FILE. The two apps do
+ *  not share a module, so this is a second declaration of one name — the same
+ *  situation normalizeCallerId is in, and it fails the same way: silently, by
+ *  reading an empty queue and reporting every ticket pending. The drift test
+ *  below pins them together. */
+export const HANDLED_FILE = "delivered.jsonl";
+
+/** Only for rows written BEFORE HandledEntry gained `terminal`. Current rows
+ *  carry the flag, so this is never consulted for them — which is the point:
+ *  duplicating the consumer's cap is a drift risk, and confining it to legacy
+ *  rows keeps that risk from growing. */
+const MAX_ATTEMPTS_FALLBACK = 3;
+
 /** Build the enqueue sink. The directory is created ONCE here rather than per
  *  append: /voice/request runs with a caller on the line, so the hot path is one
  *  append and nothing else. */
@@ -85,4 +100,133 @@ export function createVoiceQueue(dir: string): (ticket: VoiceTicket) => void {
     // No try/catch: see FAILURE POLICY above. A throw here becomes the 503.
     appendFileSync(file, `${JSON.stringify(ticket)}\n`);
   };
+}
+
+// ── Operator view (BRO-2284) ───────────────────────────────────────────────
+//
+// The queue is two append-only files written by two processes: the api records
+// tickets, the chat-bot records what became of them. Neither is readable as a
+// STATE without joining them, and until now the only way to see a failure was to
+// ssh in and read a journal. This is the join, served to the PWA.
+
+/** What happened to a ticket, from the operator's point of view. */
+export type VoiceStatus =
+  | "pending" // nothing has tried it yet
+  | "delivered" // answered on WhatsApp
+  | "undeliverable" // the caller was not recognized: nowhere to send
+  | "retrying" // failed, but will be attempted again
+  | "abandoned"; // failed and will not be attempted again
+
+export interface VoiceQueueEntry {
+  readonly id: string;
+  readonly callerId: string;
+  readonly deliverTo?: string;
+  readonly request: string;
+  readonly createdAt: string;
+  readonly status: VoiceStatus;
+  readonly attempts: number;
+  readonly lastAttemptAt?: string;
+  /** For a failure, WHY — "window-closed" | "dispatch" | "send". The first is the
+   *  one worth surfacing: it means the recipient has not messaged us in 24h, and
+   *  no amount of retrying changes that. */
+  readonly reason?: string;
+}
+
+interface RawHandled {
+  id: string;
+  at: string;
+  disposition: string;
+  attempts: number;
+  terminal?: boolean;
+}
+
+function isHandled(v: unknown): v is RawHandled {
+  if (!v || typeof v !== "object") return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.id === "string" && e.id.length > 0 && typeof e.disposition === "string";
+}
+
+/** Join queue.jsonl with delivered.jsonl. Newest ticket first, because an
+ *  operator opening this is asking "what just happened", not "what happened
+ *  first". Tolerant of both files for the same reason parseQueue is: they are
+ *  being appended to by another process while this reads them. */
+export function readQueueStatus(dir: string): { entries: VoiceQueueEntry[]; degraded?: string } {
+  let degraded: string | undefined;
+  const readLines = (name: string): unknown[] => {
+    const p = join(dir, name);
+    let raw: string;
+    try {
+      // Read FIRST rather than existsSync-then-read. existsSync answers false for
+      // a path it cannot stat — an unreadable parent directory, for instance — so
+      // gating on it turned "I am not allowed to look" into "there is nothing
+      // here", which is the exact silent lie the degraded flag exists to prevent.
+      raw = readFileSync(p, "utf8");
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      // ENOENT is the ONLY healthy absence. Everything else is degradation.
+      if (code === "ENOENT") return [];
+      // The name, never the path: the message reaches a browser and the absolute
+      // queue location is not the client's business.
+      degraded = `${name} could not be read (${code ?? "unknown error"})`;
+      return [];
+    }
+    const out: unknown[] = [];
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        out.push(JSON.parse(s));
+      } catch {
+        // Skipped, never fatal — see parseQueue.
+      }
+    }
+    return out;
+  };
+
+  const handled = new Map<string, RawHandled>();
+  for (const v of readLines(HANDLED_FILE)) if (isHandled(v)) handled.set(v.id, v);
+
+  const seen = new Set<string>();
+  const entries: VoiceQueueEntry[] = [];
+  for (const v of readLines(VOICE_QUEUE_FILE)) {
+    if (!v || typeof v !== "object") continue;
+    const t = v as Record<string, unknown>;
+    if (typeof t.id !== "string" || !t.id || typeof t.request !== "string") continue;
+    // A stable id can appear twice (a provider retry); show the ticket once.
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+
+    const h = handled.get(t.id);
+    const [kind, reason] = (h?.disposition ?? "").split(":");
+    // An entry written before `terminal` existed has none, and reading that as
+    // "will retry" tells the operator the opposite of what the consumer will do —
+    // it treats attempts >= its cap as terminal. Re-derive when the flag is
+    // absent. MAX_ATTEMPTS_FALLBACK duplicates the consumer's cap and is used
+    // ONLY for those legacy rows; current rows carry `terminal` and never reach it.
+    const exhausted =
+      h?.terminal === undefined ? (h?.attempts ?? 0) >= MAX_ATTEMPTS_FALLBACK : h.terminal;
+    const status: VoiceStatus = !h
+      ? "pending"
+      : kind === "delivered"
+        ? "delivered"
+        : kind === "undeliverable"
+          ? "undeliverable"
+          : exhausted
+            ? "abandoned"
+            : "retrying";
+
+    entries.push({
+      id: t.id,
+      callerId: typeof t.callerId === "string" ? t.callerId : "",
+      ...(typeof t.deliverTo === "string" ? { deliverTo: t.deliverTo } : {}),
+      request: t.request,
+      createdAt: typeof t.createdAt === "string" ? t.createdAt : "",
+      status,
+      attempts: typeof h?.attempts === "number" ? h.attempts : 0,
+      ...(h?.at ? { lastAttemptAt: h.at } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  }
+  entries.reverse();
+  return degraded ? { entries, degraded } : { entries };
 }
