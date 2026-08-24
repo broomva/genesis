@@ -60,6 +60,7 @@ import {
   isOperatorToken,
   parseOperatorCommand,
 } from "./operator";
+import { DEFAULT_STALL_MS, withStallTimeout } from "./stall-timeout";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
 import { drainOnce } from "./voice-delivery";
@@ -620,6 +621,8 @@ function startVoiceDelivery(): void {
   const wa = new WhatsAppClient({ kapsoApiKey });
   const raw = Number(process.env.GENESIS_VOICE_POLL_MS);
   const intervalMs = Number.isFinite(raw) && raw >= 1000 ? raw : 15_000;
+  const rawStall = Number(process.env.GENESIS_VOICE_STALL_MS);
+  const voiceStallMs = Number.isFinite(rawStall) && rawStall >= 1000 ? rawStall : DEFAULT_STALL_MS;
 
   let running = false;
   const tick = async () => {
@@ -637,18 +640,39 @@ function startVoiceDelivery(): void {
         workspaceFor: (deliverTo) =>
           tenantWorkspaceId({ channel: "kapso", id: deliverTo }, whatsappWorkspacePrefix),
         dispatch: async (ticket, workspaceId) => {
+          // BOUNDED, and found by dogfooding: the first live drain sat on a turn
+          // for nine minutes with no bound at all, and because a pass never
+          // overlaps itself, one slow request stalls every later ticket behind it
+          // indefinitely. Same shape the WhatsApp handler uses.
+          const abort = new AbortController();
+          let lastActivity = Date.now();
           let out = "";
-          for await (const chunk of genesisStream({
-            baseUrl,
-            // A fresh session per ticket: a voice request is a one-shot ask, and
-            // sharing a thread would bleed context between unrelated calls.
-            threadId: `voice:${ticket.id}`,
-            text: ticket.request,
-            token,
-            workspaceId,
-          })) {
-            out += chunk;
-          }
+          const stream = withStallTimeout(
+            genesisStream({
+              baseUrl,
+              // A fresh session per ticket: a voice request is a one-shot ask, and
+              // sharing a thread would bleed context between unrelated calls.
+              threadId: `voice:${ticket.id}`,
+              text: ticket.request,
+              token,
+              workspaceId,
+              signal: abort.signal,
+              onActivity: () => {
+                lastActivity = Date.now();
+              },
+            }),
+            voiceStallMs,
+            {
+              // Aborting the fetch is what actually closes the socket; returning
+              // the generator alone leaves a hung request in flight.
+              onStall: () => abort.abort(),
+              // Measured on ACTIVITY, not yields. genesisStream emits only text,
+              // so a turn inside a long tool call yields nothing while being
+              // perfectly healthy — a yield-based bound would kill it.
+              idleMs: () => Date.now() - lastActivity,
+            },
+          );
+          for await (const chunk of stream) out += chunk;
           return out;
         },
         send: async (to, text) => {
