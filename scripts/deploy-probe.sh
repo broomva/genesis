@@ -157,10 +157,6 @@ echo "▶ backend liveness"
 eq "genesis-api /health is 200" "200" \
   "$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 8 "http://127.0.0.1:$API_PORT/health")"
 
-# Self-test. A harness that cannot report red is not evidence, so prove it can —
-# and prove it by asserting the COUNTER MOVED, not by eyeballing the output. The
-# earlier version printed a failing line without checking FAILED had grown, which
-# would have passed even if bad() were broken.
 echo
 if [ "$FAILED" -eq 0 ]; then
   echo "✓ no differential detected, and both routes still refuse anonymous callers"
