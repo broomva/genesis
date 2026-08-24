@@ -46,6 +46,41 @@ const WORKSPACES_DIR =
   process.env.GENESIS_WORKSPACES_DIR ?? join(HOME, ".config/genesis-bot/workspaces");
 const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
 
+// BRO-2235 — per-tenant HOME. OPT-IN, and deliberately not on by default: pointing
+// a tenant at its own HOME also points it at its own CREDENTIAL, and which credential
+// a tenant should use (the operator's subscription vs a per-tenant API key) is an
+// open operator decision. Enabling this without answering that question breaks every
+// turn for that tenant.
+//
+// Measured, not assumed — `claude -p` under an unprovisioned HOME:
+//     "Not logged in · Please run /login"   and it EXITS 0.
+// A provisioning gap is therefore invisible to any exit-code check, which is why the
+// refusal lives HERE, in the provisioner, where refusing is safe. The runtime
+// (`tenantEnv`) stays fail-SAFE and never removes a working HOME — an outage caused
+// by our own strictness would be worse than the leak it prevents.
+const PER_HOME = process.env.GENESIS_TENANT_PER_HOME === "1";
+
+/** The tenant's own HOME, or undefined when the feature is off.
+ *  Kept beside the manifest so "what the tenant runs as" is one expression. */
+function homeFor(dir: string): string | undefined {
+  return PER_HOME ? join(dir, "home") : undefined;
+}
+
+/** FAIL-CLOSED, unlike the runtime. Refuse to hand a tenant a HOME that carries no
+ *  credential — that tenant would answer every message with silence and nothing
+ *  would report an error. */
+function assertCredentialed(home: string): void {
+  if (existsSync(join(home, ".claude", ".credentials.json"))) return;
+  throw new Error(
+    [
+      `GENESIS_TENANT_PER_HOME=1 but ${home}/.claude/.credentials.json is missing.`,
+      "A tenant with an uncredentialed HOME fails every turn, and `claude -p` exits 0 while",
+      "doing it, so nothing would surface the breakage.",
+      "Seed a credential there (or unset GENESIS_TENANT_PER_HOME) and re-run.",
+    ].join("\n"),
+  );
+}
+
 // The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
 const AGENT_GID = Number(process.env.GENESIS_TENANT_GID ?? 1000);
 
@@ -273,6 +308,9 @@ function manifestFor(t: (typeof tenants)[number]): string {
       name: `wa-${t.principal.id}`,
       rootPath: t.dir,
       noWorktree: true,
+      // BRO-2235: omitted entirely when the feature is off, so the manifest a
+      // tenant runs under today is byte-identical to before.
+      ...(homeFor(t.dir) ? { home: homeFor(t.dir) } : {}),
       // Untrusted principal: the supervisor hardens the spawn (drops inherited
       // MCP). MCP runs outside the filesystem sandbox, so the settings above
       // cannot reach it — without this the tenant holds the operator's Railway,
@@ -298,6 +336,15 @@ for (const t of tenants) {
 
   mkdirSync(t.dir, { recursive: true });
   mkdirSync(WORKSPACES_DIR, { recursive: true });
+  // BRO-2235. Create the tenant's HOME first, then REFUSE if it holds no
+  // credential — before the manifest that would point a live tenant at it is
+  // written. Ordering is the whole point: writing the manifest first and checking
+  // after would leave a tenant configured to use a home that cannot answer.
+  const tenantHome = homeFor(t.dir);
+  if (tenantHome) {
+    mkdirSync(join(tenantHome, ".claude"), { recursive: true });
+    assertCredentialed(tenantHome);
+  }
   // The tenant can WRITE its workspace but does not OWN it, and the sticky bit
   // is what makes that distinction bite. Unlinking a file needs write on the
   // PARENT directory, not on the file — so an agent-owned tenant dir lets the

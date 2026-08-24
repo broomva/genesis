@@ -1347,3 +1347,63 @@ describe("hardenedExtraArgs — confined workspaces drop inherited MCP (BRO-2224
     expect(operator).toEqual(["--model=haiku"]);
   });
 });
+
+/**
+ * BRO-2235 — HOME must travel on EVERY spawn a workspace causes, not just the turn.
+ *
+ * The title spawn is the one that gets forgotten: it is fire-and-forget, its output
+ * is a string nobody inspects, and it already had this exact bug once for MCP
+ * (--strict-mcp-config was omitted because `extraArgs` was deliberately not
+ * forwarded). A title spawn left on the operator's HOME would run untrusted tenant
+ * text against the operator's credential and skills — the same hole, one layer down.
+ *
+ * Asserted as a PAIR, for the reason the MCP test above gives: "set when provisioned"
+ * alone would also pass if HOME were set unconditionally, which would point every
+ * operator thread at a tenant directory.
+ */
+describe("per-tenant HOME travels on every spawn (BRO-2235)", () => {
+  async function homeSeenBy(
+    phase: "turn" | "title",
+    home: string | undefined,
+  ): Promise<{ called: boolean; home?: string }> {
+    const store = new InMemoryStore();
+    let seen: string | undefined;
+    let called = false;
+    const capturing = async (o: { home?: string }): Promise<RunResult> => {
+      called = true;
+      seen = o.home;
+      return {
+        state: { phase: "done", sessionId: "s", lastText: "A Title", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home },
+      store,
+      run: capturing,
+    });
+    await sup.dispatch("t-home", "a question", undefined, {});
+    if (phase === "title") {
+      seen = undefined;
+      called = false;
+      await (
+        sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+      ).generateTitleAsync("t-home", "a question", "a reply");
+    }
+    return { called, home: seen };
+  }
+
+  test.each(["turn", "title"] as const)("%s spawn carries a provisioned home", async (phase) => {
+    const r = await homeSeenBy(phase, "/tenants/573001112233/home");
+    // A spawn that never happened would report `undefined` and read as a pass.
+    expect(r.called).toBe(true);
+    expect(r.home).toBe("/tenants/573001112233/home");
+  });
+
+  test.each(["turn", "title"] as const)("%s spawn leaves an unset home unset", async (phase) => {
+    const r = await homeSeenBy(phase, undefined);
+    expect(r.called).toBe(true);
+    expect(r.home).toBeUndefined();
+  });
+});

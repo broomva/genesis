@@ -96,6 +96,13 @@ export interface RunOptions {
   /** Working dir inside a microVM host (default: the sandbox default,
    *  /vercel/sandbox). Ignored on local/VPS hosts (they use cwd). */
   remoteCwd?: string;
+  /** Per-tenant HOME (BRO-2235). Unset = the server's own HOME, i.e. current
+   *  behaviour. When set to an ABSOLUTE path, the spawned agent reads its
+   *  credential, settings and skills from there instead of the operator's home.
+   *
+   *  Threaded from `Workspace.home` by the supervisor. See {@link tenantEnv} for
+   *  why an unset or relative value is ignored rather than refused. */
+  home?: string;
   /** Extra CLI flags appended verbatim (e.g. --dangerously-skip-permissions). */
   extraArgs?: string[];
   /** Files the user attached to this turn (BRO-1706) — written into the run cwd
@@ -165,6 +172,56 @@ export function scrubAgentEnv(
     out[k] = v;
   }
   return out;
+}
+
+/** BRO-2235 — per-tenant HOME, so a confined tenant stops inheriting the
+ *  operator's `~/.claude`.
+ *
+ *  WHY THIS IS NOT ONLY ABOUT CREDENTIALS. Measured on srv1692698: with HOME
+ *  defaulting to the operator's, a confined tenant inherits everything under
+ *  `~/.claude` — 75 user-scope SKILLS (it listed 90 in total), the user-scope
+ *  `settings.json` (`defaultMode: bypassPermissions`, `sandbox: false`), and shared
+ *  `history.jsonl` / `projects/` / `sessions/`. Two of those skills declare
+ *  `allowed-tools`, which the CLI installs as a real permission layer —
+ *  `use-railway` grants `Bash(railway:*|npm:*|npx:*|curl:*|python3:*)` — and the
+ *  tenant confirmed it is reachable. The tenant's PROJECT settings.json does not
+ *  govern any of it, because user scope is a different precedence level entirely.
+ *
+ *  Pointing HOME at a per-tenant directory closes that whole class at once, and it
+ *  is independent of WHICH credential the session uses: identity is unchanged until
+ *  an operator decides the subscription-vs-API question.
+ *
+ *  FAIL-SAFE, NOT FAIL-CLOSED, and the difference is deliberate. `hardenedExtraArgs`
+ *  can safely add a flag to every confined turn. This cannot safely *omit* HOME: a
+ *  tenant whose home was never provisioned would get a session with no credential
+ *  and every turn would fail. So an unset `home` leaves the environment untouched —
+ *  the current behaviour — and the provisioner is what decides a tenant is ready.
+ *  Refusing here would convert a provisioning gap into an outage.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+// OVERLOADED so the spawn site needs no fallback. Passing a base always yields a
+// base, and expressing that in the type removed a `?? scrubAgentEnv()` that could
+// never run — and that, if it ever had, would have handed the child an env with no
+// PATH. A dead branch on the environment of a spawned agent is not worth keeping.
+export function tenantEnv(
+  workspace: { home?: string },
+  base: Record<string, string>,
+): Record<string, string>;
+export function tenantEnv(
+  workspace: { home?: string },
+  base?: Record<string, string>,
+): Record<string, string> | undefined;
+export function tenantEnv(
+  workspace: { home?: string },
+  base?: Record<string, string>,
+): Record<string, string> | undefined {
+  const home = workspace.home?.trim();
+  if (!home) return base;
+  // ABSOLUTE only. A relative HOME resolves against the child's cwd — the tenant's
+  // own workspace — which would silently place `.claude` inside the directory the
+  // tenant can write, handing it its own settings file.
+  if (!home.startsWith("/")) return base;
+  return { ...(base ?? {}), HOME: home };
 }
 
 /** Build the agent argv. `--verbose` is required to stream NDJSON under `-p`;
@@ -397,7 +454,15 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
 
   const handle = host.spawnStream(agentArgs(opts, bin), {
     cwd: runCwd,
-    env: scrubAgentEnv(),
+    // BRO-2235: per-tenant HOME. `scrubAgentEnv()` decides WHICH variables survive;
+    // `tenantEnv` then overrides HOME for a tenant that has one. Order matters —
+    // scrub first, so a tenant home can never be removed by a later deny rule.
+    //
+    // `replaceEnv` stays true: the child's environment is exactly this object. That
+    // is why HOME must be layered onto the scrubbed base rather than passed alone —
+    // passing `{ HOME }` by itself would drop PATH and the child would not resolve
+    // its own binary.
+    env: tenantEnv(opts, scrubAgentEnv()),
     replaceEnv: true,
     // The prompt rides stdin, not argv (BRO-1642) — keeps a large attachment-laden
     // prompt under the OS argv cap. The host closes stdin after writing (EOF).

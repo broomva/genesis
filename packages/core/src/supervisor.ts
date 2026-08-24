@@ -17,6 +17,10 @@ import {
   StaticHostProvider,
 } from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
+// BRO-2235: `tenantEnv` moved to @genesis/runner, beside `scrubAgentEnv` — the
+// spawn it shapes lives there, and `core` cannot be imported from `runner` (the
+// dependency runs core -> runner). Re-exported so the name keeps working.
+export { tenantEnv } from "@genesis/runner";
 import {
   type EffortLevel,
   type RunAttachment,
@@ -279,44 +283,6 @@ export function hardenedExtraArgs(
 ): string[] | undefined {
   if (!workspace.confined) return extraArgs;
   return [...(extraArgs ?? []), "--strict-mcp-config"];
-}
-
-/** BRO-2235 — per-tenant HOME, so a confined tenant stops inheriting the
- *  operator's `~/.claude`.
- *
- *  WHY THIS IS NOT ONLY ABOUT CREDENTIALS. Measured on srv1692698: with HOME
- *  defaulting to the operator's, a confined tenant inherits everything under
- *  `~/.claude` — 75 user-scope SKILLS (it listed 90 in total), the user-scope
- *  `settings.json` (`defaultMode: bypassPermissions`, `sandbox: false`), and shared
- *  `history.jsonl` / `projects/` / `sessions/`. Two of those skills declare
- *  `allowed-tools`, which the CLI installs as a real permission layer —
- *  `use-railway` grants `Bash(railway:*|npm:*|npx:*|curl:*|python3:*)` — and the
- *  tenant confirmed it is reachable. The tenant's PROJECT settings.json does not
- *  govern any of it, because user scope is a different precedence level entirely.
- *
- *  Pointing HOME at a per-tenant directory closes that whole class at once, and it
- *  is independent of WHICH credential the session uses: identity is unchanged until
- *  an operator decides the subscription-vs-API question.
- *
- *  FAIL-SAFE, NOT FAIL-CLOSED, and the difference is deliberate. `hardenedExtraArgs`
- *  can safely add a flag to every confined turn. This cannot safely *omit* HOME: a
- *  tenant whose home was never provisioned would get a session with no credential
- *  and every turn would fail. So an unset `home` leaves the environment untouched —
- *  the current behaviour — and the provisioner is what decides a tenant is ready.
- *  Refusing here would convert a provisioning gap into an outage.
- *
- *  Pure + exported so the invariant is covered by a test rather than by a comment. */
-export function tenantEnv(
-  workspace: { home?: string },
-  base?: Record<string, string>,
-): Record<string, string> | undefined {
-  const home = workspace.home?.trim();
-  if (!home) return base;
-  // ABSOLUTE only. A relative HOME resolves against the child's cwd — the tenant's
-  // own workspace — which would silently place `.claude` inside the directory the
-  // tenant can write, handing it its own settings file.
-  if (!home.startsWith("/")) return base;
-  return { ...(base ?? {}), HOME: home };
 }
 
 /** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
@@ -795,6 +761,9 @@ export class Supervisor {
         resumeSessionId: session.agentSessionId,
         host: lease.host,
         extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
+        // BRO-2235: the tenant's own HOME, when it has one. Unset leaves the
+        // server's HOME in place, which is the current behaviour.
+        home: workspace.home,
         // Per-turn model/effort (BRO-1573) override the constructor defaults.
         model: turnOpts?.model,
         effort: turnOpts?.effort,
@@ -951,6 +920,13 @@ export class Supervisor {
         // ["--strict-mcp-config"] when confined and undefined otherwise, which adds
         // the boundary without reintroducing any permission flag.
         extraArgs: hardenedExtraArgs(workspace),
+        // BRO-2235: HOME travels here TOO, for the reason the paragraph above
+        // gives for MCP — "a confined workspace must be confined on every spawn it
+        // causes". Titling inlines untrusted tenant text; leaving it on the
+        // operator's HOME would run that text against the operator's credential
+        // and skills, which is the exact hole --strict-mcp-config was added to
+        // close, one layer down.
+        home: workspace.home,
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);
