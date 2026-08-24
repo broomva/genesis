@@ -35,7 +35,8 @@ export type DispatchFailure =
   | "timeout"
   | "capacity-own"
   | "capacity-server"
-  | "turn-timeout"
+  | "turn-timeout-idle"
+  | "turn-timeout-total"
   | "agent-error"
   | "unknown";
 
@@ -63,7 +64,19 @@ export type DispatchFailure =
 // reply that does not exist and never will.
 const CAPACITY_OWN_PREFIXES = ["You already have"];
 const CAPACITY_SERVER_PREFIXES = ["The server is at capacity"];
-const TURN_TIMEOUT_PREFIXES = ["This turn was stopped:"];
+// SPLIT BY CLOCK (BRO-2307), for the same reason capacity was split by scope: one
+// message for two different causes tells half the senders something false.
+//
+// An IDLE reap means the agent emitted nothing for the whole window — a wedged
+// tool, a hung call, a subprocess waiting on input that will never arrive. The
+// task may have been trivial, so "that took too long, try a smaller step" is both
+// wrong and unhelpful; the useful advice is just send it again.
+//
+// A TOTAL reap means it genuinely worked past the limit, so breaking it up IS the
+// advice, and "some of the work may already be done" is likely true — which it is
+// NOT for an idle reap, where the agent may have produced nothing at all.
+const TURN_TIMEOUT_IDLE_PREFIXES = ["This turn was stopped: the agent produced no output"];
+const TURN_TIMEOUT_TOTAL_PREFIXES = ["This turn was stopped: it ran past"];
 
 /** Codes that mean "nothing answered".
  *
@@ -151,7 +164,8 @@ function classify(e: unknown): DispatchFailure {
     const t = text.trimStart();
     if (CAPACITY_OWN_PREFIXES.some((p) => t.startsWith(p))) return "capacity-own";
     if (CAPACITY_SERVER_PREFIXES.some((p) => t.startsWith(p))) return "capacity-server";
-    if (TURN_TIMEOUT_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout";
+    if (TURN_TIMEOUT_IDLE_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout-idle";
+    if (TURN_TIMEOUT_TOTAL_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout-total";
     return "agent-error";
   }
 
@@ -206,7 +220,11 @@ export function dispatchFailureMessage(kind: DispatchFailure): string {
       // work, and may be the sender's FIRST message. No detail beyond "busy":
       // who holds the slot is another tenant's business on a shared number.
       return "⏳ I'm at capacity right now — this isn't about anything you sent. Try again in a minute.";
-    case "turn-timeout":
+    case "turn-timeout-idle":
+      // No "took too long" and no "try a smaller step": an idle reap says nothing
+      // about size. It stalled. Resending is the right move.
+      return "⏳ That one got stuck — no progress for a while, so I stopped it. Send it again; it usually goes through.";
+    case "turn-timeout-total":
       // Does NOT say "nothing was saved" (P20 round 2): that was false. The user
       // turn is persisted, and anything the agent already wrote to files or ran as
       // a command survives the kill. Promising a clean slate would make a resend

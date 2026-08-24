@@ -226,24 +226,44 @@ describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => 
     expect(server).not.toMatch(/previous message/i);
   });
 
-  // The reap message used to promise "Nothing was saved". That was false — the
-  // user turn is persisted and the agent's file/command side effects survive the
-  // kill — and acting on it would make a resend duplicate real mutations.
-  test("the timeout message does not promise a clean slate", () => {
-    const m = dispatchFailureMessage("turn-timeout");
+  // The TOTAL reap message used to promise "Nothing was saved". That was false —
+  // the user turn is persisted and the agent's file/command side effects survive
+  // the kill — and acting on it would make a resend duplicate real mutations.
+  test("the total-timeout message does not promise a clean slate", () => {
+    const m = dispatchFailureMessage("turn-timeout-total");
     expect(m).not.toMatch(/nothing was saved/i);
     expect(m).toMatch(/part-way|already be done/i);
   });
 
-  test("both reap reasons classify as turn-timeout", () => {
-    for (const reason of ["idle", "total"] as const) {
-      const real = new TurnReapedError(reason, 1_800_000, 1_800_000);
-      expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("turn-timeout");
-    }
+  // BRO-2307. The two clocks mean different things, so they must say different
+  // things — the same defect shape P20 round 2 found in `capacity`, one layer over.
+  test("the two reap clocks classify separately", () => {
+    const idle = new TurnReapedError("idle", 900_000, 900_000);
+    const total = new TurnReapedError("total", 1_800_000, 1_800_000);
+    expect(classifyDispatchFailure(new AgentReportedLike(idle.message))).toBe("turn-timeout-idle");
+    expect(classifyDispatchFailure(new AgentReportedLike(total.message))).toBe(
+      "turn-timeout-total",
+    );
+  });
+
+  test("an idle reap does not claim the turn was too big", () => {
+    const m = dispatchFailureMessage("turn-timeout-idle");
+    // It stalled; size was never the issue, and telling the user to shrink the
+    // task points them away from the actual cause.
+    expect(m).not.toMatch(/took too long|smaller/i);
+    expect(m).toMatch(/stuck|again/i);
+    // Nor should it imply partial work: an idle reap may have produced nothing.
+    expect(m).not.toMatch(/already be done/i);
+    expect(m).not.toBe(dispatchFailureMessage("turn-timeout-total"));
   });
 
   test("the messages are actionable and disclose nothing about the box", () => {
-    for (const kind of ["capacity-own", "capacity-server", "turn-timeout"] as const) {
+    for (const kind of [
+      "capacity-own",
+      "capacity-server",
+      "turn-timeout-idle",
+      "turn-timeout-total",
+    ] as const) {
       const m = dispatchFailureMessage(kind);
       expect(m.length).toBeGreaterThan(20);
       expect(m).toMatch(/again|smaller/i);

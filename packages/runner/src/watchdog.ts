@@ -104,6 +104,25 @@ export function startWatchdog(opts: WatchdogOptions): Watchdog {
   };
 }
 
+/** Render a bound for a human.
+ *
+ *  `Math.round(ms / 60_000)` produced "the 0-minute limit" for any bound under 30
+ *  seconds and rounded 90s up to "2 minutes" — MEASURED on the deployed build,
+ *  which reaped a 20s turn and told the user it had exceeded a 0-minute limit.
+ *  Production defaults hide it (15 and 30 minutes), so only a deliberately short
+ *  bound exposes it; a test with realistic values would never have caught it. */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "the configured";
+  if (ms < 60_000) {
+    const s = Math.max(1, Math.round(ms / 1000));
+    return `${s} second${s === 1 ? "" : "s"}`;
+  }
+  const m = Math.floor(ms / 60_000);
+  const rem = Math.round((ms % 60_000) / 1000);
+  if (rem === 0) return `${m} minute${m === 1 ? "" : "s"}`;
+  return `${m} minute${m === 1 ? "" : "s"} ${rem} second${rem === 1 ? "" : "s"}`;
+}
+
 /** Thrown when a turn is killed by the watchdog. A distinct type so the
  *  supervisor can report "your turn was stopped because …" rather than the
  *  generic non-zero-exit message, which would read as a crash. */
@@ -113,11 +132,11 @@ export class TurnReapedError extends Error {
     readonly elapsedMs: number,
     readonly limitMs: number,
   ) {
-    const mins = Math.round(limitMs / 60_000);
+    const limit = formatDuration(limitMs);
     super(
       reason === "idle"
-        ? `This turn was stopped: the agent produced no output for ${mins} minute${mins === 1 ? "" : "s"}. Send the message again, or break the task into smaller steps.`
-        : `This turn was stopped: it ran past the ${mins}-minute limit for a single turn. Break the task into smaller steps.`,
+        ? `This turn was stopped: the agent produced no output for ${limit}. Send the message again — it was most likely stuck rather than too big.`
+        : `This turn was stopped: it ran past the ${limit} limit for a single turn. Break the task into smaller steps.`,
     );
     this.name = "TurnReapedError";
   }

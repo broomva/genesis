@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TurnReapedError, startWatchdog } from "./watchdog";
+import { TurnReapedError, formatDuration, startWatchdog } from "./watchdog";
 
 /** A controllable clock. Real timers would make these tests either slow or
  *  flaky, and a flaky timeout test gets deleted rather than fixed. */
@@ -179,19 +179,64 @@ describe("startWatchdog — races and lifecycle", () => {
   });
 });
 
+describe("formatDuration (BRO-2307)", () => {
+  // THE MEASURED CASE. The deployed build reaped a 20s turn and told the user it
+  // had "run past the 0-minute limit" — Math.round(20_000/60_000) is 0. Production
+  // defaults (15 and 30 minutes) hide this completely, so a test written with
+  // realistic values would never have caught it; only a deliberately short bound
+  // on the real box did.
+  test("a sub-minute bound is not rendered as zero minutes", () => {
+    expect(formatDuration(20_000)).toBe("20 seconds");
+    expect(formatDuration(1_000)).toBe("1 second");
+    expect(formatDuration(59_000)).toBe("59 seconds");
+    for (const ms of [1, 999, 20_000, 59_999]) {
+      expect(formatDuration(ms)).not.toMatch(/\b0 /);
+    }
+  });
+
+  test("whole minutes read as minutes", () => {
+    expect(formatDuration(60_000)).toBe("1 minute");
+    expect(formatDuration(900_000)).toBe("15 minutes");
+    expect(formatDuration(1_800_000)).toBe("30 minutes");
+  });
+
+  // Rounding 90s to "2 minutes" OVERSTATES the bound the user was actually given.
+  test("a partial minute is not rounded away or up", () => {
+    expect(formatDuration(90_000)).toBe("1 minute 30 seconds");
+    expect(formatDuration(3_630_000)).toBe("60 minutes 30 seconds");
+  });
+
+  test("degenerate input does not produce a nonsense sentence", () => {
+    for (const ms of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(formatDuration(ms)).toBe("the configured");
+    }
+  });
+});
+
 describe("TurnReapedError", () => {
   test("names the clock and tells the user what to do", () => {
     const idle = new TurnReapedError("idle", 900_000, 900_000);
     expect(idle.reason).toBe("idle");
     expect(idle.message).toMatch(/no output for 15 minutes/);
     expect(idle.message).toMatch(/send the message again/i);
+    // An idle reap says nothing about SIZE — advising a smaller task points the
+    // user away from the actual cause (BRO-2307).
+    expect(idle.message).not.toMatch(/smaller/i);
 
     const total = new TurnReapedError("total", 1_800_000, 1_800_000);
-    expect(total.message).toMatch(/30-minute limit/);
+    expect(total.message).toMatch(/30 minutes limit/);
+    expect(total.message).toMatch(/smaller/i);
     expect(total.name).toBe("TurnReapedError");
   });
 
   test("singular minute is not pluralized", () => {
     expect(new TurnReapedError("idle", 60_000, 60_000).message).toMatch(/1 minute\b/);
+  });
+
+  // The bug exactly as it appeared on the deployed box.
+  test("a 20s bound does not report a 0-minute limit", () => {
+    const m = new TurnReapedError("total", 20_234, 20_000).message;
+    expect(m).toContain("20 seconds");
+    expect(m).not.toMatch(/0-minute|0 minute/);
   });
 });
