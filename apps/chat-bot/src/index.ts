@@ -31,16 +31,22 @@
 // Env — shared:
 //   GENESIS_URL, GENESIS_TOKEN, GENESIS_BOT_STATE_DIR, GENESIS_ALLOW_OPEN
 
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { createKapsoAdapter } from "@kapso/chat-adapter";
+import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { Chat, type Logger, type StateAdapter } from "chat";
 import { type ChannelConfig, principalOf, startupGateFor } from "./allowlist";
 import { botStateFile, createFileState } from "./file-state";
+import { genesisStream } from "./genesis";
 import {
+  CHUNK_TARGET,
   type HandlerOptions,
   TURN_STATUS_EMOJI,
   type TurnSignals,
+  chunkForWhatsapp,
   handleAgentMessage,
   nativeCommandMenu,
   parseCommand,
@@ -56,8 +62,10 @@ import {
 } from "./operator";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
+import { drainOnce } from "./voice-delivery";
 import { textToDispatch } from "./voice-note";
 import { webhookPort } from "./webhook-port";
+import { FENCE_OVERHEAD, balanceFences, markdownToWhatsApp } from "./whatsapp-format";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -592,6 +600,85 @@ if (kapsoConfigured) await assertTenantWorkspacesRegistered();
 await chat.initialize();
 await registerTelegramCommands();
 if (kapsoConfigured) startWebhookServer();
+/** Drain the voice queue: run each recorded request as a turn, answer over
+ *  WhatsApp (BRO-2284, BRO-2228 item 4).
+ *
+ *  BEST-EFFORT ON PURPOSE. A phone call does not open WhatsApp's 24-hour service
+ *  window, so a caller who has not messaged us recently CANNOT be delivered to —
+ *  and that is only discoverable when the send fails. /voice/request therefore
+ *  still promises nothing. This turns a recorded request into an answer when it
+ *  can, and says why in the log when it cannot. */
+function startVoiceDelivery(): void {
+  const queueDir =
+    process.env.GENESIS_VOICE_QUEUE_DIR?.trim() ||
+    join(
+      process.env.GENESIS_DATA_DIR?.trim() || join(homedir() || tmpdir(), ".genesis", "data"),
+      "voice",
+    );
+  const phoneNumberId = kapsoPhoneNumberId;
+  if (!phoneNumberId) return;
+  const wa = new WhatsAppClient({ kapsoApiKey });
+  const raw = Number(process.env.GENESIS_VOICE_POLL_MS);
+  const intervalMs = Number.isFinite(raw) && raw >= 1000 ? raw : 15_000;
+
+  let running = false;
+  const tick = async () => {
+    // NEVER overlap. A drain runs real agent turns and can take minutes; a
+    // second pass would re-read tickets the first has not recorded yet and
+    // answer them twice.
+    if (running) return;
+    running = true;
+    try {
+      const r = await drainOnce({
+        queueDir,
+        log: (m) => console.log(`[genesis-bot] ${m}`),
+        // The caller's OWN tenant workspace — a voice request is confined
+        // exactly as that number's WhatsApp turn is.
+        workspaceFor: (deliverTo) =>
+          tenantWorkspaceId({ channel: "kapso", id: deliverTo }, whatsappWorkspacePrefix),
+        dispatch: async (ticket, workspaceId) => {
+          let out = "";
+          for await (const chunk of genesisStream({
+            baseUrl,
+            // A fresh session per ticket: a voice request is a one-shot ask, and
+            // sharing a thread would bleed context between unrelated calls.
+            threadId: `voice:${ticket.id}`,
+            text: ticket.request,
+            token,
+            workspaceId,
+          })) {
+            out += chunk;
+          }
+          return out;
+        },
+        send: async (to, text) => {
+          // Chunked exactly as the WhatsApp handler does: a message over the
+          // transport cap is REJECTED, and the answer then simply never arrives.
+          const target = CHUNK_TARGET - FENCE_OVERHEAD;
+          const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(text), target));
+          for (const body of chunks.length ? chunks : [text]) {
+            await wa.messages.sendText({ phoneNumberId, to, body });
+          }
+        },
+      });
+      if (r.attempted > 0 || r.skippedLines > 0) {
+        const bad = r.skippedLines ? `, ${r.skippedLines} unparseable line(s)` : "";
+        console.log(
+          `[genesis-bot] voice drain: ${r.delivered} delivered, ${r.failed} failed, ${r.attempted} attempted of ${r.scanned} scanned${bad}`,
+        );
+      }
+    } catch (e) {
+      console.error(`[genesis-bot] voice drain failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      running = false;
+    }
+  };
+  setInterval(tick, intervalMs).unref?.();
+  void tick();
+  console.log(`[genesis-bot] voice delivery → draining ${queueDir} every ${intervalMs}ms`);
+}
+
+if (kapsoConfigured) startVoiceDelivery();
 
 process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));

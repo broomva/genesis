@@ -14,6 +14,7 @@
     "@chat-adapter/state-memory": "4.30.0",
     "@chat-adapter/telegram": "4.30.0",
     "@kapso/chat-adapter": "0.1.1",
+    "@kapso/whatsapp-cloud-api": "0.2.3",
     "chat": "4.30.0",
     "mdast-util-from-markdown": "2.0.3",
     "mdast-util-gfm": "3.1.0",
