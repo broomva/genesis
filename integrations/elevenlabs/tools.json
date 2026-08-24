@@ -3,12 +3,12 @@
     {
       "name": "genesis_voice_identify",
       "config": "tool_configs/genesis-voice-identify.json",
-      "id": ""
+      "id": "tool_8601m0rqn7wxebptj22jaq3ya6q6"
     },
     {
       "name": "genesis_voice_request",
       "config": "tool_configs/genesis-voice-request.json",
-      "id": ""
+      "id": "tool_4301m0rqn836fe4tf7n4pdrgmfq5"
     }
   ]
 }
