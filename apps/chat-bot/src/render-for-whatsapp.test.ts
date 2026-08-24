@@ -45,13 +45,18 @@ describe("renderForWhatsapp — equivalent to the sequence it replaces", () => {
 // converter genuinely leaves for the detector to find, so the firing path is
 // exercised for real.
 describe("renderForWhatsapp — the check actually runs and actually warns", () => {
-  it("flags a bare delimiter row the converter passes through", () => {
-    // Not a table to the parser (no header), so it survives as literal text and
-    // would reach a phone as `|---|` — the BRO-2267 symptom exactly.
+  // These are the only reachable non-empty cases, and BOTH are the converter
+  // behaving correctly — see the note on renderForWhatsapp. They are used here
+  // because they are the only way to exercise the firing path for real; an
+  // implementation returning [] passes every other test in this file.
+  it("flags a bare delimiter row the converter passes through (a FALSE POSITIVE, used as a probe)", () => {
+    // Not a table to the parser (no header), so it is prose the author wrote and
+    // is delivered verbatim. Flagging it is the accepted false-positive class.
     expect(renderForWhatsapp("|---|", L).leaked).toEqual(["|table|"]);
   });
-  it("flags escaped markdown that the converter UNESCAPES", () => {
-    // `\*\*escaped\*\*` renders to `**escaped**`, which reaches the phone raw.
+  it("flags escaped markdown the author asked to show literally (also a FALSE POSITIVE)", () => {
+    // `\*\*escaped\*\*` renders to `**escaped**`, which is what escaping REQUESTED —
+    // WhatsApp has no `**` syntax, so it displays literally. Correct output.
     expect(renderForWhatsapp("\\*\\*escaped\\*\\*", L).leaked).toEqual(["**bold**"]);
   });
   it("emits the warning itself, with the caller's label and no message text", () => {
