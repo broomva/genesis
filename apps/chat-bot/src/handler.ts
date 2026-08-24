@@ -167,15 +167,29 @@ export function chunkForWhatsapp(text: string, limit: number = CHUNK_TARGET): st
  *  reply still arrives, just with `**` and `##` in it, which is how BRO-2267
  *  reached phones unnoticed.
  *
- *  A NON-EMPTY `leaked` IS RARE BUT REACHABLE, which took a review round to
- *  establish. residualMarkdown runs on CONVERTED output, and for ordinary
- *  replies the converter leaves nothing to find — so the first draft's tests
- *  only ever asserted an empty result, and an implementation returning `[]`
- *  unconditionally would have passed all of them. Probing found two inputs the
- *  converter genuinely leaves behind: `|---|` (a delimiter row with no header is
- *  not a table to the parser, so it survives as literal text) and escaped
- *  markdown such as `\*\*x\*\*`, which the converter UNESCAPES into `**x**`.
- *  Both are exercised as positive cases. */
+ *  A NON-EMPTY `leaked` IS RARE, REACHABLE, AND NOT ALWAYS A DEFECT — which took
+ *  two review rounds and then a correction to get right. residualMarkdown runs on
+ *  CONVERTED output, and for ordinary replies the converter leaves nothing to
+ *  find, so the first draft's tests only ever asserted an empty result and an
+ *  implementation returning `[]` unconditionally would have passed all of them.
+ *  Probing for reachable non-empty cases found them — and then found they are
+ *  the converter working correctly:
+ *
+ *    `\*\*x\*\*`  ->  `**x**`   escaping asks for a LITERAL `**x**`, and since
+ *                            WhatsApp has no `**` syntax that is what displays
+ *    `|---|`      ->  `|---|`  a delimiter row with no header is not a table;
+ *                            it is prose the author wrote, delivered verbatim
+ *
+ *  So the check has an IRREDUCIBLE FALSE-POSITIVE CLASS: markdown the author
+ *  deliberately escaped to show literally. It is not fixable by a better
+ *  detector — once escaping is stripped, an intentional `**x**` and a leaked one
+ *  are byte-identical, and nothing reading only the output can tell them apart.
+ *
+ *  That is accepted rather than papered over. The warning is advisory, names the
+ *  marker, changes no delivery, and agents escape markdown rarely; the
+ *  alternative — no detector at all — is how BRO-2267 shipped to phones for an
+ *  unknown period. An operator seeing `MARKDOWN LEAK — **bold**` on a reply that
+ *  deliberately quoted markdown syntax should read it as noise. */
 export interface WhatsappRender {
   /** Ready to post, in order. */
   readonly chunks: string[];
