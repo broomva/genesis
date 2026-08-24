@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IREvent } from "../src/ir";
@@ -242,5 +242,125 @@ describe("RunLogger — status coalescing (BRO-2268)", () => {
     logger.observe(ev("s1", { kind: "session.lifecycle", phase: "ended" } as IREvent));
     const held = (logger as unknown as { lastStatus: Map<string, unknown> }).lastStatus;
     expect(held.size).toBe(0);
+  });
+});
+
+/**
+ * BRO-2268 round 2 — the failure modes cross-model review found, each simulated.
+ *
+ * The first version of this feature passed every test it had and still contained a
+ * blocker: it advanced the coalescing signature BEFORE the append, so a failed write
+ * of a CHANGED status made every identical poll afterwards look already-recorded.
+ * Dropping a change is the one direction this must never fail in, and no test
+ * exercised a failing append.
+ */
+describe("RunLogger — status coalescing failure modes (BRO-2268)", () => {
+  const status = (sessionId: string, over: Record<string, unknown> = {}) =>
+    ({
+      sessionId,
+      observedAt: 1,
+      surface: "statusline",
+      kind: "status",
+      model: "Opus",
+      costUsd: 1,
+      contextUsedPct: 5,
+      cliVersion: "2.1.191",
+      raw: {},
+      ...over,
+    }) as unknown as IREvent;
+
+  function harness(statusMinIntervalMs = 60_000) {
+    const dir = mkdtempSync(join(tmpdir(), "gen-runlog-f-"));
+    let t = 0;
+    const logged: string[] = [];
+    const logger = new RunLogger({
+      dir,
+      log: (l) => logged.push(l),
+      now: () => t,
+      statusMinIntervalMs,
+    });
+    const at = (ms: number) => {
+      t = ms;
+    };
+    return { dir, logger, at, logged, file: join(dir, "s1.jsonl") };
+  }
+
+  // THE BLOCKER. A changed status whose append fails must remain un-committed, so the
+  // next identical poll still records it.
+  test("a FAILED append does not commit the signature — the change is recovered", () => {
+    const { dir, logger, at, file } = harness();
+    at(0);
+    logger.observe(status("s1", { costUsd: 1 })); // A persists
+    chmodSync(file, 0o444); // make the append fail
+    at(1_000);
+    logger.observe(status("s1", { costUsd: 2 })); // B changes, append FAILS
+    chmodSync(file, 0o644); // writes work again
+    at(2_000);
+    logger.observe(status("s1", { costUsd: 2 })); // identical B — must NOT be suppressed
+    const costs = traceFor(dir, "s1").map((r) => r.costUsd);
+    expect(costs).toEqual([1, 2]); // the change survived a failed write
+  });
+
+  test("the failed append is reported, not swallowed silently", () => {
+    const { logger, at, logged, file } = harness();
+    at(0);
+    logger.observe(status("s1"));
+    chmodSync(file, 0o444);
+    at(70_000);
+    logger.observe(status("s1"));
+    chmodSync(file, 0o644);
+    expect(logged.some((l) => l.includes("runlog persist failed"))).toBe(true);
+  });
+
+  // MAJOR 1. Wall-clock subtraction goes negative across an NTP step, and
+  // `negative < interval` is true — so the 60s bound silently became "until the clock
+  // catches up".
+  test("a BACKWARD clock persists rather than suppressing", () => {
+    const { dir, logger, at } = harness();
+    at(100_000);
+    logger.observe(status("s1"));
+    at(10_000); // clock stepped backwards
+    logger.observe(status("s1")); // unchanged payload, but time is unreasonable
+    expect(traceFor(dir, "s1").length).toBe(2);
+  });
+
+  // MAJOR 2. Without a suppressed count, unchanged 2s polls and a 45s freeze retain
+  // an identical trace — "nothing changed" and "nothing arrived" collapse together.
+  test("the retained record carries how many polls it stands for", () => {
+    const { dir, logger, at } = harness(60_000);
+    for (let i = 0; i < 31; i++) {
+      at(i * 2_000); // 0 … 60_000 at the real 2s cadence
+      logger.observe(status("s1"));
+    }
+    const rows = traceFor(dir, "s1");
+    expect(rows.length).toBe(2);
+    expect(rows[0]?.suppressed).toBe(0);
+    expect(rows[1]?.suppressed).toBe(29); // a healthy quiet minute
+  });
+
+  test("a poll STALL is distinguishable from a quiet session", () => {
+    const { dir, logger, at } = harness(60_000);
+    at(0);
+    logger.observe(status("s1"));
+    at(61_000); // one poll after a ~minute of silence: the statusline stalled
+    logger.observe(status("s1"));
+    const rows = traceFor(dir, "s1");
+    expect(rows[1]?.suppressed).toBe(0); // vs 29 above, over the same wall-clock gap
+  });
+
+  // MAJOR 3. Non-finite config failed in BOTH directions and read as working.
+  test.each([
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["negative-infinity", Number.NEGATIVE_INFINITY],
+  ])("a non-finite interval (%s) falls back to the default", (_n, v) => {
+    const { dir, logger, at } = harness(v as number);
+    for (let i = 0; i < 10; i++) {
+      at(i * 1_000);
+      logger.observe(status("s1"));
+    }
+    // Default 60s: only the first lands inside a 9s span. NaN would keep all 10;
+    // Infinity would also keep only 1, so the NaN arm is the load-bearing one.
+    expect(traceFor(dir, "s1").length).toBe(1);
   });
 });

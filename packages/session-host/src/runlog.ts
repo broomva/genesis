@@ -33,7 +33,7 @@ export class RunLogger {
   private readonly now: () => number;
   private readonly statusMinIntervalMs: number;
   /** Per-session last PERSISTED status: its payload signature + when. */
-  private readonly lastStatus = new Map<string, { sig: string; at: number }>();
+  private readonly lastStatus = new Map<string, { sig: string; at: number; suppressed: number }>();
   /** Per-session running tallies for turn summaries. */
   private readonly turns = new Map<
     string,
@@ -45,7 +45,13 @@ export class RunLogger {
     this.dir = opts.dir;
     this.log = opts.log ?? ((l) => console.log(l));
     this.now = opts.now ?? (() => Date.now());
-    this.statusMinIntervalMs = opts.statusMinIntervalMs ?? 60_000;
+    // VALIDATED. A non-finite value failed in BOTH directions: NaN made every
+    // comparison false so nothing coalesced, and Infinity suppressed every unchanged
+    // heartbeat forever. Neither is a configuration anyone would ask for, and both
+    // read as working. (codex MAJOR 3)
+    const raw = opts.statusMinIntervalMs;
+    this.statusMinIntervalMs =
+      Number.isFinite(raw) && (raw as number) >= 0 ? (raw as number) : 60_000;
   }
 
   /** Count of in-flight turn tallies (test/diagnostic — must not leak). */
@@ -62,50 +68,79 @@ export class RunLogger {
 
   // --- persistence -------------------------------------------------------
 
-  /** Should this `status` event be written, or is it a repeat of the last one?
+  /** Decide whether a `status` event is worth writing — WITHOUT committing anything.
    *
    *  MEASURED, not hypothetical (BRO-2268). One session's trace on the live box
    *  reached 2.4 GB — 1,710,404 records over ~40 days, of which a 500k-line sample
    *  was 100% `kind:"status"`. The statusline is a POLL: it fires roughly every two
-   *  seconds for as long as the session lives, and every fire was appended.
+   *  seconds for as long as the session lives, and every fire was appended. Those
+   *  records also had no reader — `summarize` has no `case "status"`, so they fell to
+   *  `default: return`. Pure write amplification at ~60 MB/day/session.
    *
-   *  Those records also had no reader. `summarize` has no `case "status"`, so they
-   *  fall to `default: return` — they were never summarised, never logged, and never
-   *  used in a turn tally. Pure write amplification at ~60 MB/day/session.
+   *  They are not worthless, which is why this coalesces rather than drops: cost,
+   *  context-used and CLI version are exactly what you want when explaining a session
+   *  after the fact. Every CHANGE is kept; only repeats are suppressed.
    *
-   *  They are not worthless, though, which is why this coalesces rather than drops:
-   *  cost, context-used and CLI version are exactly what you want when explaining a
-   *  session after the fact. Keeping every CHANGE preserves that history; keeping
-   *  every POLL just repeats it. A heartbeat still lands every
-   *  `statusMinIntervalMs` so a long quiet stretch is distinguishable from a gap.
+   *  DECIDING IS SEPARATE FROM COMMITTING, and that split is the fix for a real
+   *  defect rather than tidiness. The first version updated the signature before the
+   *  append, so: A persists, B changes `costUsd`, B's append fails, and every
+   *  identical B poll afterwards is then suppressed as "already recorded" — losing a
+   *  real change that the very next poll could have recovered. Dropping a CHANGE is
+   *  the one direction this must never fail in. (codex BLOCKER 1)
    *
-   *  `raw` is deliberately excluded from the signature: it carries the full
-   *  statusline payload including per-poll timing, so including it would make every
-   *  event unique and coalesce nothing. */
-  private shouldPersistStatus(event: IREvent, ts: number): boolean {
-    if (event.kind !== "status") return true;
-    if (this.statusMinIntervalMs <= 0) return true;
+   *  `raw` is excluded from the signature: it carries per-poll timing, so including
+   *  it would make every event unique and coalesce exactly nothing. */
+  private statusDecision(
+    event: IREvent,
+    ts: number,
+  ): { write: boolean; sig: string; suppressed: number } | undefined {
+    if (event.kind !== "status") return undefined;
     const sig = JSON.stringify([
       event.model,
       event.costUsd,
       event.contextUsedPct,
       event.cliVersion,
     ]);
+    if (this.statusMinIntervalMs <= 0) return { write: true, sig, suppressed: 0 };
     const prev = this.lastStatus.get(event.sessionId);
-    if (prev && prev.sig === sig && ts - prev.at < this.statusMinIntervalMs) return false;
-    this.lastStatus.set(event.sessionId, { sig, at: ts });
-    return true;
+    if (!prev || prev.sig !== sig) return { write: true, sig, suppressed: prev?.suppressed ?? 0 };
+    const elapsed = ts - prev.at;
+    // A BACKWARD CLOCK must not suppress. Wall-clock subtraction goes negative across
+    // an NTP step or a manual set, and `negative < interval` is true — so the promised
+    // bound silently became "until the clock catches up". Out-of-order means we cannot
+    // reason about the interval, so we write. (codex MAJOR 1)
+    if (elapsed < 0) return { write: true, sig, suppressed: prev.suppressed };
+    if (elapsed < this.statusMinIntervalMs) {
+      prev.suppressed += 1;
+      return { write: false, sig, suppressed: prev.suppressed };
+    }
+    return { write: true, sig, suppressed: prev.suppressed };
   }
 
   private persist(event: IREvent, ts: number): void {
-    if (!this.shouldPersistStatus(event, ts)) return;
+    const decision = this.statusDecision(event, ts);
+    if (decision && !decision.write) return;
     try {
       if (!this.dirReady) {
         mkdirSync(this.dir, { recursive: true });
         this.dirReady = true;
       }
       const file = join(this.dir, `${safe(event.sessionId)}.jsonl`);
-      appendFileSync(file, `${JSON.stringify({ ts, ...event })}\n`);
+      // `suppressed` is what keeps a POLL STALL diagnosable. Without it, unchanged
+      // polls at a 2s cadence and a 45-second freeze of the statusline retain an
+      // identical trace, so "nothing changed" and "nothing arrived" became the same
+      // record — a diagnostic the uncoalesced trace could express and this could not.
+      // With it, a reader divides the wall-clock gap by the count: ~29 suppressed over
+      // a minute is a healthy quiet session, ~1 is a stall. (codex MAJOR 2)
+      const record =
+        decision !== undefined
+          ? { ts, ...event, suppressed: decision.suppressed }
+          : { ts, ...event };
+      appendFileSync(file, `${JSON.stringify(record)}\n`);
+      // COMMIT ONLY ON SUCCESS. Before the append, a failure still advanced the
+      // signature and silently swallowed a real change.
+      if (decision)
+        this.lastStatus.set(event.sessionId, { sig: decision.sig, at: ts, suppressed: 0 });
     } catch (e) {
       // Observability must never break the session.
       this.log(`[genesis] runlog persist failed: ${String(e)}`);
