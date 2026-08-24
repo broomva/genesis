@@ -635,6 +635,8 @@ function startVoiceDelivery(): void {
   const rawSend = Number(process.env.GENESIS_VOICE_SEND_MS);
   const voiceSendMs = Number.isFinite(rawSend) && rawSend >= 1000 ? rawSend : 60_000;
 
+  // Owned here, not inside drainOnce, so it survives across passes.
+  const attemptMemo = new Map<string, number>();
   let running = false;
   const tick = async () => {
     // NEVER overlap. A drain runs real agent turns and can take minutes; a
@@ -645,6 +647,7 @@ function startVoiceDelivery(): void {
     try {
       const r = await drainOnce({
         queueDir,
+        attemptMemo,
         log: (m) => console.log(`[genesis-bot] ${m}`),
         // The caller's OWN tenant workspace — a voice request is confined
         // exactly as that number's WhatsApp turn is.

@@ -190,7 +190,16 @@ export interface HandledEntry {
 export function readHandled(path: string): Map<string, HandledEntry> {
   const out = new Map<string, HandledEntry>();
   if (!existsSync(path)) return out;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    // Unreadable is not fatal, for the same reason a corrupt line is not: the
+    // in-memory attempt count still bounds cost, whereas throwing here would
+    // stop the drain entirely and answer nobody.
+    return out;
+  }
+  for (const line of raw.split("\n")) {
     const s = line.trim();
     if (!s) continue;
     try {
@@ -223,6 +232,14 @@ export function terminalIds(handled: ReadonlyMap<string, HandledEntry>): Set<str
 export interface DrainDeps extends DeliverDeps {
   readonly queueDir: string;
   readonly now?: () => string;
+  /** In-memory attempt counts, owned by the caller and shared across passes.
+   *
+   *  The persisted log is the durable record, but it is not the ONLY one, and
+   *  that matters: if appending fails — read-only volume, disk full — the attempt
+   *  is forgotten and the next pass re-runs the agent turn, forever. The cap
+   *  would then bound nothing at all, which is the opposite of its purpose. This
+   *  bounds cost within the process even when nothing can be written down. */
+  readonly attemptMemo?: Map<string, number>;
 }
 
 /** One pass over the queue. Returns what happened, for the caller to log or a
@@ -242,22 +259,37 @@ export async function drainOnce(deps: DrainDeps): Promise<{
   }
   const { tickets, skipped } = parseQueue(readFileSync(queuePath, "utf8"));
   const handled = readHandled(handledPath);
-  const pending = pendingTickets(tickets, terminalIds(handled));
+  const memo = deps.attemptMemo;
+  const terminal = terminalIds(handled);
+  // Fold in anything this process has already exhausted but could not persist.
+  if (memo) for (const [id, n] of memo) if (n >= MAX_ATTEMPTS) terminal.add(id);
+  const pending = pendingTickets(tickets, terminal);
 
   let delivered = 0;
   let failed = 0;
   for (const t of pending) {
-    const prior = handled.get(t.id)?.attempts ?? 0;
+    // Whichever record is higher: the file may be stale if a write failed.
+    const prior = Math.max(handled.get(t.id)?.attempts ?? 0, memo?.get(t.id) ?? 0);
     const d = await deliverTicket(t, deps);
     // Recorded AFTER the send, never before. A crash in between redelivers,
     // which for a message to a human is strictly better than silence: they get
     // the answer twice instead of never. At-least-once is the deliberate choice.
-    appendHandled(handledPath, {
-      id: t.id,
-      at: now(),
-      disposition: d.kind === "failed" ? `failed:${d.reason}` : d.kind,
-      attempts: prior + 1,
-    });
+    // Count it in memory FIRST, so the attempt survives a failed write.
+    memo?.set(t.id, prior + 1);
+    try {
+      appendHandled(handledPath, {
+        id: t.id,
+        at: now(),
+        disposition: d.kind === "failed" ? `failed:${d.reason}` : d.kind,
+        attempts: prior + 1,
+      });
+    } catch (e) {
+      // Loud, because the durable bound is gone until this is fixed: a restart
+      // resets the in-memory count and the turn can run again.
+      const why = e instanceof Error ? e.message : String(e);
+      const caveat = "The attempt is counted in memory only, so a restart may re-run this turn.";
+      (deps.log ?? (() => {}))(`[voice] ${t.id}: COULD NOT RECORD the outcome (${why}). ${caveat}`);
+    }
     if (d.kind === "delivered") delivered++;
     else if (d.kind === "failed") failed++;
     if (d.kind === "failed" && prior + 1 >= MAX_ATTEMPTS) {

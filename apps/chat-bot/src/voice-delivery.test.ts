@@ -254,40 +254,98 @@ describe("drainOnce", () => {
     expect(second.attempted).toBe(0);
   });
 
-  test("the ticket is recorded AFTER the send, never before", async () => {
+  test("the ticket is recorded only after the send RESOLVES", async () => {
     // At-least-once is deliberate: a crash between send and record redelivers,
-    // and a duplicate answer beats silence. Recording FIRST would lose it.
+    // and a duplicate answer beats silence.
+    //
+    // The first version of this only checked that no record existed when `send`
+    // was INVOKED — which an implementation that fires a deferred send, records
+    // the id, then awaits would have passed while being exactly wrong. So this
+    // holds the send open and asserts nothing is recorded until it settles.
     const dir = tmp();
     const qd = writeQueue(dir, [ticket()]);
-    let handledAtSendTime = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let atInvoke = -1;
+    let midFlight = -1;
+    const done = drainOnce({
+      queueDir: qd,
+      ...base({
+        send: async () => {
+          atInvoke = readHandled(join(qd, HANDLED_FILE)).size;
+          await gate;
+        },
+      }),
+    } as never);
+    await Promise.resolve();
+    midFlight = readHandled(join(qd, HANDLED_FILE)).size;
+    release();
+    await done;
+    expect(atInvoke).toBe(0);
+    expect(midFlight).toBe(0); // still nothing while the send is in flight
+    expect(readHandled(join(qd, HANDLED_FILE)).size).toBe(1);
+  });
+
+  test("a FAILED send is never recorded as delivered", async () => {
+    // The polarity the ordering test cannot show on its own.
+    const dir = tmp();
+    const qd = writeQueue(dir, [ticket()]);
     await drainOnce({
       queueDir: qd,
       ...base({
         send: async () => {
-          handledAtSendTime = readHandled(join(qd, HANDLED_FILE)).size;
+          throw new Error("nope");
         },
       }),
     } as never);
-    expect(handledAtSendTime).toBe(0);
-    expect(readHandled(join(qd, HANDLED_FILE)).size).toBe(1);
+    expect(readHandled(join(qd, HANDLED_FILE)).get("v-1")?.disposition).toBe("failed:send");
   });
 
   test("a failing ticket retries, then is ABANDONED at the cap", async () => {
     const dir = tmp();
     const qd = writeQueue(dir, [ticket()]);
-    let attempts = 0;
+    // Counts DISPATCHES, not sends. The cost being bounded is the agent turn;
+    // counting sends measured the cheap half and would have passed even if
+    // dispatch ran on every poll forever.
+    let dispatches = 0;
     const deps = base({
+      dispatch: async () => {
+        dispatches++;
+        return "answer";
+      },
       send: async () => {
-        attempts++;
         throw new Error("nope");
       },
     });
     for (let i = 0; i < MAX_ATTEMPTS + 3; i++) {
       await drainOnce({ queueDir: qd, ...deps } as never);
     }
-    // Every attempt re-runs the agent turn, so an uncapped retry would burn
-    // compute forever against a permanently closed window.
-    expect(attempts).toBe(MAX_ATTEMPTS);
+    expect(dispatches).toBe(MAX_ATTEMPTS);
+  });
+
+  test("the cap holds even when the outcome CANNOT be written down", async () => {
+    // A read-only volume used to mean the attempt was forgotten and the paid turn
+    // re-ran on every poll, forever — the cap bounding nothing at all.
+    const dir = tmp();
+    const qd = writeQueue(dir, [ticket()]);
+    mkdirSync(join(qd, HANDLED_FILE), { recursive: true }); // appending now fails
+    let dispatches = 0;
+    const attemptMemo = new Map<string, number>();
+    const deps = base({
+      dispatch: async () => {
+        dispatches++;
+        return "answer";
+      },
+      send: async () => {
+        throw new Error("nope");
+      },
+    });
+    for (let i = 0; i < MAX_ATTEMPTS + 3; i++) {
+      await drainOnce({ queueDir: qd, attemptMemo, ...deps } as never);
+    }
+    expect(dispatches).toBe(MAX_ATTEMPTS);
   });
 
   test("an undeliverable ticket is recorded once and never retried", async () => {
