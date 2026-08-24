@@ -123,9 +123,13 @@ describe("startWatchdog — races and lifecycle", () => {
       timers: t.api,
     });
     w.dispose();
+    // BEFORE advancing. `advance()` deletes each entry as it fires, so checking
+    // `outstanding` afterwards cannot tell a CLEARED timer from one that fired and
+    // was suppressed by the `done` flag — a mutation making dispose() a no-op
+    // survived that version of this assertion.
+    expect(t.outstanding).toBe(0);
     t.advance(10_000);
     expect(fired).toEqual([]);
-    expect(t.outstanding).toBe(0);
   });
 
   test("firing leaves no timer behind", () => {
