@@ -34,7 +34,14 @@ export interface SpawnHandle {
   stdout: AsyncIterable<string>;
   /** Resolves with the process exit code. */
   exitCode: Promise<number>;
-  kill(): void;
+  /** Terminate the child. Defaults to SIGTERM.
+   *
+   *  A caller that must GUARANTEE termination has to escalate: a child which
+   *  traps SIGTERM keeps its stdout open, and a reader sitting in
+   *  `for await (… of handle.stdout)` then waits forever. Measured on this host:
+   *  `bash -c "trap '' TERM; …"` survived `kill()` and the stream never ended.
+   *  See the escalation in the runner's watchdog (BRO-2260). */
+  kill(signal?: NodeJS.Signals): void;
 }
 
 export interface ExecutionHost {
@@ -119,7 +126,11 @@ export class LocalHost implements ExecutionHost {
         // child closed stdin before we finished writing — proceed; exitCode reports it.
       }
     }
-    return { stdout: toLines(proc.stdout), exitCode: proc.exited, kill: () => proc.kill() };
+    return {
+      stdout: toLines(proc.stdout),
+      exitCode: proc.exited,
+      kill: (signal?: NodeJS.Signals) => proc.kill(signal ?? "SIGTERM"),
+    };
   }
 
   async exec(cmd: string[], opts?: ExecOpts): Promise<ExecResult> {

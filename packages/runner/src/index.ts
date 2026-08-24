@@ -76,6 +76,9 @@ export interface RunOptions {
    *  the clock that catches a turn which keeps emitting while pinning the box —
    *  an idle timer never fires on that shape. Omit → no total bound. */
   maxTurnMs?: number;
+  /** Grace between the watchdog's SIGTERM and its SIGKILL (BRO-2260). Default 5s.
+   *  A child that traps SIGTERM keeps stdout open and would hang the turn. */
+  killGraceMs?: number;
   prompt: string;
   /** A git repository root; a worktree is cut from here unless worktree=false. */
   cwd: string;
@@ -506,10 +509,21 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // the loop and not in the catch. Without that, a reaped turn would be reported
   // as an ordinary non-zero exit and read to the user as a crash.
   const startedAtMs = Date.now();
+  // SIGTERM first, SIGKILL if the child is still holding the stream open.
+  //
+  // MEASURED, not defensive: `bash -c "trap '' TERM; …"` survives `kill()` and its
+  // stdout never closes, so the `for await` below waits forever. Without the
+  // escalation the watchdog is worse than nothing — it "fires", the turn never
+  // ends, and the admission slot it holds is never released, permanently locking
+  // that workspace out at perWorkspace=1.
+  let escalation: ReturnType<typeof setTimeout> | undefined;
   const watchdog = startWatchdog({
     idleTimeoutMs: opts.idleTimeoutMs,
     maxTurnMs: opts.maxTurnMs,
-    onExpire: () => handle.kill(),
+    onExpire: () => {
+      handle.kill();
+      escalation = setTimeout(() => handle.kill("SIGKILL"), opts.killGraceMs ?? 5_000);
+    },
   });
   try {
     for await (const line of handle.stdout) {
@@ -543,6 +557,7 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     // Dispose FIRST: a live timer would otherwise keep firing (and keep the event
     // loop alive) after the turn has already settled.
     watchdog.dispose();
+    if (escalation !== undefined) clearTimeout(escalation);
     handle.kill(); // idempotent; reaps the child on every exit path (F14)
   }
 

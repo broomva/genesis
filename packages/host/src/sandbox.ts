@@ -96,7 +96,11 @@ export class VercelSandboxHost implements ExecutionHost {
       yield* linesFromLogs(command.logs(), "stdout");
     }
     const exitCode = cmdPromise.then((c) => c.wait()).then((r) => r.exitCode ?? -1);
-    const kill = () => {
+    // Always SIGKILL: the sandbox API takes a signal, but this host has no
+    // graceful-shutdown contract to honour and an un-killable remote command
+    // would strand the lease. The `signal` parameter is accepted for interface
+    // compatibility and deliberately ignored.
+    const kill = (_signal?: NodeJS.Signals) => {
       void cmdPromise.then((c) => c.kill("SIGKILL")).catch(() => {});
     };
     return { stdout: stdout(), exitCode, kill };
