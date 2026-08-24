@@ -64,6 +64,35 @@ describe("ElevenLabs tool configs point at the real Genesis surface", () => {
     }
   });
 
+  test("no property sets a description AND a binding — the API rejects both", () => {
+    // Learned from a live 422, not from the docs: "Can only set one of:
+    // description, dynamic_variable, is_system_provided, constant_value, or
+    // is_omitted". The configs originally carried both, which every structural
+    // test here accepted and the API refused. Explanatory prose for a bound
+    // argument belongs in the TOOL description instead.
+    const exclusive = [
+      "description",
+      "dynamic_variable",
+      "is_system_provided",
+      "constant_value",
+      "is_omitted",
+    ];
+    for (const e of toolsIndex.tools) {
+      const props = read(e.config).api_schema.request_body_schema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      for (const [name, prop] of Object.entries(props)) {
+        const set = exclusive.filter((k) => k in prop);
+        expect({ tool: e.name, prop: name, set }).toEqual({
+          tool: e.name,
+          prop: name,
+          set: set.slice(0, 1),
+        });
+      }
+    }
+  });
+
   test("conversationId is bound, so a retry collapses onto one ticket", () => {
     const t = read(join("tool_configs", "genesis-voice-request.json"));
     expect(t.api_schema.request_body_schema.properties.conversationId.dynamic_variable).toBe(

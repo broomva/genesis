@@ -1,6 +1,6 @@
 {
   "name": "genesis_voice_identify",
-  "description": "Look up whether the caller's number is one Genesis recognizes. Call this FIRST, before anything else, and branch on the result. `known` tells you whether the number is on file. `canFollowUp` tells you whether an answer can actually be delivered back to them later — it is frequently false, and when it is false you must not offer a follow-up.",
+  "description": "Look up whether the caller's number is one Genesis recognizes. Call this FIRST, before anything else, and branch on the result. `known` tells you whether the number is on file. `canFollowUp` tells you whether an answer can actually be delivered back to them later — it is frequently false, and when it is false you must not offer a follow-up. The callerId argument is bound to the provider's system caller id — you do not supply it.",
   "type": "webhook",
   "api_schema": {
     "url": "${GENESIS_PUBLIC_URL}/voice/identify",
@@ -11,7 +11,6 @@
       "properties": {
         "callerId": {
           "type": "string",
-          "description": "The caller's phone number. Pass the system caller id verbatim; Genesis normalizes it.",
           "dynamic_variable": "system__caller_id"
         }
       },
@@ -23,7 +22,9 @@
     }
   },
   "response_timeout_secs": 10,
-  "dynamic_variables": { "dynamic_variable_placeholders": {} },
+  "dynamic_variables": {
+    "dynamic_variable_placeholders": {}
+  },
   "assignments": [],
   "disable_interruptions": false,
   "force_pre_tool_speech": false
