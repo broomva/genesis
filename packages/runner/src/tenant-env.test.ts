@@ -92,11 +92,24 @@ describe("per-tenant HOME reaches the spawn (BRO-2235)", () => {
     expect(opts?.env?.HOME).toBe(scrubAgentEnv().HOME);
   });
 
-  test("a relative home is ignored rather than obeyed", async () => {
-    // Obeying it would resolve HOME against the child's cwd — the tenant's own
-    // writable directory — handing the tenant its own .claude/settings.json.
+  // DEFENSE IN DEPTH, NOT THE CONTRACT — and the distinction is the whole point.
+  //
+  // An earlier version of this test asserted exactly this and called it correct.
+  // It is not: a workspace carrying `home: "relative/home"` has REQUESTED isolation,
+  // and falling back to the operator's HOME serves that tenant from the operator's
+  // credential while looking like a normal turn. Cross-model review found it, and
+  // this test was the reason it survived review — it read as an intended behaviour.
+  //
+  // `homeRefusal` (packages/core/src/supervisor.ts) now refuses such a turn before
+  // any spawn happens, so this path is unreachable in practice. The behaviour is
+  // kept and pinned only as a LAST line of defense: if a relative home ever reaches
+  // here, resolving it would put HOME inside the child's cwd — the tenant's own
+  // writable directory — handing the tenant its own .claude/settings.json. Dropping
+  // it is the lesser of two bad outcomes, not a good one.
+  test("a relative home is dropped, not resolved against the child cwd", async () => {
     const opts = await run("relative/home");
     expect(opts?.env?.HOME).toBe(scrubAgentEnv().HOME);
+    expect(opts?.env?.HOME).not.toContain("relative/home");
   });
 
   test("HOME is layered ON the scrubbed env — PATH survives, secrets stay scrubbed", async () => {

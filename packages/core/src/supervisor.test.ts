@@ -9,8 +9,8 @@ import {
   Supervisor,
   buildTitlePrompt,
   deriveTitle,
-  engineHomeRefusal,
   hardenedExtraArgs,
+  homeRefusal,
   sanitizeTitle,
 } from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
@@ -1410,78 +1410,94 @@ describe("per-tenant HOME travels on every spawn (BRO-2235)", () => {
 });
 
 /**
- * BRO-2235 — an engine that will not carry `home` must REFUSE the turn.
+ * BRO-2235 — a declared HOME that cannot be delivered must REFUSE the turn.
  *
- * The wiring only reaches the print engine's spawn. The interactive engine crosses
- * the session-host socket and the codex engine builds its own environment, so a
- * workspace provisioned with `home` would run on either of those against the
- * OPERATOR's HOME — its credential and its skills — and produce a turn that looks
- * completely normal. The operator asked for isolation and would have got none.
+ * Three review rounds each found this same defect in a different cell: a relative
+ * path, a non-print engine, a host whose env never reaches the child, and the title
+ * spawn that bypassed the check. So the assertion is written over the MATRIX rather
+ * than per-branch — a new engine or host is refused by default, and a test has to be
+ * deliberately changed to make it pass.
  *
- * Deliberately the opposite posture from `tenantEnv`, which is fail-SAFE: there an
- * unset home means isolation was never requested, so refusing would convert a
- * provisioning gap into an outage. Here it WAS requested, and the only choice is
- * refuse-the-turn or serve-unisolated.
+ * The line that matters: an UNSET home is not a request and proceeds (refusing would
+ * turn a provisioning gap into an outage); anything else is a request that cannot be
+ * honoured, and serving it unisolated hands a tenant the operator's credential while
+ * looking like a normal turn.
  */
-describe("engineHomeRefusal (BRO-2235)", () => {
-  test("no home → never refuses, on any engine", () => {
+describe("homeRefusal (BRO-2235)", () => {
+  const HOME = "/tenants/573/home";
+
+  test("no home is not a request → never refuses, on any engine or host", () => {
     for (const e of ["print", "interactive", "codex", undefined]) {
-      expect(engineHomeRefusal({}, e)).toBeUndefined();
-      expect(engineHomeRefusal({ home: "   " }, e)).toBeUndefined();
+      for (const h of ["local", "vps", "microvm", undefined]) {
+        expect(homeRefusal({}, e, h)).toBeUndefined();
+        expect(homeRefusal({ home: "   " }, e, h)).toBeUndefined();
+      }
     }
   });
 
-  test("home + print → allowed (print is the one that carries it)", () =>
-    expect(engineHomeRefusal({ home: "/t/573/home" }, "print")).toBeUndefined());
+  test("the one deliverable combination is allowed", () =>
+    expect(homeRefusal({ home: HOME }, "print", "local")).toBeUndefined());
 
-  test.each(["interactive", "codex", "future-engine", undefined])(
-    "home + %p → refuses, and says why",
-    (engine) => {
-      const r = engineHomeRefusal({ home: "/t/573/home" }, engine);
-      expect(r).toBeDefined();
-      expect(r).toMatch(/does not carry it/);
-      // The refusal must not leak the tenant's path into a channel-visible error.
-      expect(r).not.toContain("/t/573/home");
+  // THE BLOCKER a prior round found, and which a prior TEST asserted as correct:
+  // `engineHomeRefusal` checked only the engine, so a relative home passed it and
+  // then `tenantEnv` dropped the path and supplied the operator's HOME.
+  test.each(["relative/home", "./home", "../home", "home"])(
+    "a non-absolute home %p refuses instead of silently falling back",
+    (home) => {
+      expect(homeRefusal({ home }, "print", "local")).toMatch(/absolute path/);
     },
   );
 
-  // An engine added later defaults to REFUSING rather than to running unisolated:
-  // the check is an allowlist of one, not a denylist of the two known engines.
-  test("an unknown engine is refused, not assumed safe", () =>
-    expect(engineHomeRefusal({ home: "/t/x" }, "something-new")).toBeDefined());
+  test.each(["interactive", "codex", "future-engine", undefined])(
+    "engine %p does not carry HOME → refuses",
+    (engine) => {
+      expect(homeRefusal({ home: HOME }, engine, "local")).toMatch(/does not carry it/);
+    },
+  );
+
+  // The host comment in packages/host/src/index.ts says it outright: ssh does not
+  // forward arbitrary env, so a vps child keeps the REMOTE operator's HOME.
+  test.each(["vps", "microvm", "future-host"])("host %p does not deliver HOME → refuses", (h) => {
+    expect(homeRefusal({ home: HOME }, "print", h)).toMatch(/does not deliver it/);
+  });
+
+  test("hostKind omitted skips only the host clause — it never turns a refusal into a pass", () => {
+    expect(homeRefusal({ home: HOME }, "print", undefined)).toBeUndefined();
+    expect(homeRefusal({ home: "relative" }, "print", undefined)).toBeDefined();
+    expect(homeRefusal({ home: HOME }, "interactive", undefined)).toBeDefined();
+  });
+
+  test("no refusal leaks the tenant path into a channel-visible message", () => {
+    for (const [e, h] of [
+      ["interactive", "local"],
+      ["print", "vps"],
+    ] as const) {
+      expect(homeRefusal({ home: HOME }, e, h)).not.toContain(HOME);
+    }
+  });
 
   test("the dispatch actually refuses, and does not spawn", async () => {
     const store = new InMemoryStore();
     let spawned = false;
+    const mark = async () => {
+      spawned = true;
+      return {
+        state: { phase: "done" as const, sessionId: "s", lastText: "x", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
     const sup = new Supervisor({
-      defaultWorkspace: { ...ws, home: "/tenants/573/home" },
+      defaultWorkspace: { ...ws, home: HOME },
       store,
-      run: async () => {
-        spawned = true;
-        return {
-          state: { phase: "done", sessionId: "s", lastText: "x", turns: 1 },
-          events: [],
-          exitCode: 0,
-        };
-      },
-      runners: {
-        interactive: async () => {
-          spawned = true;
-          return {
-            state: { phase: "done", sessionId: "s", lastText: "x", turns: 1 },
-            events: [],
-            exitCode: 0,
-          };
-        },
-      },
+      run: mark,
+      runners: { interactive: mark },
       defaultEngine: "interactive",
     });
     await expect(sup.dispatch("t-eng", "a question", undefined, {})).rejects.toThrow(
       /does not carry it/,
     );
     expect(spawned).toBe(false);
-    // And the refusal must not strand the session: refusing after the phase write
-    // left the row in "running" with nothing to move it out.
     const row = await store.findSessionByThread("t-eng");
     expect(row?.phase).not.toBe("running");
   });

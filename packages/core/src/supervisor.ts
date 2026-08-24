@@ -285,30 +285,63 @@ export function hardenedExtraArgs(
   return [...(extraArgs ?? []), "--strict-mcp-config"];
 }
 
-/** BRO-2235 — a tenant HOME that the chosen engine will not honor must REFUSE.
+/** BRO-2235 — can this workspace's HOME actually be delivered here? If not, REFUSE.
  *
- *  Only the print engine threads `home` into the spawn. The interactive engine
- *  reaches the child across the session-host socket, and the codex engine builds
- *  its own environment; neither carries it today. So a workspace provisioned with
- *  `home` — which is an operator saying "this tenant must not use my credential or
- *  my skills" — would, on either of those engines, run against the operator's HOME
- *  and look exactly like a turn that worked.
+ *  ONE predicate, not one guard per spawn site. Three review rounds each found the
+ *  same defect — a tenant that declares isolation and silently gets the operator's
+ *  HOME — in a DIFFERENT cell of the matrix: a relative path, a non-print engine, a
+ *  host whose env never reaches the child, the title spawn. An invariant spelled
+ *  per-branch is forgotten once per branch, so the branches became the rounds.
+ *  Hoisting it means a new engine, host, or spawn site is refused by default rather
+ *  than silently unisolated.
  *
- *  FAIL-CLOSED, and the opposite of `tenantEnv`, deliberately. `tenantEnv` is
- *  fail-safe because an UNSET home means no isolation was ever asked for, and
- *  refusing there would turn a provisioning gap into an outage. Here the operator
- *  HAS asked, and the only alternatives are "refuse the turn" or "run it
- *  unisolated". An availability failure is recoverable; silently serving a tenant
- *  from the operator's credential is not.
+ *  THE LINE BETWEEN FAIL-SAFE AND FAIL-CLOSED WAS IN THE WRONG PLACE, and that is
+ *  what made the worst of those reachable. `tenantEnv` ignores a blank home AND a
+ *  relative one, which conflates two different things:
+ *
+ *    NO REQUEST        (home unset)     -> proceed. Nothing was asked for, and
+ *                                         refusing would turn a provisioning gap
+ *                                         into an outage.
+ *    UNSATISFIABLE REQUEST (everything  -> REFUSE. Something WAS asked for and
+ *     else here)                          cannot be delivered; running anyway
+ *                                         serves a tenant from the operator's
+ *                                         credential while looking normal.
+ *
+ *  Measured before the fix: `home: "relative/home"` on the print engine passed the
+ *  old engine-only check, then `tenantEnv` dropped the relative path and handed the
+ *  child the operator's HOME — the exact failure the guard existed to prevent, and
+ *  a test asserted it as correct behaviour.
+ *
+ *  `hostKind` is optional so this can be asked BEFORE a host lease exists (cheap
+ *  checks, no lease to leak) and again AFTER (the host check). Passing undefined
+ *  skips only the host clause; it never turns a refusal into a pass.
  *
  *  Pure + exported so the invariant is covered by a test rather than by a comment. */
-export function engineHomeRefusal(
+export function homeRefusal(
   workspace: { home?: string },
   engine: string | undefined,
+  hostKind?: string,
 ): string | undefined {
-  if (!workspace.home?.trim()) return undefined; // no isolation requested
-  if (engine === "print") return undefined; // the only engine that carries it
-  return `Workspace is provisioned with a per-tenant HOME, but the "${engine ?? "unknown"}" engine does not carry it — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+  const home = workspace.home?.trim();
+  if (!home) return undefined; // no isolation requested — the fail-SAFE case
+
+  // Everything below is a request that cannot be honoured. Refuse, do not degrade.
+  if (!home.startsWith("/")) {
+    return "Workspace declares a per-tenant HOME that is not an absolute path, so it cannot be applied — the turn would run with the operator's HOME. Refusing rather than running unisolated.";
+  }
+  // ALLOWLIST of one, not a denylist of today's engines: an engine added later is
+  // refused until someone threads HOME through it.
+  if (engine !== "print") {
+    return `Workspace declares a per-tenant HOME, but the "${engine ?? "unknown"}" engine does not carry it — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+  }
+  // Same, for hosts. `packages/host/src/index.ts` says it outright for vps: env
+  // "scope[s] the LOCAL ssh-client process, not the remote agent — ssh does not
+  // forward arbitrary env". A microVM has its own filesystem, so a host path names
+  // nothing inside it. Only a local child actually receives this env.
+  if (hostKind !== undefined && hostKind !== "local") {
+    return `Workspace declares a per-tenant HOME, but a "${hostKind}" host does not deliver it to the agent process — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+  }
+  return undefined;
 }
 
 /** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
@@ -756,8 +789,8 @@ export class Supervisor {
     //
     // BEFORE the host lease: this throw is outside the try/finally that releases
     // one, so refusing costs no host and leaks nothing.
-    const homeRefusal = engineHomeRefusal(workspace, session.engine ?? this.defaultEngine);
-    if (homeRefusal) throw new Error(homeRefusal);
+    const preLeaseRefusal = homeRefusal(workspace, session.engine ?? this.defaultEngine);
+    if (preLeaseRefusal) throw new Error(preLeaseRefusal);
 
     session.phase = "running";
     await this.store.upsertSession(session);
@@ -791,6 +824,14 @@ export class Supervisor {
       // existsSync can't see it; it needs a remote `test -d` via host.exec. VpsHost
       // is not yet wired into the api (only LocalHost + microVM ship today), so
       // this is latent — tracked for when vps is instantiated (BRO-1631).
+      // BRO-2235, second half: the host is only known once leased. Inside the try,
+      // so the finally releases the lease this refusal abandons.
+      const hostRefusal = homeRefusal(
+        workspace,
+        session.engine ?? this.defaultEngine,
+        lease.host.kind,
+      );
+      if (hostRefusal) throw new Error(hostRefusal);
       if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
         throw new Error(
           `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
@@ -933,8 +974,23 @@ export class Supervisor {
     try {
       const session = await this.store.findSessionByThread(threadId);
       if (!session) return;
-      const workspace = this.workspaceRegistry.get(session.workspaceId) ?? this.defaultWorkspace;
+      // STRICT, no `?? this.defaultWorkspace` fallback (BRO-2235). A session bound
+      // to a workspace that has since left the registry used to fall back here — so
+      // untrusted tenant text would be titled under the DEFAULT workspace, whose
+      // home is unset or belongs to someone else. Titling is fire-and-forget and
+      // entirely optional, so skipping it is free; running it against the wrong
+      // identity is not.
+      const bound = session.workspaceId
+        ? this.workspaceRegistry.get(session.workspaceId)
+        : undefined;
+      if (session.workspaceId && !bound) return;
+      const workspace = bound ?? this.defaultWorkspace;
       lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+      // The SAME predicate as the turn. `generateTitleAsync` calls `runners.print`
+      // directly, so it bypassed the turn's guard entirely — and it is the spawn
+      // that inlines untrusted tenant text, which makes it the worse one to leave
+      // unisolated. Returning (not throwing) because a title is optional.
+      if (homeRefusal(workspace, "print", lease.host.kind)) return;
       // Bound the call (P20): a hung `claude -p` must not hold the lease / dangle a
       // promise forever. The late rejection is swallowed so it can't unhandled-reject.
       const runP = print({
