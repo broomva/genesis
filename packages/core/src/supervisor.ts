@@ -17,6 +17,10 @@ import {
   StaticHostProvider,
 } from "@genesis/host";
 import type { AgentEvent, RunState } from "@genesis/projection";
+// BRO-2235: `tenantEnv` moved to @genesis/runner, beside `scrubAgentEnv` — the
+// spawn it shapes lives there, and `core` cannot be imported from `runner` (the
+// dependency runs core -> runner). Re-exported so the name keeps working.
+export { tenantEnv } from "@genesis/runner";
 import {
   type EffortLevel,
   type RunAttachment,
@@ -281,42 +285,63 @@ export function hardenedExtraArgs(
   return [...(extraArgs ?? []), "--strict-mcp-config"];
 }
 
-/** BRO-2235 — per-tenant HOME, so a confined tenant stops inheriting the
- *  operator's `~/.claude`.
+/** BRO-2235 — can this workspace's HOME actually be delivered here? If not, REFUSE.
  *
- *  WHY THIS IS NOT ONLY ABOUT CREDENTIALS. Measured on srv1692698: with HOME
- *  defaulting to the operator's, a confined tenant inherits everything under
- *  `~/.claude` — 75 user-scope SKILLS (it listed 90 in total), the user-scope
- *  `settings.json` (`defaultMode: bypassPermissions`, `sandbox: false`), and shared
- *  `history.jsonl` / `projects/` / `sessions/`. Two of those skills declare
- *  `allowed-tools`, which the CLI installs as a real permission layer —
- *  `use-railway` grants `Bash(railway:*|npm:*|npx:*|curl:*|python3:*)` — and the
- *  tenant confirmed it is reachable. The tenant's PROJECT settings.json does not
- *  govern any of it, because user scope is a different precedence level entirely.
+ *  ONE predicate, not one guard per spawn site. Three review rounds each found the
+ *  same defect — a tenant that declares isolation and silently gets the operator's
+ *  HOME — in a DIFFERENT cell of the matrix: a relative path, a non-print engine, a
+ *  host whose env never reaches the child, the title spawn. An invariant spelled
+ *  per-branch is forgotten once per branch, so the branches became the rounds.
+ *  Hoisting it means a new engine, host, or spawn site is refused by default rather
+ *  than silently unisolated.
  *
- *  Pointing HOME at a per-tenant directory closes that whole class at once, and it
- *  is independent of WHICH credential the session uses: identity is unchanged until
- *  an operator decides the subscription-vs-API question.
+ *  THE LINE BETWEEN FAIL-SAFE AND FAIL-CLOSED WAS IN THE WRONG PLACE, and that is
+ *  what made the worst of those reachable. `tenantEnv` ignores a blank home AND a
+ *  relative one, which conflates two different things:
  *
- *  FAIL-SAFE, NOT FAIL-CLOSED, and the difference is deliberate. `hardenedExtraArgs`
- *  can safely add a flag to every confined turn. This cannot safely *omit* HOME: a
- *  tenant whose home was never provisioned would get a session with no credential
- *  and every turn would fail. So an unset `home` leaves the environment untouched —
- *  the current behaviour — and the provisioner is what decides a tenant is ready.
- *  Refusing here would convert a provisioning gap into an outage.
+ *    NO REQUEST        (home unset)     -> proceed. Nothing was asked for, and
+ *                                         refusing would turn a provisioning gap
+ *                                         into an outage.
+ *    UNSATISFIABLE REQUEST (everything  -> REFUSE. Something WAS asked for and
+ *     else here)                          cannot be delivered; running anyway
+ *                                         serves a tenant from the operator's
+ *                                         credential while looking normal.
+ *
+ *  Measured before the fix: `home: "relative/home"` on the print engine passed the
+ *  old engine-only check, then `tenantEnv` dropped the relative path and handed the
+ *  child the operator's HOME — the exact failure the guard existed to prevent, and
+ *  a test asserted it as correct behaviour.
+ *
+ *  `hostKind` is optional so this can be asked BEFORE a host lease exists (cheap
+ *  checks, no lease to leak) and again AFTER (the host check). Passing undefined
+ *  skips only the host clause; it never turns a refusal into a pass.
  *
  *  Pure + exported so the invariant is covered by a test rather than by a comment. */
-export function tenantEnv(
+export function homeRefusal(
   workspace: { home?: string },
-  base?: Record<string, string>,
-): Record<string, string> | undefined {
+  engine: string | undefined,
+  hostKind?: string,
+): string | undefined {
   const home = workspace.home?.trim();
-  if (!home) return base;
-  // ABSOLUTE only. A relative HOME resolves against the child's cwd — the tenant's
-  // own workspace — which would silently place `.claude` inside the directory the
-  // tenant can write, handing it its own settings file.
-  if (!home.startsWith("/")) return base;
-  return { ...(base ?? {}), HOME: home };
+  if (!home) return undefined; // no isolation requested — the fail-SAFE case
+
+  // Everything below is a request that cannot be honoured. Refuse, do not degrade.
+  if (!home.startsWith("/")) {
+    return "Workspace declares a per-tenant HOME that is not an absolute path, so it cannot be applied — the turn would run with the operator's HOME. Refusing rather than running unisolated.";
+  }
+  // ALLOWLIST of one, not a denylist of today's engines: an engine added later is
+  // refused until someone threads HOME through it.
+  if (engine !== "print") {
+    return `Workspace declares a per-tenant HOME, but the "${engine ?? "unknown"}" engine does not carry it — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+  }
+  // Same, for hosts. `packages/host/src/index.ts` says it outright for vps: env
+  // "scope[s] the LOCAL ssh-client process, not the remote agent — ssh does not
+  // forward arbitrary env". A microVM has its own filesystem, so a host path names
+  // nothing inside it. Only a local child actually receives this env.
+  if (hostKind !== undefined && hostKind !== "local") {
+    return `Workspace declares a per-tenant HOME, but a "${hostKind}" host does not deliver it to the agent process — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+  }
+  return undefined;
 }
 
 /** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
@@ -752,6 +777,21 @@ export class Supervisor {
       session.engine =
         neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
     }
+    // BRO-2235. Placement is load-bearing three ways.
+    //
+    // AFTER the engine binding above: the binding decides whether `home` will
+    // actually travel, so a workspace can be correct and the turn still unisolated
+    // purely from which engine the thread landed on.
+    //
+    // BEFORE `phase = "running"` is persisted: a refusal here leaves the session in
+    // whatever phase it already held. Refusing after the write stranded it in
+    // "running" permanently — the row never returns to a runnable state.
+    //
+    // BEFORE the host lease: this throw is outside the try/finally that releases
+    // one, so refusing costs no host and leaks nothing.
+    const preLeaseRefusal = homeRefusal(workspace, session.engine ?? this.defaultEngine);
+    if (preLeaseRefusal) throw new Error(preLeaseRefusal);
+
     session.phase = "running";
     await this.store.upsertSession(session);
 
@@ -784,6 +824,14 @@ export class Supervisor {
       // existsSync can't see it; it needs a remote `test -d` via host.exec. VpsHost
       // is not yet wired into the api (only LocalHost + microVM ship today), so
       // this is latent — tracked for when vps is instantiated (BRO-1631).
+      // BRO-2235, second half: the host is only known once leased. Inside the try,
+      // so the finally releases the lease this refusal abandons.
+      const hostRefusal = homeRefusal(
+        workspace,
+        session.engine ?? this.defaultEngine,
+        lease.host.kind,
+      );
+      if (hostRefusal) throw new Error(hostRefusal);
       if (lease.host.kind === "local" && !this.workspaceExists(workspace.rootPath)) {
         throw new Error(
           `Workspace "${workspace.name}" is unavailable — its directory no longer exists on the server. Recreate it, or start a new thread in another workspace.`,
@@ -795,6 +843,9 @@ export class Supervisor {
         resumeSessionId: session.agentSessionId,
         host: lease.host,
         extraArgs: hardenedExtraArgs(workspace, this.extraArgs),
+        // BRO-2235: the tenant's own HOME, when it has one. Unset leaves the
+        // server's HOME in place, which is the current behaviour.
+        home: workspace.home,
         // Per-turn model/effort (BRO-1573) override the constructor defaults.
         model: turnOpts?.model,
         effort: turnOpts?.effort,
@@ -923,8 +974,23 @@ export class Supervisor {
     try {
       const session = await this.store.findSessionByThread(threadId);
       if (!session) return;
-      const workspace = this.workspaceRegistry.get(session.workspaceId) ?? this.defaultWorkspace;
+      // STRICT, no `?? this.defaultWorkspace` fallback (BRO-2235). A session bound
+      // to a workspace that has since left the registry used to fall back here — so
+      // untrusted tenant text would be titled under the DEFAULT workspace, whose
+      // home is unset or belongs to someone else. Titling is fire-and-forget and
+      // entirely optional, so skipping it is free; running it against the wrong
+      // identity is not.
+      const bound = session.workspaceId
+        ? this.workspaceRegistry.get(session.workspaceId)
+        : undefined;
+      if (session.workspaceId && !bound) return;
+      const workspace = bound ?? this.defaultWorkspace;
       lease = await this.hostProvider.resolveHost({ id: session.id, threadId });
+      // The SAME predicate as the turn. `generateTitleAsync` calls `runners.print`
+      // directly, so it bypassed the turn's guard entirely — and it is the spawn
+      // that inlines untrusted tenant text, which makes it the worse one to leave
+      // unisolated. Returning (not throwing) because a title is optional.
+      if (homeRefusal(workspace, "print", lease.host.kind)) return;
       // Bound the call (P20): a hung `claude -p` must not hold the lease / dangle a
       // promise forever. The late rejection is swallowed so it can't unhandled-reject.
       const runP = print({
@@ -951,6 +1017,13 @@ export class Supervisor {
         // ["--strict-mcp-config"] when confined and undefined otherwise, which adds
         // the boundary without reintroducing any permission flag.
         extraArgs: hardenedExtraArgs(workspace),
+        // BRO-2235: HOME travels here TOO, for the reason the paragraph above
+        // gives for MCP — "a confined workspace must be confined on every spawn it
+        // causes". Titling inlines untrusted tenant text; leaving it on the
+        // operator's HOME would run that text against the operator's credential
+        // and skills, which is the exact hole --strict-mcp-config was added to
+        // close, one layer down.
+        home: workspace.home,
       });
       runP.catch(() => {}); // a rejection after the timeout must not escape
       const result = await withTimeout(runP, TITLE_TIMEOUT_MS);

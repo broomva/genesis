@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExecutionHost } from "@genesis/host";
 import type { RunResult } from "@genesis/runner";
 import { STACK_AGENTS } from "./agent-stack";
 import { InMemoryStore } from "./store";
@@ -10,6 +11,7 @@ import {
   buildTitlePrompt,
   deriveTitle,
   hardenedExtraArgs,
+  homeRefusal,
   sanitizeTitle,
 } from "./supervisor";
 import { InMemoryWorkspaceRepository } from "./workspace-repository";
@@ -1345,5 +1347,279 @@ describe("hardenedExtraArgs — confined workspaces drop inherited MCP (BRO-2224
     const operator = ["--model=haiku"];
     hardenedExtraArgs({ confined: true }, operator);
     expect(operator).toEqual(["--model=haiku"]);
+  });
+});
+
+/**
+ * BRO-2235 — HOME must travel on EVERY spawn a workspace causes, not just the turn.
+ *
+ * The title spawn is the one that gets forgotten: it is fire-and-forget, its output
+ * is a string nobody inspects, and it already had this exact bug once for MCP
+ * (--strict-mcp-config was omitted because `extraArgs` was deliberately not
+ * forwarded). A title spawn left on the operator's HOME would run untrusted tenant
+ * text against the operator's credential and skills — the same hole, one layer down.
+ *
+ * Asserted as a PAIR, for the reason the MCP test above gives: "set when provisioned"
+ * alone would also pass if HOME were set unconditionally, which would point every
+ * operator thread at a tenant directory.
+ */
+describe("per-tenant HOME travels on every spawn (BRO-2235)", () => {
+  async function homeSeenBy(
+    phase: "turn" | "title",
+    home: string | undefined,
+  ): Promise<{ called: boolean; home?: string }> {
+    const store = new InMemoryStore();
+    let seen: string | undefined;
+    let called = false;
+    const capturing = async (o: { home?: string }): Promise<RunResult> => {
+      called = true;
+      seen = o.home;
+      return {
+        state: { phase: "done", sessionId: "s", lastText: "A Title", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home },
+      store,
+      run: capturing,
+    });
+    await sup.dispatch("t-home", "a question", undefined, {});
+    if (phase === "title") {
+      seen = undefined;
+      called = false;
+      await (
+        sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+      ).generateTitleAsync("t-home", "a question", "a reply");
+    }
+    return { called, home: seen };
+  }
+
+  test.each(["turn", "title"] as const)("%s spawn carries a provisioned home", async (phase) => {
+    const r = await homeSeenBy(phase, "/tenants/573001112233/home");
+    // A spawn that never happened would report `undefined` and read as a pass.
+    expect(r.called).toBe(true);
+    expect(r.home).toBe("/tenants/573001112233/home");
+  });
+
+  test.each(["turn", "title"] as const)("%s spawn leaves an unset home unset", async (phase) => {
+    const r = await homeSeenBy(phase, undefined);
+    expect(r.called).toBe(true);
+    expect(r.home).toBeUndefined();
+  });
+});
+
+/**
+ * BRO-2235 — a declared HOME that cannot be delivered must REFUSE the turn.
+ *
+ * Three review rounds each found this same defect in a different cell: a relative
+ * path, a non-print engine, a host whose env never reaches the child, and the title
+ * spawn that bypassed the check. So the assertion is written over the MATRIX rather
+ * than per-branch — a new engine or host is refused by default, and a test has to be
+ * deliberately changed to make it pass.
+ *
+ * The line that matters: an UNSET home is not a request and proceeds (refusing would
+ * turn a provisioning gap into an outage); anything else is a request that cannot be
+ * honoured, and serving it unisolated hands a tenant the operator's credential while
+ * looking like a normal turn.
+ */
+describe("homeRefusal (BRO-2235)", () => {
+  const HOME = "/tenants/573/home";
+
+  test("no home is not a request → never refuses, on any engine or host", () => {
+    for (const e of ["print", "interactive", "codex", undefined]) {
+      for (const h of ["local", "vps", "microvm", undefined]) {
+        expect(homeRefusal({}, e, h)).toBeUndefined();
+        expect(homeRefusal({ home: "   " }, e, h)).toBeUndefined();
+      }
+    }
+  });
+
+  test("the one deliverable combination is allowed", () =>
+    expect(homeRefusal({ home: HOME }, "print", "local")).toBeUndefined());
+
+  // THE BLOCKER a prior round found, and which a prior TEST asserted as correct:
+  // `engineHomeRefusal` checked only the engine, so a relative home passed it and
+  // then `tenantEnv` dropped the path and supplied the operator's HOME.
+  test.each(["relative/home", "./home", "../home", "home"])(
+    "a non-absolute home %p refuses instead of silently falling back",
+    (home) => {
+      expect(homeRefusal({ home }, "print", "local")).toMatch(/absolute path/);
+    },
+  );
+
+  test.each(["interactive", "codex", "future-engine", undefined])(
+    "engine %p does not carry HOME → refuses",
+    (engine) => {
+      expect(homeRefusal({ home: HOME }, engine, "local")).toMatch(/does not carry it/);
+    },
+  );
+
+  // The host comment in packages/host/src/index.ts says it outright: ssh does not
+  // forward arbitrary env, so a vps child keeps the REMOTE operator's HOME.
+  test.each(["vps", "microvm", "future-host"])("host %p does not deliver HOME → refuses", (h) => {
+    expect(homeRefusal({ home: HOME }, "print", h)).toMatch(/does not deliver it/);
+  });
+
+  test("hostKind omitted skips only the host clause — it never turns a refusal into a pass", () => {
+    expect(homeRefusal({ home: HOME }, "print", undefined)).toBeUndefined();
+    expect(homeRefusal({ home: "relative" }, "print", undefined)).toBeDefined();
+    expect(homeRefusal({ home: HOME }, "interactive", undefined)).toBeDefined();
+  });
+
+  test("no refusal leaks the tenant path into a channel-visible message", () => {
+    for (const [e, h] of [
+      ["interactive", "local"],
+      ["print", "vps"],
+    ] as const) {
+      expect(homeRefusal({ home: HOME }, e, h)).not.toContain(HOME);
+    }
+  });
+
+  test("the dispatch actually refuses, and does not spawn", async () => {
+    const store = new InMemoryStore();
+    let spawned = false;
+    const mark = async () => {
+      spawned = true;
+      return {
+        state: { phase: "done" as const, sessionId: "s", lastText: "x", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store,
+      run: mark,
+      runners: { interactive: mark },
+      defaultEngine: "interactive",
+    });
+    await expect(sup.dispatch("t-eng", "a question", undefined, {})).rejects.toThrow(
+      /does not carry it/,
+    );
+    expect(spawned).toBe(false);
+    const row = await store.findSessionByThread("t-eng");
+    expect(row?.phase).not.toBe("running");
+  });
+});
+
+/**
+ * BRO-2235 — the guards must be UNDELETABLE, not merely present.
+ *
+ * Cross-model review (round 3, PASS) left one minor standing and it is the one that
+ * matters given this branch's history: "no integration test would fail if the
+ * post-lease or title guards were deleted." Every defect on this PR was a guard that
+ * read correctly and did not hold, so a guard nothing asserts is exactly what must
+ * not ship.
+ *
+ * These count LEASES and SPAWNS through a fake provider, so each guard's deletion is
+ * observable rather than inferred:
+ *   - pre-lease refusal  -> zero leases taken (it must refuse before spending a host)
+ *   - post-lease refusal -> the lease it abandoned is RELEASED (no leak)
+ *   - title refusal      -> `runners.print` is never invoked
+ */
+describe("HOME guards are observable, not just present (BRO-2235)", () => {
+  const HOME = "/tenants/573/home";
+
+  class CountingProvider {
+    leases = 0;
+    releases = 0;
+    constructor(private readonly kind: "local" | "vps" = "local") {}
+    async resolveHost() {
+      this.leases++;
+      // Only `host.kind` is read before the guard fires, so a stub is honest here —
+      // a real host would add failure modes the guard is not the subject of.
+      const host = { kind: this.kind } as unknown as ExecutionHost;
+      return { host, release: async () => void this.releases++ };
+    }
+  }
+
+  const spawnCounter = () => {
+    let calls = 0;
+    const run = async () => {
+      calls++;
+      return {
+        state: { phase: "done" as const, sessionId: "s", lastText: "A Title", turns: 1 },
+        events: [],
+        exitCode: 0,
+      };
+    };
+    return { run, calls: () => calls };
+  };
+
+  test("PRE-LEASE refusal (bad engine) spends no host at all", async () => {
+    const provider = new CountingProvider();
+    const spawn = spawnCounter();
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store: new InMemoryStore(),
+      run: spawn.run,
+      runners: { interactive: spawn.run },
+      defaultEngine: "interactive",
+      hostProvider: provider,
+    });
+    await expect(sup.dispatch("t-nolease", "q", undefined, {})).rejects.toThrow(/does not carry/);
+    expect(provider.leases).toBe(0); // deleting the pre-lease guard makes this 1
+    expect(spawn.calls()).toBe(0);
+  });
+
+  test("POST-LEASE refusal (bad host) releases the lease it abandoned", async () => {
+    const provider = new CountingProvider("vps");
+    const spawn = spawnCounter();
+    const sup = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store: new InMemoryStore(),
+      run: spawn.run,
+      hostProvider: provider,
+    });
+    await expect(sup.dispatch("t-vps", "q", undefined, {})).rejects.toThrow(/does not deliver it/);
+    expect(provider.leases).toBe(1); // the host clause needs the lease to be known
+    expect(provider.releases).toBe(1); // ...and must not leak it
+    expect(spawn.calls()).toBe(0); // deleting the host guard makes this 1
+  });
+
+  // A SESSION MUST EXIST for the title path to reach the guard — `generateTitleAsync`
+  // returns early on `!session`. The first version of this test called it on a thread
+  // that had never dispatched, so it exited before the guard and the deletability
+  // sweep reported the guard SURVIVED. The sweep caught the vacuity; the test did not.
+  test("TITLE refusal never reaches the print runner", async () => {
+    const store = new InMemoryStore();
+    const spawn = spawnCounter();
+
+    // Turn 1: no home, local host -> succeeds, creating the session + its row.
+    const first = new Supervisor({
+      defaultWorkspace: { ...ws },
+      store,
+      run: spawn.run,
+      hostProvider: new CountingProvider("local"),
+    });
+    await first.dispatch("t-title-guard", "untrusted tenant text", undefined, {});
+    const spawnsAfterTurn = spawn.calls();
+    expect(spawnsAfterTurn).toBeGreaterThan(0); // the session really exists
+
+    // Now the same thread is titled by a supervisor whose workspace DOES declare a
+    // home, on a host that cannot deliver it — the case the title guard exists for.
+    const titler = new Supervisor({
+      defaultWorkspace: { ...ws, home: HOME },
+      store,
+      run: spawn.run,
+      hostProvider: new CountingProvider("vps"),
+    });
+    // HYDRATE THE REGISTRY FIRST. `loadRegistry` is async and runs on dispatch, so a
+    // supervisor that has never dispatched still has an EMPTY registry — which made
+    // the strict-resolution check return before the home guard, and the deletability
+    // sweep correctly reported the guard SURVIVED. Without this line the test passes
+    // for the wrong reason.
+    await titler.listWorkspaces();
+    await (
+      titler as unknown as {
+        generateTitleAsync: (t: string, u: string, r: string) => Promise<void>;
+      }
+    ).generateTitleAsync("t-title-guard", "untrusted tenant text", "a reply");
+
+    // Deleting the title guard makes this spawn, titling tenant text under the
+    // operator's HOME.
+    expect(spawn.calls()).toBe(spawnsAfterTurn);
   });
 });
