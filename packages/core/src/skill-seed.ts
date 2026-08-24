@@ -101,12 +101,13 @@ export function seedSkills(rootPath: string, opts: SkillSeedOptions): SeedResult
           }
         }
       }
-      // NEVER write through a symlink. This process is ROOT, and `overwrite`
-      // turned what used to be a skip into a write — so a destination symlink
-      // would have root follow it and then chown/chmod the target. The seeded
-      // directory is not tenant-writable today, so this is defence in depth
-      // rather than a live hole, but a privileged writer must not depend on the
-      // permissions of a directory it does not itself enforce. (P20 BLOCKER.)
+      // Never write through a symlink at the destination. NECESSARY BUT NOT
+      // SUFFICIENT, and saying so matters: readFileSync(dst) and chmodSync(dst)
+      // above already follow a link, and an ANCESTOR directory can be
+      // tenant-controlled because the provisioner creates .claude paths 1775.
+      // A caller passing overwrite on a tenant-adjacent tree is therefore still
+      // unsafe, which is why the provisioner does not. Closing it fully needs
+      // openat/O_NOFOLLOW or write-to-temp-then-rename.
       if (lstatSync(dst, { throwIfNoEntry: false })?.isSymbolicLink()) {
         skipped.push(dst);
         continue;

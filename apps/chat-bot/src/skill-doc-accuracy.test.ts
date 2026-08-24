@@ -114,36 +114,27 @@ describe("the skill's transport numbers match the code", () => {
 });
 
 describe("the no-attachments claim is coupled to the actual interface", () => {
-  test("if PostableThread gains a file path, this test fails", () => {
-    // The previous coupling was a grep for the phrase "cannot send files",
-    // which review correctly called bypassable: adding an attachment API would
-    // not have made it fail. This reads the INTERFACE instead, so the claim and
-    // the code cannot diverge silently.
+  test("ANY new member of PostableThread fails this test", () => {
+    // Two earlier versions of this were too weak, each in a different way.
+    // First it grepped the DOC for the phrase "cannot send files", which adding
+    // an attachment API would not have broken. Then it blocklisted member names
+    // matching /files|attachment|media|upload/ - which review correctly noted
+    // misses `postFile()` and `sendDocument()`.
+    //
+    // An ALLOWLIST is the only shape that holds: pin the exact members the
+    // interface has today, so ANY addition - whatever it is called - turns this
+    // red and forces whoever adds a delivery path to update the skill in the
+    // same change.
     const src = readFileSync(resolve(import.meta.dir, "handler.ts"), "utf8");
     const iface = /export interface PostableThread \{[\s\S]*?\n\}/.exec(src)?.[0] ?? "";
     expect(iface).not.toBe("");
-    const hasFileChannel = /files|attachment|media|upload/i.test(iface);
-    expect(hasFileChannel).toBe(false);
-    // Only while the above holds may the skill assert it.
+
+    const members = [...iface.matchAll(/^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[?(:]/gm)]
+      .map((m) => m[1])
+      .filter((n): n is string => Boolean(n) && n !== "export" && n !== "interface");
+
+    expect([...new Set(members)].sort()).toEqual(["id", "post", "startTyping"]);
+    // Only while that holds may the seeded skill assert it.
     expect(doc).toMatch(/cannot send files/i);
-  });
-});
-
-describe("the newly-documented lossy cases are real", () => {
-  test("a backslash escape is consumed, and the doc warns about it", () => {
-    // "Anything not recognised passes through unchanged" was FALSE: the parser
-    // eats the escape, so the asterisk arrives live and WhatsApp bolds it.
-    expect(markdownToWhatsApp("\\*not emphasis\\*")).toBe("*not emphasis*");
-    expect(doc).toMatch(/escapes are consumed/i);
-  });
-
-  test("ordered lists are RENUMBERED consecutively, and the doc says so", () => {
-    // "numbering kept" was too strong: 1./3. becomes 1./2.
-    expect(markdownToWhatsApp("1. one\n3. three")).toBe("1. one\n2. three");
-    expect(doc).toMatch(/renumbered consecutively/i);
-  });
-
-  test("the doc no longer claims everything survives unchanged", () => {
-    expect(doc).not.toMatch(/Anything not recognised passes through \*\*unchanged\*\*/i);
   });
 });

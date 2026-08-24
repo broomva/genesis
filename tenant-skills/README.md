@@ -1,6 +1,14 @@
 # tenant-skills
 
-Skills seeded into **every** WhatsApp tenant workspace by the provisioner.
+Skills the provisioner seeds into a WhatsApp tenant workspace.
+
+**Seeding is opt-in and currently one-shot.** `GENESIS_TENANT_SKILLS_DIR` is
+optional: unset, provisioning succeeds and seeds nothing, so "every tenant has
+these" is a property of the deployment, not of this repo. And a tenant that was
+already provisioned does **not** pick up an edited skill — `seedSkills` skips a
+file whose content differs, and the safe fix for that is not yet built (see
+BRO-2309). Re-seeding an existing tenant today means removing the old file
+first, as root.
 
 Point `GENESIS_TENANT_SKILLS_DIR` at this directory:
 

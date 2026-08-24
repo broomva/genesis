@@ -97,7 +97,7 @@ describe("the whatsapp-channel skill states what the channel actually does", () 
   });
 });
 
-describe("a CORRECTED skill actually reaches an existing tenant", () => {
+describe("re-seeding semantics, and why the unsafe fix was reverted", () => {
   test("re-seeding replaces a stale file rather than skipping it", () => {
     // The blocker: seedSkills without `overwrite` SKIPS a file whose content
     // differs, so a corrected skill lands on newly-provisioned tenants and
@@ -136,14 +136,25 @@ describe("a CORRECTED skill actually reaches an existing tenant", () => {
     }
   });
 
-  test("the PROVISIONER passes overwrite, not just the tests", () => {
-    // A fix proven only in a unit test is a fix that never ships: the caller is
-    // what production runs.
+  test("the PROVISIONER does NOT pass overwrite — pinned as a security decision", () => {
+    // This assertion is INVERTED from what it first said, deliberately.
+    //
+    // overwrite:true was added to fix stale prose and then found to open a
+    // root-write escape: readFileSync(dst) and chmodSync(dst) run BEFORE any
+    // symlink check, and the skill directory sits under a 1775 group-writable
+    // .claude, so an ANCESTOR can be tenant-controlled and a destination lstat
+    // cannot see it. Reverted.
+    //
+    // The propagation problem is real and remains open on BRO-2309. This test
+    // exists so the flag cannot come back quietly as an easy fix for it — the
+    // safe route is openat/O_NOFOLLOW or write-to-temp-then-rename inside the
+    // seeder, and whoever does that should be changing this line knowingly.
     const script = readFileSync(
       resolve(import.meta.dir, "../../../scripts/provision-whatsapp-tenants.ts"),
       "utf8",
     );
     const call = /seedSkills\(t\.dir, \{[\s\S]*?\}\)/.exec(script)?.[0] ?? "";
-    expect(call).toContain("overwrite: true");
+    expect(call).not.toBe("");
+    expect(call).not.toContain("overwrite");
   });
 });
