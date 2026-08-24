@@ -281,6 +281,44 @@ export function hardenedExtraArgs(
   return [...(extraArgs ?? []), "--strict-mcp-config"];
 }
 
+/** BRO-2235 — per-tenant HOME, so a confined tenant stops inheriting the
+ *  operator's `~/.claude`.
+ *
+ *  WHY THIS IS NOT ONLY ABOUT CREDENTIALS. Measured on srv1692698: with HOME
+ *  defaulting to the operator's, a confined tenant inherits everything under
+ *  `~/.claude` — 75 user-scope SKILLS (it listed 90 in total), the user-scope
+ *  `settings.json` (`defaultMode: bypassPermissions`, `sandbox: false`), and shared
+ *  `history.jsonl` / `projects/` / `sessions/`. Two of those skills declare
+ *  `allowed-tools`, which the CLI installs as a real permission layer —
+ *  `use-railway` grants `Bash(railway:*|npm:*|npx:*|curl:*|python3:*)` — and the
+ *  tenant confirmed it is reachable. The tenant's PROJECT settings.json does not
+ *  govern any of it, because user scope is a different precedence level entirely.
+ *
+ *  Pointing HOME at a per-tenant directory closes that whole class at once, and it
+ *  is independent of WHICH credential the session uses: identity is unchanged until
+ *  an operator decides the subscription-vs-API question.
+ *
+ *  FAIL-SAFE, NOT FAIL-CLOSED, and the difference is deliberate. `hardenedExtraArgs`
+ *  can safely add a flag to every confined turn. This cannot safely *omit* HOME: a
+ *  tenant whose home was never provisioned would get a session with no credential
+ *  and every turn would fail. So an unset `home` leaves the environment untouched —
+ *  the current behaviour — and the provisioner is what decides a tenant is ready.
+ *  Refusing here would convert a provisioning gap into an outage.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function tenantEnv(
+  workspace: { home?: string },
+  base?: Record<string, string>,
+): Record<string, string> | undefined {
+  const home = workspace.home?.trim();
+  if (!home) return base;
+  // ABSOLUTE only. A relative HOME resolves against the child's cwd — the tenant's
+  // own workspace — which would silently place `.claude` inside the directory the
+  // tenant can write, handing it its own settings file.
+  if (!home.startsWith("/")) return base;
+  return { ...(base ?? {}), HOME: home };
+}
+
 /** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
  *
  *  `hardenedExtraArgs` above decides whether a turn is hardened. These decide
