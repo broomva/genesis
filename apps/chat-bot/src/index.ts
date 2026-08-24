@@ -618,7 +618,16 @@ function startVoiceDelivery(): void {
     );
   const phoneNumberId = kapsoPhoneNumberId;
   if (!phoneNumberId) return;
-  const wa = new WhatsAppClient({ kapsoApiKey });
+  // baseUrl is REQUIRED to route through Kapso. The client defaults to
+  // https://graph.facebook.com — Meta direct — which authenticates with an
+  // accessToken we do not have, so a kapsoApiKey against that default fails with
+  // a bare "Authentication Error". Dogfooding hit exactly that: the turn ran, the
+  // answer came back, and the send was rejected. Same constant the Kapso chat
+  // adapter uses (DEFAULT_KAPSO_BASE_URL).
+  const wa = new WhatsAppClient({
+    kapsoApiKey,
+    baseUrl: process.env.KAPSO_BASE_URL?.trim() || "https://api.kapso.ai/meta/whatsapp",
+  });
   const raw = Number(process.env.GENESIS_VOICE_POLL_MS);
   const intervalMs = Number.isFinite(raw) && raw >= 1000 ? raw : 15_000;
   const rawStall = Number(process.env.GENESIS_VOICE_STALL_MS);
