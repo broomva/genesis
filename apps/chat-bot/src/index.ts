@@ -632,6 +632,8 @@ function startVoiceDelivery(): void {
   const intervalMs = Number.isFinite(raw) && raw >= 1000 ? raw : 15_000;
   const rawStall = Number(process.env.GENESIS_VOICE_STALL_MS);
   const voiceStallMs = Number.isFinite(rawStall) && rawStall >= 1000 ? rawStall : DEFAULT_STALL_MS;
+  const rawSend = Number(process.env.GENESIS_VOICE_SEND_MS);
+  const voiceSendMs = Number.isFinite(rawSend) && rawSend >= 1000 ? rawSend : 60_000;
 
   let running = false;
   const tick = async () => {
@@ -685,12 +687,24 @@ function startVoiceDelivery(): void {
           return out;
         },
         send: async (to, text) => {
+          // BOUNDED for the same reason the dispatch is, at the OTHER call site —
+          // which is where this was missed. A Kapso send that accepts the
+          // connection and never answers leaves `running` true forever, and every
+          // later ticket is starved in silence. (P20 round 1.)
           // Chunked exactly as the WhatsApp handler does: a message over the
           // transport cap is REJECTED, and the answer then simply never arrives.
           const target = CHUNK_TARGET - FENCE_OVERHEAD;
           const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(text), target));
           for (const body of chunks.length ? chunks : [text]) {
-            await wa.messages.sendText({ phoneNumberId, to, body });
+            const bail = AbortSignal.timeout(voiceSendMs);
+            await Promise.race([
+              wa.messages.sendText({ phoneNumberId, to, body }),
+              new Promise((_r, reject) => {
+                bail.addEventListener("abort", () =>
+                  reject(new Error(`whatsapp send exceeded ${voiceSendMs}ms`)),
+                );
+              }),
+            ]);
           }
         },
       });
