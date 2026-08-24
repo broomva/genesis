@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { VoiceQueue } from "@/components/voice-queue";
 import { WorkspacesManager } from "@/components/workspaces-manager";
 import {
   ENGINE_OPTIONS,
@@ -300,6 +301,10 @@ export function SettingsSheet({
                 />
               </Row>
             </Section>
+
+            {/* Phone requests (BRO-2284) — what a call asked for and whether the
+                answer reached WhatsApp. Self-hides when voice is not configured. */}
+            <VoiceQueue open={open} />
 
             {/* Projects (BRO-1629 slice 3) — add/remove the repos the agent runs
                 in, live (no restart). Self-hides when there's nothing to manage. */}

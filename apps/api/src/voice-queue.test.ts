@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCaller } from "./voice";
+import type { VoiceStatus } from "./voice-queue";
 import {
   HANDLED_FILE,
   VOICE_QUEUE_FILE,
@@ -160,16 +168,56 @@ describe("readQueueStatus — the operator view", () => {
     expect(readQueueStatus(d)).toMatchObject([{ id: "v-1", status: "pending", attempts: 0 }]);
   });
 
-  test.each([
-    ["delivered", { disposition: "delivered", attempts: 1, terminal: true }, "delivered"],
-    ["undeliverable", { disposition: "undeliverable", attempts: 1, terminal: true }, "undeliverable"],
-    ["a retryable failure", { disposition: "failed:send", attempts: 1, terminal: false }, "retrying"],
-    ["an exhausted failure", { disposition: "failed:send", attempts: 3, terminal: true }, "abandoned"],
-  ])("%s maps to %p", (_label, entry, expected) => {
+  const CASES: Array<{
+    label: string;
+    disposition: string;
+    attempts: number;
+    terminal: boolean;
+    expected: VoiceStatus;
+  }> = [
+    {
+      label: "delivered",
+      disposition: "delivered",
+      attempts: 1,
+      terminal: true,
+      expected: "delivered",
+    },
+    {
+      label: "undeliverable",
+      disposition: "undeliverable",
+      attempts: 1,
+      terminal: true,
+      expected: "undeliverable",
+    },
+    {
+      label: "a retryable failure",
+      disposition: "failed:send",
+      attempts: 1,
+      terminal: false,
+      expected: "retrying",
+    },
+    {
+      label: "an exhausted failure",
+      disposition: "failed:send",
+      attempts: 3,
+      terminal: true,
+      expected: "abandoned",
+    },
+  ];
+
+  test.each(CASES)("$label maps to $expected", (c) => {
     const d = tmp();
     q(d, [t("v-1")]);
-    h(d, [{ id: "v-1", at: "2026-08-24T00:00:05Z", ...entry }]);
-    expect(readQueueStatus(d)[0]?.status).toBe(expected as string);
+    h(d, [
+      {
+        id: "v-1",
+        at: "2026-08-24T00:00:05Z",
+        disposition: c.disposition,
+        attempts: c.attempts,
+        terminal: c.terminal,
+      },
+    ]);
+    expect(readQueueStatus(d)[0]?.status).toBe(c.expected);
   });
 
   test("a closed window surfaces its REASON — the whole point of this view", () => {

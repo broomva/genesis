@@ -16,7 +16,6 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
-import { readQueueStatus } from "./voice-queue";
 import {
   type DeliverablePrincipal,
   type VoiceTicket,
@@ -26,6 +25,7 @@ import {
   resolveCaller,
   secretMatches,
 } from "./voice";
+import { readQueueStatus } from "./voice-queue";
 import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
