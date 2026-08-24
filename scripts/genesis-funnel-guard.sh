@@ -24,31 +24,61 @@ PORT="${GENESIS_FUNNEL_PORT:-8443}"
 PROBE_PATH="${GENESIS_FUNNEL_PATH:-/webhooks/kapso}"
 # Overridable so the classification can be tested without root.
 STATE_DIR="${GENESIS_FUNNEL_STATE_DIR:-/var/lib/genesis-funnel-guard}"
-COOLDOWN="${GENESIS_FUNNEL_COOLDOWN:-600}"
+# The address the funnel proxies TO. Probing it is what makes the decision below
+# rest on locally-verifiable evidence instead of on a status code's provenance.
+LOCAL_TARGET="${GENESIS_FUNNEL_LOCAL_TARGET:-127.0.0.1:8788}"
+
+# EVERY numeric input is validated. `[ "$x" -ge "abc" ]` does not abort under
+# `set -uo pipefail` -- it fails, the `&& break` never fires, and the retry loop
+# below spins forever inside a systemd oneshot. A guard that hangs is worse than one
+# that is wrong, because nothing after it runs either.
+num_or() { case "$1" in ''|*[!0-9]*) printf '%s' "$2";; *) printf '%s' "$1";; esac; }
+COOLDOWN="$(num_or "${GENESIS_FUNNEL_COOLDOWN:-600}" 600)"
+POST_RESTART_BUDGET="$(num_or "${GENESIS_FUNNEL_POST_RESTART_BUDGET:-150}" 150)"
 
 # A published funnel answers from the listener: 405 to GET (wrong method) or
-# 401 (signature missing). Anything else -- crucially 000, a refused or timed
-# out connection -- means the ingress is not serving this node.
+# 401 (signature missing).
 healthy_code() { [[ "$1" == "405" || "$1" == "401" ]]; }
 
-# 502/503 MEAN THE OPPOSITE OF UNPUBLISHED, and conflating them cost an outage.
+# THE DECISION NO LONGER READS MEANING INTO A STATUS CODE, and that is the third
+# revision of this logic — the first two were wrong in the same WAY.
 #
-# Measured, 2026-08-24 05:02:46Z. genesis-bot was restarting (a deploy), so nothing
-# held 127.0.0.1:8788. The probe returned 502 on both ingresses, this guard read
-# "UNHEALTHY on every public ingress" and restarted tailscaled. The post-restart
-# probes returned 000 and it logged "still UNHEALTHY -- needs a human". It had taken
-# a working ingress with a momentarily dead backend and made it no ingress at all.
+# The original treated everything but 405/401 as "the ingress is not serving", so a
+# backend restart (a 502) got tailscaled restarted. Measured 2026-08-24 05:02:46Z:
+# genesis-bot was down 96s for a deploy, the probe returned 502 on both ingresses,
+# this guard restarted tailscaled, and the post-restart probes returned 000 —
+# turning a working ingress with a dead backend into no ingress at all.
 #
-# A 502 can only come FROM the ingress: tailscaled terminated the TLS, matched a
-# serve rule, dialled the backend and was refused. That is proof the funnel IS
-# published -- the exact condition this guard exists to detect the absence of. An
-# unpublished funnel cannot produce 502; it produces 000, or a TLS failure.
+# The obvious fix was to add 502/503/504 to a "backend down" list. Cross-model review
+# refused it, correctly: a 502 does not PROVE the funnel is published. Any
+# intermediary can emit one — a reverse proxy in front of the host, an overloaded
+# relay, a timeout. Inferring publication from a code means trusting the provenance
+# of a response we cannot attribute. And enumerating codes is why each review round
+# found a new one: 000, then 502, then a backend that starts answering 404 or 200.
 #
-# So restarting tailscaled here is both the wrong remedy and an actively harmful
-# one, and the trigger is ordinary: any backend restart that overlaps a tick (this
-# runs every 300s) reproduces it. The header above already warns that acting on a
-# blip "is how a guard becomes the outage" -- this is that, one layer in.
-backend_down_code() { [[ "$1" == "502" || "$1" == "503" || "$1" == "504" ]]; }
+# So the guard now compares TWO measurements it can attribute:
+#
+#   public probe   the pinned public ingress IP, the only path Kapso can take
+#   local probe    127.0.0.1:<backend>, which no intermediary can be in front of
+#
+#   public healthy                     -> serving. Nothing to do.
+#   public unhealthy + local UNHEALTHY -> the backend is down. The public failure is
+#                                        explained without implicating the funnel, so
+#                                        restarting tailscaled cannot help. REFUSE.
+#   public unhealthy + local HEALTHY   -> the backend is fine and the public path
+#                                        still fails. That is the funnel. RESTART.
+#
+# This holds for ANY public status code, which is the point: a code we have never
+# seen lands in the second or third row on the strength of the local probe, not on an
+# assumption about what the code means.
+local_healthy() {
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://${LOCAL_TARGET}${PROBE_PATH}" 2>/dev/null)"
+  # ANY answer means something is listening and speaking HTTP. The backend may
+  # legitimately reply 405/401/404 — what matters here is that it is not refusing.
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
 
 log() { echo "[funnel-guard] $*"; }
 
@@ -90,12 +120,10 @@ probe() {
 }
 
 ok=0
-backend_down=0
 for ip in "${IPS[@]}"; do
   code="$(probe "$ip")"
   log "ingress $ip -> $code"
   healthy_code "$code" && ok=1
-  backend_down_code "$code" && backend_down=1
 done
 
 if [ "$ok" = 1 ]; then
@@ -103,19 +131,22 @@ if [ "$ok" = 1 ]; then
   exit 0
 fi
 
-# Checked BEFORE the cooldown and the restart: a gateway error is positive evidence
-# the funnel is up, so there is nothing here for a tailscaled restart to fix. Exit 1
-# so the tick is visible in the journal as a real observation, not silence -- the
-# unit sets SuccessExitStatus=0 1 precisely so an advisory failure does not mask the
-# next one.
-if [ "$backend_down" = 1 ]; then
-  log "ingress is SERVING but the backend behind it refused (gateway error) --"
-  log "  this is a backend outage, not a funnel one; NOT restarting tailscaled"
+# The public path is failing. Which half? Ask the one thing no intermediary can sit
+# in front of. Checked BEFORE the cooldown and before any restart.
+if ! local_healthy; then
+  log "public ingress is failing, but the LOCAL backend ${LOCAL_TARGET} is not"
+  log "  answering either -- the failure is explained without implicating the funnel."
+  log "  NOT restarting tailscaled; fix the backend."
   exit 1
 fi
+log "local backend ${LOCAL_TARGET} IS answering, so the public path is the fault"
 
 now="$(date +%s)"
-last="$(cat "$STATE_DIR/last-restart" 2>/dev/null || echo 0)"
+last="$(num_or "$(cat "$STATE_DIR/last-restart" 2>/dev/null || echo 0)" 0)"
+# A FUTURE timestamp would suppress every restart until wall time caught up, so it is
+# treated as no record rather than as a very recent one. Malformed content is already
+# 0 via num_or -- without it, `$(( now - x ))` aborts the script under set -u.
+[ "$last" -gt "$now" ] && last=0
 since=$(( now - last ))
 if [ "$since" -lt "$COOLDOWN" ]; then
   # Restarting on every tick would turn a Tailscale-side outage into a local
@@ -130,10 +161,17 @@ if [ "$state_ok" = 0 ]; then
   exit 1
 fi
 
-# Record the attempt BEFORE acting, and refuse to act if it cannot be recorded: an
-# unrecorded restart is an unbounded one, because the next tick sees no cooldown.
+# Record the attempt BEFORE acting, and VERIFY BY READ-BACK. Checking only the write
+# was half a fix: a write-only file (0o200) lets `printf` succeed while the `cat`
+# above fails to 0, which clears every future cooldown and restarts on every tick —
+# the same unbounded loop, reached through the other half of the same file.
 if ! printf '%s\n' "$now" > "$STATE_DIR/last-restart" 2>/dev/null; then
   log "cannot record the restart time in $STATE_DIR -- NOT restarting tailscaled"
+  exit 1
+fi
+if [ "$(cat "$STATE_DIR/last-restart" 2>/dev/null || true)" != "$now" ]; then
+  log "recorded the restart time but cannot read it back -- the cooldown would be"
+  log "  vacuous on the next tick. NOT restarting tailscaled."
   exit 1
 fi
 
@@ -151,23 +189,32 @@ systemctl restart tailscaled || { log "tailscaled restart FAILED"; exit 1; }
 # A false "needs a human" is not free: it is the signal an operator uses to decide
 # whether to intervene, and one that cries wolf on every recovery trains them to
 # ignore the one that matters.
-POST_RESTART_BUDGET="${GENESIS_FUNNEL_POST_RESTART_BUDGET:-150}"
-waited=0
+# A WALL-CLOCK DEADLINE, not a sum of sleeps. Counting only the sleeps ignored the
+# probe time -- two ingresses at --max-time 15 each -- so a "150s budget" could run
+# past 400s inside a systemd oneshot.
+deadline=$(( $(date +%s) + POST_RESTART_BUDGET ))
 delay=10
 while :; do
   sleep "$delay"
-  waited=$(( waited + delay ))
   for ip in "${IPS[@]}"; do
     code="$(probe "$ip")"
-    log "post-restart ingress $ip -> $code (${waited}s)"
+    log "post-restart ingress $ip -> $code"
     if healthy_code "$code"; then
-      log "funnel RECOVERED after restart (${waited}s)"
+      log "funnel RECOVERED after restart"
       exit 0
     fi
   done
-  [ "$waited" -ge "$POST_RESTART_BUDGET" ] && break
-  # Back off, but never overshoot the budget — a 20s cap keeps the unit short-lived.
+  # THE SAME PREDICATE AS ABOVE. The post-restart loop used to look only for
+  # 405/401, so a backend that went down during the restart window was reported as
+  # "still UNHEALTHY -- needs a human" -- the very conflation this revision removes,
+  # left in place one branch away from where it was fixed.
+  if ! local_healthy; then
+    log "post-restart: public still failing but the LOCAL backend is down too --"
+    log "  not a funnel fault; stopping here rather than escalating"
+    exit 1
+  fi
+  [ "$(date +%s)" -ge "$deadline" ] && break
   [ "$delay" -lt 20 ] && delay=$(( delay + 5 ))
 done
-log "still UNHEALTHY ${waited}s after restart -- needs a human"
+log "still UNHEALTHY after restart (budget ${POST_RESTART_BUDGET}s) -- needs a human"
 exit 1

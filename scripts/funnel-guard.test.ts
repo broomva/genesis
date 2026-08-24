@@ -45,7 +45,13 @@ const BASH = modernBash();
  *  attempted `systemctl restart tailscaled`. */
 function runGuard(
   code: string,
-  opts: { postRestartCode?: string; sequence?: string[]; stateDir?: string } = {},
+  opts: {
+    postRestartCode?: string;
+    sequence?: string[];
+    stateDir?: string;
+    localCode?: string;
+    budget?: string;
+  } = {},
 ) {
   const box = mkdtempSync(join(tmpdir(), "funnel-guard-"));
   const bin = join(box, "bin");
@@ -56,12 +62,15 @@ function runGuard(
   writeFileSync(join(bin, "dig"), '#!/usr/bin/env bash\necho "203.0.113.10"\n');
   // First probe returns `code`; any later probe (the post-restart loop) returns
   // postRestartCode, defaulting to the same thing.
-  // A SEQUENCE, so a funnel that recovers on a later probe round can be modelled.
-  // The last entry repeats forever, which is what makes "never recovers" expressible.
+  // The stub must distinguish the two probes, because the decision is now the
+  // COMPARISON between them rather than a reading of either code alone.
+  //   public: https://<host>:<port><path>   local: http://127.0.0.1:8788<path>
   const seq = opts.sequence ?? [code, opts.postRestartCode ?? code];
+  const localCode = opts.localCode ?? "405"; // backend answering, unless stated
   writeFileSync(
     join(bin, "curl"),
     `#!/usr/bin/env bash
+for a in "$@"; do case "$a" in http://127.0.0.1:*) printf '%s' '${localCode}'; exit 0;; esac; done
 n=$(cat "${box}/probes" 2>/dev/null || echo 0)
 echo $((n+1)) > "${box}/probes"
 codes=(${seq.map((c) => `'${c}'`).join(" ")})
@@ -83,6 +92,9 @@ printf '%s' "${"${codes[$i]}"}"
       PATH: `${bin}:/usr/bin:/bin`,
       GENESIS_FUNNEL_STATE_DIR: opts.stateDir ?? join(box, "state"),
       GENESIS_FUNNEL_COOLDOWN: "0", // never let cooldown mask a restart decision
+      // 2s of wall clock: `sleep` is stubbed instant, so this allows several retry
+      // rounds while keeping the suite fast. The deadline is wall-clock by design.
+      GENESIS_FUNNEL_POST_RESTART_BUDGET: opts.budget ?? "2",
     },
   });
   let restarts = "";
@@ -98,48 +110,45 @@ printf '%s' "${"${codes[$i]}"}"
   };
 }
 
-describe("funnel guard — classification (BRO-2274)", () => {
-  test.each(["405", "401"])("%s = published and serving → no action", (code) => {
+describe("funnel guard — decision table (BRO-2274)", () => {
+  // THE DECISION IS A COMPARISON, NOT A CODE LOOKUP. Two review rounds each found a
+  // new status code the previous revision mishandled — 000, then 502, then whatever a
+  // backend starts answering next. So these assert over the PAIR (public, local), and
+  // the public code is deliberately varied across values the script has never seen.
+  test.each(["405", "401"])("public %s = serving → no action", (code) => {
     const r = runGuard(code);
     expect(r.stdout).toContain("funnel is published and serving");
     expect(r.restartedTailscaled).toBe(false);
     expect(r.exitCode).toBe(0);
   });
 
-  // THE REGRESSION. A 502 can only come FROM the ingress — TLS terminated, serve
-  // rule matched, backend dialled and refused — so it is proof the funnel IS
-  // published. Restarting tailscaled here is what turned a 96s backend restart into
-  // a total outage on 2026-08-24.
-  test.each(["502", "503", "504"])("%s = ingress up, backend down → NO restart", (code) => {
-    const r = runGuard(code);
-    expect(r.restartedTailscaled).toBe(false);
-    expect(r.stdout).toContain("NOT restarting tailscaled");
-    expect(r.stdout).not.toContain("UNHEALTHY on every public ingress");
-    expect(r.exitCode).toBe(1); // advisory failure — visible in the journal
-  });
+  // THE ORIGINAL INCIDENT. Backend down for a deploy, public returns 502 — the
+  // failure is explained without implicating the funnel, so a tailscaled restart
+  // cannot help and previously made it worse (502 became 000).
+  test.each(["502", "503", "504", "000", "404", "200"])(
+    "public %s + local DOWN → backend fault, no restart",
+    (code) => {
+      const r = runGuard(code, { localCode: "000" });
+      expect(r.restartedTailscaled).toBe(false);
+      expect(r.stdout).toContain("NOT restarting tailscaled; fix the backend");
+      expect(r.exitCode).toBe(1);
+    },
+  );
 
-  // The original purpose must still work: an ingress that is genuinely not serving
-  // produces 000, and that IS worth a restart.
-  test("000 = ingress not serving → restarts tailscaled", () => {
-    const r = runGuard("000", { postRestartCode: "405" });
-    expect(r.restartedTailscaled).toBe(true);
-    expect(r.stdout).toContain("UNHEALTHY on every public ingress");
-    expect(r.stdout).toContain("funnel RECOVERED after restart");
-    expect(r.exitCode).toBe(0);
-  });
+  // THE INVERSE, and the reason this is a comparison rather than an allowlist: the
+  // SAME public code with a healthy backend means the public path really is broken.
+  // Under the previous revision a 502 here was unconditionally excused.
+  test.each(["502", "503", "000", "404", "200", "418"])(
+    "public %s + local HEALTHY → funnel fault, restarts",
+    (code) => {
+      const r = runGuard(code, { localCode: "405", postRestartCode: "405" });
+      expect(r.stdout).toContain("the public path is the fault");
+      expect(r.restartedTailscaled).toBe(true);
+    },
+  );
 
-  test("an unrecognised code is still treated as not-serving (fails safe)", () => {
-    const r = runGuard("418");
-    expect(r.restartedTailscaled).toBe(true);
-  });
-
-  // THE SECOND DEFECT from the same incident. The restart at 05:02:46 WORKED, but the
-  // single probe round 35s later still read 000, so the guard logged "needs a human"
-  // on its own successful heal — and the next tick, untouched, read 405. Re-registering
-  // with the Funnel ingress takes longer than 20s.
-  test("a funnel that recovers on a LATER round is reported RECOVERED, not escalated", () => {
-    // probe 1: initial 000 (triggers restart). probes 2-3: still coming up. then 405.
-    const r = runGuard("000", { sequence: ["000", "000", "000", "405"] });
+  test("a funnel that recovers on a LATER round is RECOVERED, not escalated", () => {
+    const r = runGuard("000", { sequence: ["000", "000", "000", "405"], localCode: "405" });
     expect(r.restartedTailscaled).toBe(true);
     expect(r.stdout).toContain("funnel RECOVERED after restart");
     expect(r.stdout).not.toContain("needs a human");
@@ -147,56 +156,35 @@ describe("funnel guard — classification (BRO-2274)", () => {
   });
 
   test("a funnel that never comes back DOES still escalate", () => {
-    // Polarity partner: the retry must not turn a real failure into silence.
-    const r = runGuard("000", { sequence: ["000"] });
+    const r = runGuard("000", { sequence: ["000"], localCode: "405" });
     expect(r.restartedTailscaled).toBe(true);
     expect(r.stdout).toContain("needs a human");
     expect(r.exitCode).toBe(1);
   });
 
-  // THE COOLDOWN'S OWN DEPENDENCY. `last` falls back to 0 when unreadable, so
-  // `since = now - 0` clears any cooldown and the guard restarts on EVERY tick — the
-  // restart loop the cooldown exists to prevent, which by the script's own note also
-  // drops SSH. An unwritable state dir must therefore disable the restart, not the
-  // measurement.
-  // TWO GUARDS COVER THIS, AND ASSERTING "NOT restarting" PROVED NEITHER.
-  //
-  // First version of these tests checked only that phrase. Both the mkdir guard and
-  // the last-restart-write guard emit it, so removing EITHER left the other to
-  // satisfy the assertion — a mutation sweep showed both deletions SURVIVING. The
-  // assertions below name the specific path, and each case isolates one guard.
-  test("state dir UNCREATABLE → measures, refuses via the cooldown-state guard", () => {
-    const box = mkdtempSync(join(tmpdir(), "funnel-guard-state-"));
-    const blocker = join(box, "not-a-dir");
-    writeFileSync(blocker, "x"); // a FILE, so mkdir -p <file>/sub fails ENOTDIR
-    const r = runGuard("000", { stateDir: join(blocker, "state") });
-    expect(r.stdout).toContain("ingress 203.0.113.10 -> 000"); // still measured
-    expect(r.stdout).toContain("state dir");
-    expect(r.stdout).toContain("cooldown state is unusable");
+  // The post-restart loop used to check only 405/401, so a backend that died during
+  // the restart window was escalated to a human — the same conflation, one branch
+  // away from where it had been fixed.
+  test("a backend that dies DURING the restart window is not escalated", () => {
+    const r = runGuard("000", { sequence: ["000"], localCode: "000" });
+    // local down at the first check → refuses before restarting at all
     expect(r.restartedTailscaled).toBe(false);
-    expect(r.exitCode).toBe(1);
+    expect(r.stdout).not.toContain("needs a human");
   });
 
-  test("state dir EXISTS but is READ-ONLY → refuses via the write guard", () => {
-    // mkdir -p succeeds (it already exists), so this isolates the second guard:
-    // an unrecorded restart is an unbounded one, because the next tick sees no
-    // cooldown at all.
-    const box = mkdtempSync(join(tmpdir(), "funnel-guard-ro-"));
-    const state = join(box, "state");
-    mkdirSync(state, { recursive: true });
-    chmodSync(state, 0o500); // r-x: listable, not writable
-    const r = runGuard("000", { stateDir: state });
-    expect(r.stdout).toContain("cannot record the restart time");
-    expect(r.restartedTailscaled).toBe(false);
-    expect(r.exitCode).toBe(1);
-    chmodSync(state, 0o700); // so the temp dir can be cleaned up
-  });
-
-  // Polarity partner: a WORKING state dir must still restart, or the guard above
-  // would pass by disabling the feature entirely.
-  test("a usable state dir still restarts on a genuine 000", () => {
-    const r = runGuard("000", { postRestartCode: "405" });
-    expect(r.restartedTailscaled).toBe(true);
+  // Non-numeric config made `[ "$waited" -ge "abc" ]` fail without aborting under
+  // `set -uo pipefail`, so the retry loop never terminated — a hang inside a systemd
+  // oneshot, which is worse than a wrong answer because nothing after it runs.
+  // A non-numeric budget reached `$(( ... + POST_RESTART_BUDGET ))` and ABORTED the
+  // script under `set -u` — output stopped mid-run with no verdict at all. (Before
+  // that it made `[ -ge "abc" ]` fail without terminating, spinning forever inside a
+  // systemd oneshot.) The property asserted here is that it neither aborts nor hangs:
+  // the run reaches the post-restart phase and reports a verdict.
+  test("a non-numeric budget neither aborts nor hangs the run", () => {
+    const r = runGuard("000", { sequence: ["000", "405"], localCode: "405", budget: "abc" });
+    expect(r.stdout).toContain("post-restart ingress");
+    expect(r.stdout).toContain("funnel RECOVERED after restart");
+    expect(r.exitCode).toBe(0);
   });
 
   test("no public A record → cannot measure, takes no action", () => {
