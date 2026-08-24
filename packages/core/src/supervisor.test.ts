@@ -1578,21 +1578,41 @@ describe("HOME guards are observable, not just present (BRO-2235)", () => {
     expect(spawn.calls()).toBe(0); // deleting the host guard makes this 1
   });
 
+  // A SESSION MUST EXIST for the title path to reach the guard — `generateTitleAsync`
+  // returns early on `!session`. The first version of this test called it on a thread
+  // that had never dispatched, so it exited before the guard and the deletability
+  // sweep reported the guard SURVIVED. The sweep caught the vacuity; the test did not.
   test("TITLE refusal never reaches the print runner", async () => {
-    const provider = new CountingProvider("vps");
-    const spawn = spawnCounter();
     const store = new InMemoryStore();
-    const sup = new Supervisor({
-      // print engine + a home the vps host cannot deliver: the TURN is refused, so
-      // drive the title path directly — it is the spawn that bypassed the guard.
+    const spawn = spawnCounter();
+
+    // Turn 1: no home, local host -> succeeds, creating the session + its row.
+    const first = new Supervisor({
+      defaultWorkspace: { ...ws },
+      store,
+      run: spawn.run,
+      hostProvider: new CountingProvider("local"),
+    });
+    await first.dispatch("t-title-guard", "untrusted tenant text", undefined, {});
+    const spawnsAfterTurn = spawn.calls();
+    expect(spawnsAfterTurn).toBeGreaterThan(0); // the session really exists
+
+    // Now the same thread is titled by a supervisor whose workspace DOES declare a
+    // home, on a host that cannot deliver it — the case the title guard exists for.
+    const titler = new Supervisor({
       defaultWorkspace: { ...ws, home: HOME },
       store,
       run: spawn.run,
-      hostProvider: provider,
+      hostProvider: new CountingProvider("vps"),
     });
     await (
-      sup as unknown as { generateTitleAsync: (t: string, u: string, r: string) => Promise<void> }
+      titler as unknown as {
+        generateTitleAsync: (t: string, u: string, r: string) => Promise<void>;
+      }
     ).generateTitleAsync("t-title-guard", "untrusted tenant text", "a reply");
-    expect(spawn.calls()).toBe(0); // deleting the title guard makes this 1
+
+    // Deleting the title guard makes this spawn, titling tenant text under the
+    // operator's HOME.
+    expect(spawn.calls()).toBe(spawnsAfterTurn);
   });
 });
