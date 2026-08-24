@@ -222,8 +222,13 @@ export function dispatchFailureMessage(kind: DispatchFailure): string {
       return "⏳ I'm at capacity right now — this isn't about anything you sent. Try again in a minute.";
     case "turn-timeout-idle":
       // No "took too long" and no "try a smaller step": an idle reap says nothing
-      // about size. It stalled. Resending is the right move.
-      return "⏳ That one got stuck — no progress for a while, so I stopped it. Send it again; it usually goes through.";
+      // about SIZE. But it says nothing about SAFETY either — stdout going quiet
+      // does not mean nothing happened. A turn can write files or call an external
+      // system and then stall, so the partial-work warning stays (P20: removing it
+      // was an over-correction that invited duplicate mutations), and there is no
+      // "it usually goes through" — that was an invented claim with nothing
+      // behind it.
+      return "⏳ That one stalled — no output for a while, so I stopped it. Some of the work may already be done, so ask me to check before repeating it.";
     case "turn-timeout-total":
       // Does NOT say "nothing was saved" (P20 round 2): that was false. The user
       // turn is persisted, and anything the agent already wrote to files or ran as

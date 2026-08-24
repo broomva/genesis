@@ -111,16 +111,21 @@ export function startWatchdog(opts: WatchdogOptions): Watchdog {
  *  which reaped a 20s turn and told the user it had exceeded a 0-minute limit.
  *  Production defaults hide it (15 and 30 minutes), so only a deliberately short
  *  bound exposes it; a test with realistic values would never have caught it. */
-export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "the configured";
-  if (ms < 60_000) {
-    const s = Math.max(1, Math.round(ms / 1000));
-    return `${s} second${s === 1 ? "" : "s"}`;
-  }
-  const m = Math.floor(ms / 60_000);
-  const rem = Math.round((ms % 60_000) / 1000);
-  if (rem === 0) return `${m} minute${m === 1 ? "" : "s"}`;
-  return `${m} minute${m === 1 ? "" : "s"} ${rem} second${rem === 1 ? "" : "s"}`;
+export function formatDuration(ms: number): string | undefined {
+  // `undefined` means "no sensible duration" — callers must then build a sentence
+  // WITHOUT one, rather than splicing in placeholder prose. The first attempt
+  // returned "the configured", which composed into "past the the configured
+  // limit" (P20).
+  if (!Number.isFinite(ms) || ms < 1000) return undefined;
+  // Round to whole seconds FIRST, then split. Splitting before rounding produced
+  // "1 minute 60 seconds" for 119_500ms — the seconds rounded up to 60 and were
+  // never carried (P20 major). One rounding step, then pure integer division.
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  const mPart = m > 0 ? `${m} minute${m === 1 ? "" : "s"}` : "";
+  const sPart = sec > 0 ? `${sec} second${sec === 1 ? "" : "s"}` : "";
+  return [mPart, sPart].filter(Boolean).join(" ");
 }
 
 /** Thrown when a turn is killed by the watchdog. A distinct type so the
@@ -133,10 +138,20 @@ export class TurnReapedError extends Error {
     readonly limitMs: number,
   ) {
     const limit = formatDuration(limitMs);
+    // Sentences are built so the duration is OPTIONAL — "the 30 minutes limit" was
+    // ungrammatical and the degenerate fallback produced "the the configured
+    // limit" (P20). "its limit of X" composes with any duration, and the no-duration
+    // form is a complete sentence on its own.
+    //
+    // Neither message claims the work was undone. An idle reap means stdout went
+    // quiet; it does NOT mean nothing happened. A turn can write files or call an
+    // external system and then go silent, so telling that user to simply resend
+    // invites a duplicate mutation — the partial-work warning belongs on BOTH
+    // clocks, and only the advice about SIZE differs.
     super(
       reason === "idle"
-        ? `This turn was stopped: the agent produced no output for ${limit}. Send the message again — it was most likely stuck rather than too big.`
-        : `This turn was stopped: it ran past the ${limit} limit for a single turn. Break the task into smaller steps.`,
+        ? `This turn was stopped: the agent produced no output for ${limit ? limit : "too long"}. Some of the work may already have been done, so check before repeating it.`
+        : `This turn was stopped: it ran past ${limit ? `its limit of ${limit}` : "the time limit"} for a single turn. Some of the work may already have been done, so check before repeating it, and try a smaller step.`,
     );
     this.name = "TurnReapedError";
   }

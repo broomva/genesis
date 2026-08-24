@@ -193,6 +193,23 @@ describe("dispatchFailureMessage — tenant-visible, and must leak nothing", () 
 import { TurnRejectedError } from "../../../packages/core/src/concurrency";
 import { TurnReapedError } from "../../../packages/runner/src/watchdog";
 
+/** EVERY DispatchFailure member. The previous list named four of eight, so the
+ *  "all kinds" assertions silently skipped half of them — including the two the
+ *  same PR had just added (P20 minor). The `satisfies` makes the compiler fail if
+ *  a member is added to the union and not listed here, so the gap cannot reopen. */
+const ALL_KINDS = [
+  "backend-unreachable",
+  "backend-error",
+  "unauthorized",
+  "timeout",
+  "capacity-own",
+  "capacity-server",
+  "turn-timeout-idle",
+  "turn-timeout-total",
+  "agent-error",
+  "unknown",
+] as const satisfies readonly DispatchFailure[];
+
 /** Wrap as the stream does: a dispatch error arrives agent-reported. */
 class AgentReportedLike extends Error {
   // The duck-typed flag the classifier actually checks (see `isAgentReported`).
@@ -251,22 +268,34 @@ describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => 
     // It stalled; size was never the issue, and telling the user to shrink the
     // task points them away from the actual cause.
     expect(m).not.toMatch(/took too long|smaller/i);
-    expect(m).toMatch(/stuck|again/i);
-    // Nor should it imply partial work: an idle reap may have produced nothing.
-    expect(m).not.toMatch(/already be done/i);
     expect(m).not.toBe(dispatchFailureMessage("turn-timeout-total"));
   });
 
+  // P20 caught the over-correction: dropping "took too long" is right, dropping
+  // the PARTIAL-WORK warning is not. Stdout going quiet does not mean nothing
+  // happened — a turn can mutate files then stall, so a bare "send it again"
+  // invites a duplicate mutation. BOTH clocks must keep the warning.
+  test("BOTH reap messages warn that work may already be done", () => {
+    for (const kind of ["turn-timeout-idle", "turn-timeout-total"] as const) {
+      expect(dispatchFailureMessage(kind)).toMatch(/may already be done/i);
+    }
+  });
+
+  test("no message promises that a retry will succeed", () => {
+    for (const kind of ["turn-timeout-idle", "turn-timeout-total"] as const) {
+      expect(dispatchFailureMessage(kind)).not.toMatch(/usually|will work|should work/i);
+    }
+  });
+
   test("the messages are actionable and disclose nothing about the box", () => {
-    for (const kind of [
-      "capacity-own",
-      "capacity-server",
-      "turn-timeout-idle",
-      "turn-timeout-total",
-    ] as const) {
+    for (const kind of ALL_KINDS) {
       const m = dispatchFailureMessage(kind);
       expect(m.length).toBeGreaterThan(20);
-      expect(m).toMatch(/again|smaller/i);
+      // "Actionable" is not always "try again". `unauthorized` deliberately says
+      // retrying will NOT help and names an operator — asserting /again/ over the
+      // full set caught that the old four-member list had never exercised it.
+      // Every message must tell the reader what to do next, whichever that is.
+      expect(m).toMatch(/again|smaller|operator|check|wait/i);
       // No paths, hosts, workspace ids or counts — a shared number is read by
       // people who are not the operator.
       expect(m).not.toMatch(/\/home|ws-|localhost|127\.0\.0\.1|genesis-/);
