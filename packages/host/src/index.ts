@@ -136,10 +136,26 @@ export class LocalHost implements ExecutionHost {
         // child closed stdin before we finished writing — proceed; exitCode reports it.
       }
     }
+    // PID-REUSE GUARD (P20 round 2). `kill()` is called from `finally` blocks and
+    // from a watchdog's delayed SIGKILL, so it can fire AFTER the child has been
+    // reaped. Once a pid is freed the OS may reissue it — and with negative-pid
+    // group signalling, a stale handle could deliver SIGKILL to an unrelated
+    // process group that happens to inherit the number. Latch on exit and make
+    // every later kill a no-op.
+    let reaped = false;
+    void proc.exited.then(
+      () => {
+        reaped = true;
+      },
+      () => {
+        reaped = true;
+      },
+    );
     return {
       stdout: toLines(proc.stdout),
       exitCode: proc.exited,
       kill: (signal?: NodeJS.Signals) => {
+        if (reaped) return;
         const sig = signal ?? "SIGTERM";
         // Group first, then the bare pid as a fallback. If the group kill throws
         // (ESRCH — the leader already reaped, or `detached` silently stopped

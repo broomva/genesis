@@ -33,7 +33,8 @@ export type DispatchFailure =
   | "backend-error"
   | "unauthorized"
   | "timeout"
-  | "capacity"
+  | "capacity-own"
+  | "capacity-server"
   | "turn-timeout"
   | "agent-error"
   | "unknown";
@@ -56,7 +57,12 @@ export type DispatchFailure =
  *  @genesis/core and @genesis/runner. `dispatch-failure.test.ts` pins the real
  *  error objects against this list, so editing a message there fails the test
  *  here rather than silently degrading to "agent-error" in production. */
-const CAPACITY_PREFIXES = ["You already have", "The server is at capacity"];
+// SPLIT BY SCOPE (P20 round 2). One "capacity" class told every refused sender to
+// "wait for your previous reply" — but a GLOBAL refusal comes from another
+// workspace holding the last slot, so a first-ever message was told to wait for a
+// reply that does not exist and never will.
+const CAPACITY_OWN_PREFIXES = ["You already have"];
+const CAPACITY_SERVER_PREFIXES = ["The server is at capacity"];
 const TURN_TIMEOUT_PREFIXES = ["This turn was stopped:"];
 
 /** Codes that mean "nothing answered".
@@ -143,7 +149,8 @@ function classify(e: unknown): DispatchFailure {
   if (isAgentReported(e)) {
     const text = e instanceof Error ? e.message : String(e ?? "");
     const t = text.trimStart();
-    if (CAPACITY_PREFIXES.some((p) => t.startsWith(p))) return "capacity";
+    if (CAPACITY_OWN_PREFIXES.some((p) => t.startsWith(p))) return "capacity-own";
+    if (CAPACITY_SERVER_PREFIXES.some((p) => t.startsWith(p))) return "capacity-server";
     if (TURN_TIMEOUT_PREFIXES.some((p) => t.startsWith(p))) return "turn-timeout";
     return "agent-error";
   }
@@ -192,12 +199,19 @@ export function dispatchFailureMessage(kind: DispatchFailure): string {
       return "⚠️ This channel is not authorised to reach the agent backend. That needs an operator to fix; retrying will not help.";
     case "backend-error":
       return "⚠️ The agent backend returned an error. This is an outage on my side — please try again shortly.";
-    case "capacity":
-      // No detail beyond "busy": the count and the owning workspace are another
-      // tenant's business on a shared number.
+    case "capacity-own":
       return "⏳ I'm still working on your previous message. Wait for that reply, then send this again.";
+    case "capacity-server":
+      // NOT "your previous message" — this refusal is caused by someone else's
+      // work, and may be the sender's FIRST message. No detail beyond "busy":
+      // who holds the slot is another tenant's business on a shared number.
+      return "⏳ I'm at capacity right now — this isn't about anything you sent. Try again in a minute.";
     case "turn-timeout":
-      return "⏳ That took too long and I stopped it. Nothing was saved. Try again with a smaller step — for example, one file or one command at a time.";
+      // Does NOT say "nothing was saved" (P20 round 2): that was false. The user
+      // turn is persisted, and anything the agent already wrote to files or ran as
+      // a command survives the kill. Promising a clean slate would make a resend
+      // duplicate real mutations.
+      return "⏳ That took too long, so I stopped it part-way — some of the work may already be done. Tell me to check before repeating it, and try a smaller step next time.";
     case "agent-error":
       return "⚠️ The agent failed while handling that. Please try again, and rephrase if it keeps happening.";
     default:

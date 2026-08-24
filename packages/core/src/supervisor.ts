@@ -752,35 +752,32 @@ export class Supervisor {
     //     the workspace allows it (registry carries the real `noWorktree`; a DB-row
     //     fallback drops it, so an unverifiable workspace stays root — P20 F5);
     //   - INHERIT (undefined) → the registered default, else root (unverifiable).
-    if (session.noWorktree === undefined && session.agentSessionId === undefined) {
-      const canWorktree = !!registered && !defaultNoWorktree;
-      session.noWorktree =
-        turnOpts?.worktree === false
-          ? true
-          : turnOpts?.worktree === true
-            ? !canWorktree
-            : registered
-              ? defaultNoWorktree
-              : true;
-    }
-    // The frozen choice wins, EXCEPT a stored "worktree" (false) is still downgraded to
-    // root if the default now FORBIDS one (the workspace became nested since the freeze)
-    // — safety beats resume continuity: a broken worktree checkout is worse than a
-    // broken resume. (`?? defaultNoWorktree` covers legacy pre-BRO-1656 ran rows that
-    // never froze a posture.)
-    const noWorktree =
-      session.noWorktree === false && defaultNoWorktree
-        ? true
-        : (session.noWorktree ?? defaultNoWorktree);
-    // ADMIT FIRST (BRO-2260, Codex P20 major). Admission used to sit just before
-    // the spawn — after the user turn was recorded, the heuristic title derived,
-    // the phase persisted and a host leased. A refused message therefore left a
-    // permanent unprocessed history entry, supplied the thread's title forever,
-    // moved the session to a failed phase, and could provision a host purely to
-    // reject it. Refusing has to be free of side effects, or "just resend" is a
-    // lie: the resend lands in a thread the refusal already corrupted.
+    // ADMIT BEFORE ANY MUTATION (P20 round 2 major). The freeze below writes
+    // `session.noWorktree`, so admitting after it meant a REFUSED request could
+    // permanently fix an idle session's worktree posture and change how the
+    // eventual resend runs. A refusal must leave nothing behind.
     const slot = this.gate.acquire(workspace.id);
     try {
+      if (session.noWorktree === undefined && session.agentSessionId === undefined) {
+        const canWorktree = !!registered && !defaultNoWorktree;
+        session.noWorktree =
+          turnOpts?.worktree === false
+            ? true
+            : turnOpts?.worktree === true
+              ? !canWorktree
+              : registered
+                ? defaultNoWorktree
+                : true;
+      }
+      // The frozen choice wins, EXCEPT a stored "worktree" (false) is still downgraded to
+      // root if the default now FORBIDS one (the workspace became nested since the freeze)
+      // — safety beats resume continuity: a broken worktree checkout is worse than a
+      // broken resume. (`?? defaultNoWorktree` covers legacy pre-BRO-1656 ran rows that
+      // never froze a posture.)
+      const noWorktree =
+        session.noWorktree === false && defaultNoWorktree
+          ? true
+          : (session.noWorktree ?? defaultNoWorktree);
       await this.store.addTurn({ sessionId: session.id, role: "user", text });
 
       // Derive a thread title from the first user turn (BRO-1592) — persisted with

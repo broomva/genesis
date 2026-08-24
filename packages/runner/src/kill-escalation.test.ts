@@ -94,6 +94,17 @@ describe("kill escalation (BRO-2260)", () => {
     // assertion passed locally and failed in CI with "Expected 0, Received 1".
     // `[b]ro...` matches the survivor's cmdline but not pgrep's own literal one.
     const pattern = `[${marker[0]}]${marker.slice(1)}`;
+    // PROVE THE APPARATUS IS LIVE before trusting a zero (P20 round 2). Piping
+    // pgrep into `wc -l` discards its status, so a missing or unprivileged pgrep
+    // yields "0" — indistinguishable from "no survivors". A denial is only
+    // evidence when the detector could have said otherwise.
+    const probe = Bun.spawnSync(["bash", "-c", "command -v pgrep >/dev/null"]);
+    expect(probe.exitCode).toBe(0);
+    const positiveControl = Bun.spawnSync(["bash", "-c", `pgrep -f '[b]ash' >/dev/null; echo $?`])
+      .stdout.toString()
+      .trim();
+    expect(positiveControl).toBe("0"); // pgrep CAN see processes here
+
     const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f '${pattern}' | wc -l | tr -d ' '`])
       .stdout.toString()
       .trim();

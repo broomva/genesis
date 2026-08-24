@@ -377,11 +377,12 @@ const { app, websocket } = build({
   // what running turns may CONSUME, these cap how many may START and how long any
   // one may last. Neither substitutes for the other.
   //
-  // WHY global=2. The unit's MemoryMax is 4G and a `claude -p` turn measured
-  // 1.2-1.9 GB RSS on this box, so two concurrent turns fit under the ceiling and
-  // three do not. A global cap above the memory arithmetic would just move the
-  // failure from a refusal we can explain to a cgroup OOM kill mid-answer that we
-  // cannot. If MemoryMax changes, this number changes with it.
+  // WHY global=2. The unit's MemoryMax is 6G (raised from 4G by P20 — the cgroup
+  // also charges the api's own ~0.5 GB, so two upper-bound turns at 1.9 GB RSS are
+  // 4.3 GB and did NOT fit the old 4 GB ceiling). Two fit under 6G with headroom;
+  // a third would not. A cap above the memory arithmetic only moves the failure
+  // from a refusal we can explain to a cgroup OOM kill mid-answer that we cannot.
+  // MemoryMax and this number are one decision — change them together.
   //
   // WHY perWorkspace=1. Same-thread turns are already serialized by the
   // per-thread chain, so this only bites a principal driving several threads at

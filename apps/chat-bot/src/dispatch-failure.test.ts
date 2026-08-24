@@ -204,14 +204,35 @@ class AgentReportedLike extends Error {
 }
 
 describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => {
-  test("a per-workspace refusal classifies as capacity", () => {
+  test("a per-workspace refusal classifies as capacity-own", () => {
     const real = new TurnRejectedError("workspace", 1);
-    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity");
+    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity-own");
   });
 
-  test("a global refusal classifies as capacity", () => {
+  // SPLIT deliberately (P20 round 2): a global refusal is caused by someone else's
+  // work and may be the sender's FIRST message, so telling them to "wait for your
+  // previous reply" points at a reply that will never exist.
+  test("a global refusal classifies as capacity-server, not capacity-own", () => {
     const real = new TurnRejectedError("global", 2);
-    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity");
+    expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("capacity-server");
+  });
+
+  test("the two capacity messages say different things", () => {
+    const own = dispatchFailureMessage("capacity-own");
+    const server = dispatchFailureMessage("capacity-server");
+    expect(own).not.toBe(server);
+    expect(own).toMatch(/previous message/i);
+    // Must NOT blame the sender's own traffic for someone else's slot.
+    expect(server).not.toMatch(/previous message/i);
+  });
+
+  // The reap message used to promise "Nothing was saved". That was false — the
+  // user turn is persisted and the agent's file/command side effects survive the
+  // kill — and acting on it would make a resend duplicate real mutations.
+  test("the timeout message does not promise a clean slate", () => {
+    const m = dispatchFailureMessage("turn-timeout");
+    expect(m).not.toMatch(/nothing was saved/i);
+    expect(m).toMatch(/part-way|already be done/i);
   });
 
   test("both reap reasons classify as turn-timeout", () => {
@@ -222,7 +243,7 @@ describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => 
   });
 
   test("the messages are actionable and disclose nothing about the box", () => {
-    for (const kind of ["capacity", "turn-timeout"] as const) {
+    for (const kind of ["capacity-own", "capacity-server", "turn-timeout"] as const) {
       const m = dispatchFailureMessage(kind);
       expect(m.length).toBeGreaterThan(20);
       expect(m).toMatch(/again|smaller/i);
