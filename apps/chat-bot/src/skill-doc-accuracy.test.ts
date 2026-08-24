@@ -138,3 +138,19 @@ describe("the no-attachments claim is coupled to the actual interface", () => {
     expect(doc).toMatch(/cannot send files/i);
   });
 });
+
+describe("the degenerate table cases the doc now documents", () => {
+  test("an empty FIRST cell leaves a bare bullet", () => {
+    // The prose said "an empty cell is omitted entirely", which is true of
+    // every cell EXCEPT the lead: there the row loses its name and the bullet
+    // stands alone. An unconditional claim that is false in one case is the
+    // same drift this whole file exists to prevent.
+    expect(markdownToWhatsApp("| a | b |\n|---|---|\n|  | 2 |")).toBe("•\n  b: 2");
+    expect(doc).toMatch(/empty FIRST\s+cell/i);
+  });
+
+  test("an empty header labels its value by position", () => {
+    expect(markdownToWhatsApp("| a |  |\n|---|---|\n| 1 | 2 |")).toBe("• *1*\n  2: 2");
+    expect(doc).toMatch(/empty header/i);
+  });
+});

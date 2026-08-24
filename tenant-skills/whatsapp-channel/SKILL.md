@@ -57,7 +57,9 @@ A table becomes one block per row, not columns:
 - the **first column** becomes a bold lead and its header is **not** shown — the
   lead is the row's identity
 - every other cell is labelled with its column header
-- an **empty cell is omitted entirely**, label and all
+- an **empty cell is omitted entirely**, label and all — except an empty FIRST
+  cell, which leaves a bare `•` because the row has no name to lead with
+- a column with an **empty header** labels its value by position (`2:`) instead
 - a row with more cells than headers labels the extras by position
 - a header-only table (no body rows) becomes a plain bullet list of the headers
 
