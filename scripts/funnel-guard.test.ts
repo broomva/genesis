@@ -24,8 +24,16 @@ const GUARD = join(import.meta.dir, "genesis-funnel-guard.sh");
  *  one. CI runs Linux, where /bin/bash is 5.x. */
 function modernBash(): string {
   for (const c of ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"]) {
-    const v = Bun.spawnSync([c, "-c", "echo ${BASH_VERSINFO[0]}"]);
-    if (v.exitCode === 0 && Number(v.stdout.toString().trim()) >= 4) return c;
+    try {
+      // Bun.spawnSync THROWS on a missing executable rather than returning a
+      // non-zero exit, so an absent candidate must be caught, not tested. CI is
+      // Linux and has no /opt/homebrew/bash — the uncaught throw took the whole
+      // suite down there while passing locally on macOS.
+      const v = Bun.spawnSync([c, "-c", "echo ${BASH_VERSINFO[0]}"]);
+      if (v.exitCode === 0 && Number(v.stdout.toString().trim()) >= 4) return c;
+    } catch {
+      // candidate not installed — try the next
+    }
   }
   throw new Error(
     "no bash >= 4 found; the guard uses `mapfile`. Install bash 5 (brew install bash) to run this suite.",
@@ -35,7 +43,7 @@ const BASH = modernBash();
 
 /** Run the guard with curl forced to return `code`. Returns stdout + whether it
  *  attempted `systemctl restart tailscaled`. */
-function runGuard(code: string, opts: { postRestartCode?: string } = {}) {
+function runGuard(code: string, opts: { postRestartCode?: string; sequence?: string[] } = {}) {
   const box = mkdtempSync(join(tmpdir(), "funnel-guard-"));
   const bin = join(box, "bin");
   mkdirSync(bin, { recursive: true });
@@ -45,12 +53,18 @@ function runGuard(code: string, opts: { postRestartCode?: string } = {}) {
   writeFileSync(join(bin, "dig"), '#!/usr/bin/env bash\necho "203.0.113.10"\n');
   // First probe returns `code`; any later probe (the post-restart loop) returns
   // postRestartCode, defaulting to the same thing.
+  // A SEQUENCE, so a funnel that recovers on a later probe round can be modelled.
+  // The last entry repeats forever, which is what makes "never recovers" expressible.
+  const seq = opts.sequence ?? [code, opts.postRestartCode ?? code];
   writeFileSync(
     join(bin, "curl"),
     `#!/usr/bin/env bash
 n=$(cat "${box}/probes" 2>/dev/null || echo 0)
 echo $((n+1)) > "${box}/probes"
-if [ "$n" -eq 0 ]; then printf '%s' '${code}'; else printf '%s' '${opts.postRestartCode ?? code}'; fi
+codes=(${seq.map((c) => `'${c}'`).join(" ")})
+i=$n
+[ "$i" -ge ${seq.length} ] && i=$(( ${seq.length} - 1 ))
+printf '%s' "${"${codes[$i]}"}"
 `,
   );
   writeFileSync(
@@ -114,6 +128,27 @@ describe("funnel guard — classification (BRO-2274)", () => {
   test("an unrecognised code is still treated as not-serving (fails safe)", () => {
     const r = runGuard("418");
     expect(r.restartedTailscaled).toBe(true);
+  });
+
+  // THE SECOND DEFECT from the same incident. The restart at 05:02:46 WORKED, but the
+  // single probe round 35s later still read 000, so the guard logged "needs a human"
+  // on its own successful heal — and the next tick, untouched, read 405. Re-registering
+  // with the Funnel ingress takes longer than 20s.
+  test("a funnel that recovers on a LATER round is reported RECOVERED, not escalated", () => {
+    // probe 1: initial 000 (triggers restart). probes 2-3: still coming up. then 405.
+    const r = runGuard("000", { sequence: ["000", "000", "000", "405"] });
+    expect(r.restartedTailscaled).toBe(true);
+    expect(r.stdout).toContain("funnel RECOVERED after restart");
+    expect(r.stdout).not.toContain("needs a human");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a funnel that never comes back DOES still escalate", () => {
+    // Polarity partner: the retry must not turn a real failure into silence.
+    const r = runGuard("000", { sequence: ["000"] });
+    expect(r.restartedTailscaled).toBe(true);
+    expect(r.stdout).toContain("needs a human");
+    expect(r.exitCode).toBe(1);
   });
 
   test("no public A record → cannot measure, takes no action", () => {

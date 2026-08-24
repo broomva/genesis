@@ -112,14 +112,34 @@ log "UNHEALTHY on every public ingress -- restarting tailscaled"
 echo "$now" > "$STATE_DIR/last-restart"
 systemctl restart tailscaled || { log "tailscaled restart FAILED"; exit 1; }
 
-sleep 20
-for ip in "${IPS[@]}"; do
-  code="$(probe "$ip")"
-  log "post-restart ingress $ip -> $code"
-  if healthy_code "$code"; then
-    log "funnel RECOVERED after restart"
-    exit 0
-  fi
+# RETRY, DON'T ASK FOR A HUMAN AFTER 20 SECONDS.
+#
+# Measured on the same incident: the restart at 05:02:46 WORKED, but the single probe
+# round 35s later still read 000 and this logged "still UNHEALTHY -- needs a human".
+# The very next tick, at 05:07:49, read 405 on both ingresses with nothing done in
+# between. Re-registering with the Funnel ingress simply takes longer than 20s, so
+# the guard was raising a page on its own successful heal.
+#
+# A false "needs a human" is not free: it is the signal an operator uses to decide
+# whether to intervene, and one that cries wolf on every recovery trains them to
+# ignore the one that matters.
+POST_RESTART_BUDGET="${GENESIS_FUNNEL_POST_RESTART_BUDGET:-150}"
+waited=0
+delay=10
+while :; do
+  sleep "$delay"
+  waited=$(( waited + delay ))
+  for ip in "${IPS[@]}"; do
+    code="$(probe "$ip")"
+    log "post-restart ingress $ip -> $code (${waited}s)"
+    if healthy_code "$code"; then
+      log "funnel RECOVERED after restart (${waited}s)"
+      exit 0
+    fi
+  done
+  [ "$waited" -ge "$POST_RESTART_BUDGET" ] && break
+  # Back off, but never overshoot the budget — a 20s cap keeps the unit short-lived.
+  [ "$delay" -lt 20 ] && delay=$(( delay + 5 ))
 done
-log "still UNHEALTHY after restart -- needs a human"
+log "still UNHEALTHY ${waited}s after restart -- needs a human"
 exit 1
