@@ -5,7 +5,9 @@ import { join } from "node:path";
 import {
   agentStateUnder,
   assertCredentialed,
+  assertHomeOutsideTenant,
   assertNoStrandedAgentState,
+  isInside,
   projectSlug,
 } from "./tenant-home";
 
@@ -108,4 +110,42 @@ describe("assertNoStrandedAgentState — over-refusing is the intended failure m
       "-home-agent-orchestrator-workspaces-573017758620-backup",
     ]);
   });
+});
+
+describe("isInside — separator-aware, not a prefix test", () => {
+  test("a path inside is inside", () =>
+    expect(isInside("/home/agent/ws/573", "/home/agent/ws/573/home")).toBe(true));
+  test("the same path counts as inside", () =>
+    expect(isInside("/home/agent/ws/573", "/home/agent/ws/573")).toBe(true));
+  // A bare startsWith says `/a/b` contains `/a/bc`. It does not, and getting this
+  // wrong in the permissive direction is what the guard exists to prevent.
+  test("a SIBLING sharing a prefix is NOT inside", () =>
+    expect(isInside("/home/agent/ws/573", "/home/agent/ws/5731/home")).toBe(false));
+  test("a genuinely separate tree is not inside", () =>
+    expect(isInside("/home/agent/ws/573", "/home/agent/.config/homes/573")).toBe(false));
+  test("relative segments are resolved before comparing", () =>
+    expect(isInside("/home/agent/ws/573", "/home/agent/ws/573/../573/home")).toBe(true));
+});
+
+describe("assertHomeOutsideTenant — the self-inflicted hole", () => {
+  const DIR = "/home/agent/orchestrator-workspaces/573017758620";
+
+  // This is exactly what the first version of the feature did.
+  test("a home under the tenant workspace REFUSES", () =>
+    expect(() => assertHomeOutsideTenant(join(DIR, "home"), DIR)).toThrow(
+      /inside the tenant's own workspace/,
+    ));
+
+  test("the tenant dir itself as HOME refuses", () =>
+    expect(() => assertHomeOutsideTenant(DIR, DIR)).toThrow(/inside the tenant's own workspace/));
+
+  test("a home outside the workspace passes", () =>
+    expect(() =>
+      assertHomeOutsideTenant("/home/agent/.config/genesis-bot/tenant-homes/573017758620", DIR),
+    ).not.toThrow());
+
+  test("a prefix-sharing sibling is not mistaken for containment", () =>
+    expect(() =>
+      assertHomeOutsideTenant("/home/agent/orchestrator-workspaces/5730177586200/home", DIR),
+    ).not.toThrow());
 });

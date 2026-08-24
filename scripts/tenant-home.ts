@@ -12,7 +12,7 @@
 // it prevents. THESE are fail-CLOSED, because refusing at provisioning time costs an
 // operator one message and cannot take a live tenant down.
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 /** FAIL-CLOSED, unlike the runtime. Refuse to hand a tenant a HOME that carries no
  *  credential — that tenant would answer every message with silence and nothing
@@ -97,6 +97,44 @@ export function assertNoStrandedAgentState(oldHome: string, tenantHome: string, 
         (e) =>
           `  mv ${join(oldHome, ".claude", "projects", e)} ${join(tenantHome, ".claude", "projects", e)}`,
       ),
+    ].join("\n"),
+  );
+}
+
+/** Is `child` the same path as, or inside, `parent`? Separator-aware, so
+ *  `/a/bc` is NOT treated as inside `/a/b` — a bare `startsWith` says it is. */
+export function isInside(parent: string, child: string): boolean {
+  const p = resolve(parent);
+  const c = resolve(child);
+  return c === p || c.startsWith(p.endsWith(sep) ? p : p + sep);
+}
+
+/** FAIL-CLOSED. The tenant's HOME must not live inside the tenant's own workspace.
+ *
+ *  THE HOLE THIS CLOSES was self-inflicted: the first version of this feature put
+ *  the home at `<tenantDir>/home`. The tenant workspace is `root:agent 1775` — the
+ *  tenant has GROUP WRITE on it — and the confinement deny rules are anchored
+ *  specifically at `Edit|Write(//<tenantDir>/.claude/**)`. `<tenantDir>/home/.claude`
+ *  does not match that pattern.
+ *
+ *  So a tenant could have pre-created `home/.claude/settings.json` and simply waited:
+ *  the moment an operator set GENESIS_TENANT_PER_HOME=1, that file would become its
+ *  session's USER-scope settings — the layer `tenant-deny-rules.ts` itself describes
+ *  as merging "into EVERY Claude Code session". The tenant would be supplying the
+ *  configuration meant to confine it, and the same directory would hold the
+ *  credential we put there.
+ *
+ *  Checked rather than merely relocated, because the location is one `join()` away
+ *  from being wrong again and nothing else would notice. */
+export function assertHomeOutsideTenant(tenantHome: string, tenantDir: string): void {
+  if (!isInside(tenantDir, tenantHome)) return;
+  throw new Error(
+    [
+      `Refusing a tenant HOME inside the tenant's own workspace: ${tenantHome} is under ${tenantDir}.`,
+      "The workspace is group-writable by the tenant (root:agent 1775) and the confinement",
+      "deny rules only anchor `<tenantDir>/.claude/**`, so the tenant could supply its own",
+      "user-scope settings — and read the credential placed beside them.",
+      "Put the home outside the workspace (see GENESIS_TENANT_HOMES_DIR).",
     ].join("\n"),
   );
 }

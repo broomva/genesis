@@ -43,7 +43,11 @@ import {
 import { STACK_AGENTS, seedAgentStack } from "../packages/core/src/agent-stack";
 import { seedSkills } from "../packages/core/src/skill-seed";
 import { denyRulesFor } from "./tenant-deny-rules";
-import { assertCredentialed, assertNoStrandedAgentState } from "./tenant-home";
+import {
+  assertCredentialed,
+  assertHomeOutsideTenant,
+  assertNoStrandedAgentState,
+} from "./tenant-home";
 
 const dryRun = process.argv.includes("--dry-run");
 
@@ -53,6 +57,11 @@ const RUNTIME_ROOT =
 const PREFIX = process.env.GENESIS_WHATSAPP_WORKSPACE_PREFIX?.trim() || "ws-wa-";
 const WORKSPACES_DIR =
   process.env.GENESIS_WORKSPACES_DIR ?? join(HOME, ".config/genesis-bot/workspaces");
+// OUTSIDE the tenant workspace, deliberately — the workspace is group-writable by
+// the tenant, so a home under it would let the tenant author its own user-scope
+// settings and sit beside its own credential. `assertHomeOutsideTenant` enforces it.
+const TENANT_HOMES_DIR =
+  process.env.GENESIS_TENANT_HOMES_DIR ?? join(HOME, ".config/genesis-bot/tenant-homes");
 const RAW_ALLOWLIST = process.env.GENESIS_WHATSAPP_ALLOWED_USERS;
 
 // BRO-2235 — per-tenant HOME. OPT-IN, and deliberately not on by default: pointing
@@ -71,8 +80,8 @@ const PER_HOME = process.env.GENESIS_TENANT_PER_HOME === "1";
 
 /** The tenant's own HOME, or undefined when the feature is off.
  *  Kept beside the manifest so "what the tenant runs as" is one expression. */
-function homeFor(dir: string): string | undefined {
-  return PER_HOME ? join(dir, "home") : undefined;
+function homeFor(id: string): string | undefined {
+  return PER_HOME ? join(TENANT_HOMES_DIR, id) : undefined;
 }
 
 // The gid the agent runs as — it gets GROUP write on its tenant dir, never ownership.
@@ -304,7 +313,7 @@ function manifestFor(t: (typeof tenants)[number]): string {
       noWorktree: true,
       // BRO-2235: omitted entirely when the feature is off, so the manifest a
       // tenant runs under today is byte-identical to before.
-      ...(homeFor(t.dir) ? { home: homeFor(t.dir) } : {}),
+      ...(homeFor(t.principal.id) ? { home: homeFor(t.principal.id) } : {}),
       // Untrusted principal: the supervisor hardens the spawn (drops inherited
       // MCP). MCP runs outside the filesystem sandbox, so the settings above
       // cannot reach it — without this the tenant holds the operator's Railway,
@@ -334,9 +343,16 @@ for (const t of tenants) {
   // credential — before the manifest that would point a live tenant at it is
   // written. Ordering is the whole point: writing the manifest first and checking
   // after would leave a tenant configured to use a home that cannot answer.
-  const tenantHome = homeFor(t.dir);
+  const tenantHome = homeFor(t.principal.id);
   if (tenantHome) {
+    // Location FIRST: the other two guards are meaningless if the tenant can
+    // rewrite what they validate.
+    assertHomeOutsideTenant(tenantHome, t.dir);
     mkdirSync(join(tenantHome, ".claude", "projects"), { recursive: true });
+    // root:agent 0750 — the agent must READ its credential, and must never be able
+    // to replace the settings that confine it.
+    chownSync(tenantHome, 0, AGENT_GID);
+    execFileSync("/bin/chmod", ["750", tenantHome]);
     assertCredentialed(tenantHome);
     assertNoStrandedAgentState(HOME, tenantHome, t.dir);
   }
