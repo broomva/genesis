@@ -467,6 +467,11 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
   } finally {
     watchdog.dispose();
     if (escalation !== undefined) clearTimeout(escalation);
+    // On the REAP path, execute the escalation now rather than cancelling it
+    // (P20 round 4). A descendant that closed stdout ends the stream early, the
+    // `finally` ran before the timer, and the escalation was dropped — so the
+    // process the watchdog set out to kill simply carried on.
+    if (watchdog.reason) handle.kill("SIGKILL");
     handle.kill();
   }
 

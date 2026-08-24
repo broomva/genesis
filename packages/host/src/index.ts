@@ -29,6 +29,11 @@ export interface ExecResult {
   stderr: string;
 }
 
+/** How long after a handle settles its kills are still delivered (BRO-2260).
+ *  Long enough to cover the runner's own `finally` and SIGKILL escalation; far
+ *  shorter than any realistic pid-recycling interval. */
+const SETTLE_GRACE_MS = 30_000;
+
 export interface SpawnHandle {
   /** Line-oriented stdout stream (NDJSON-ready). */
   stdout: AsyncIterable<string>;
@@ -153,12 +158,18 @@ export class LocalHost implements ExecutionHost {
     // signal could only ever hit a stranger.
     let exited = false;
     let streamClosed = false;
+    let settledAt: number | undefined;
+    const markSettled = () => {
+      if (exited && streamClosed && settledAt === undefined) settledAt = Date.now();
+    };
     void proc.exited.then(
       () => {
         exited = true;
+        markSettled();
       },
       () => {
         exited = true;
+        markSettled();
       },
     );
     const lines = toLines(proc.stdout);
@@ -167,13 +178,30 @@ export class LocalHost implements ExecutionHost {
         yield* lines;
       } finally {
         streamClosed = true;
+        markSettled();
       }
     })();
     return {
       stdout: trackedStdout,
       exitCode: proc.exited,
       kill: (signal?: NodeJS.Signals) => {
-        if (exited && streamClosed) return;
+        // SUPPRESS ONLY LONG AFTER SETTLEMENT (P20 round 4).
+        //
+        // Round 3 replaced an exit-only latch with `exited && streamClosed`. Round
+        // 4 found the hole that leaves: a descendant which does `exec >/dev/null`
+        // CLOSES stdout, so the stream ends, the handle reads as settled, and the
+        // caller's final kill is suppressed while that process keeps running.
+        // Reproduced independently — the descendant survived. That is the incident's
+        // own shape (a build or clone that redirects its output), so suppressing
+        // there defeats the purpose of the bound.
+        //
+        // The hazard the latch exists for is a signal sent LONG after the handle is
+        // finished, once the OS may have reissued the pid. A kill issued moments
+        // after settlement — the runner's `finally`, or its escalation timer — is
+        // not that. So the guard is a time window, not a state flag: within
+        // SETTLE_GRACE_MS every kill still goes through, and only a genuinely stale
+        // one is dropped. A pid cannot realistically be recycled inside that window.
+        if (settledAt !== undefined && Date.now() - settledAt > SETTLE_GRACE_MS) return;
         const sig = signal ?? "SIGTERM";
         // Group first, then the bare pid as a fallback. If the group kill throws
         // (ESRCH — the leader already reaped, or `detached` silently stopped

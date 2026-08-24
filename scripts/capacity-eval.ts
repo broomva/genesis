@@ -53,7 +53,14 @@ const record = (name: string, ok: boolean, detail: string) => {
 async function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value?: T; error?: string }> {
   const t0 = Date.now();
   try {
-    return { ms: Date.now() - t0, value: await fn() };
+    // AWAIT FIRST (P20 round 4 blocker). Object-literal properties evaluate in
+    // order, so `{ ms: Date.now() - t0, value: await fn() }` computed the elapsed
+    // time BEFORE the request ran: every probe recorded ~0ms and the ingress
+    // latency assertion — this file's central claim — could never fail. A
+    // measurement apparatus that cannot report a bad number is worse than none,
+    // because it certifies the thing it was built to catch.
+    const value = await fn();
+    return { ms: Date.now() - t0, value };
   } catch (e) {
     return { ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
   }
@@ -81,6 +88,11 @@ async function turn(prompt: string): Promise<{ refused: boolean; status: number;
     signal: AbortSignal.timeout(180_000),
   });
   const body = await res.text();
+  // A NON-OK RESPONSE IS NOT A TURN (P20 round 4 major). Counting a 500 as an
+  // admitted run let a broken backend satisfy both the control ("one turn runs")
+  // and the "did not refuse everything" assertion — the eval would certify a
+  // server that was simply erroring.
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
   // A refusal surfaces as the gate's message inside the stream.
   const refused = /already have|at capacity/i.test(body);
   return { refused, status: res.status, body: body.slice(0, 400) };

@@ -25,6 +25,36 @@ async function streamEndsWithin(
   return Promise.race([drain, deadline]);
 }
 
+/** Prove the detector can actually observe a running process before any "0
+ *  survivors" is believed (P20 round 4). Checking that `pgrep` EXISTS is not that:
+ *  in one environment `pgrep -f '[b]ash'` returned status 3 (no match) while the
+ *  piped survivor count still read 0, so the control passed having established
+ *  nothing. Start a sentinel we know is alive and require pgrep to find it. */
+function assertPgrepCanSeeProcesses(): void {
+  const sentinelMark = `bro2260-sentinel-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  // A LOOP, not `sleep 5 # mark`: bash execs into a lone final command, replacing
+  // its own argv, so the marker vanished and pgrep genuinely could not see it —
+  // which this control correctly reported rather than passing anyway.
+  const sentinel = Bun.spawn(["bash", "-c", `while true; do sleep 0.2; done # ${sentinelMark}`], {
+    stdout: "ignore",
+  });
+  try {
+    // Give it a moment to appear in the process table.
+    Bun.spawnSync(["bash", "-c", "sleep 0.2"]);
+    const pat = `[${sentinelMark[0]}]${sentinelMark.slice(1)}`;
+    const found = Bun.spawnSync(["bash", "-c", `pgrep -f '${pat}' | wc -l | tr -d ' '`])
+      .stdout.toString()
+      .trim();
+    if (Number(found) < 1) {
+      throw new Error(
+        "pgrep cannot observe a process this test just started — every survivor count below would be a false zero.",
+      );
+    }
+  } finally {
+    sentinel.kill("SIGKILL");
+  }
+}
+
 describe("kill escalation (BRO-2260)", () => {
   // NEGATIVE CONTROL — the defect this fix exists for. If this ever starts
   // passing, SIGTERM became sufficient and the escalation could be revisited;
@@ -98,12 +128,7 @@ describe("kill escalation (BRO-2260)", () => {
     // pgrep into `wc -l` discards its status, so a missing or unprivileged pgrep
     // yields "0" — indistinguishable from "no survivors". A denial is only
     // evidence when the detector could have said otherwise.
-    const probe = Bun.spawnSync(["bash", "-c", "command -v pgrep >/dev/null"]);
-    expect(probe.exitCode).toBe(0);
-    const positiveControl = Bun.spawnSync(["bash", "-c", `pgrep -f '[b]ash' >/dev/null; echo $?`])
-      .stdout.toString()
-      .trim();
-    expect(positiveControl).toBe("0"); // pgrep CAN see processes here
+    assertPgrepCanSeeProcesses();
 
     const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f '${pattern}' | wc -l | tr -d ' '`])
       .stdout.toString()
@@ -132,12 +157,54 @@ describe("kill escalation (BRO-2260)", () => {
 
     await new Promise((r) => setTimeout(r, 300));
     const pattern = `[${marker[0]}]${marker.slice(1)}`;
-    const probe = Bun.spawnSync(["bash", "-c", "command -v pgrep >/dev/null"]);
-    expect(probe.exitCode).toBe(0);
+    assertPgrepCanSeeProcesses();
     const survivors = Bun.spawnSync(["bash", "-c", `pgrep -f '${pattern}' | wc -l | tr -d ' '`])
       .stdout.toString()
       .trim();
     expect(Number(survivors)).toBe(0);
+  });
+
+  // P20 round 4 blocker. The nastiest shape yet: a descendant that ignores SIGTERM
+  // AND closes its stdout (`exec >/dev/null`). The stream then ENDS — so
+  // "stdout closed" is not group settlement — the handle read as finished, the
+  // delayed SIGKILL was suppressed, and the process kept running. That is the
+  // incident's own shape: a build or clone that redirects its output.
+  test("a descendant that closes stdout is still reaped", async () => {
+    assertPgrepCanSeeProcesses();
+    const h = new LocalHost().spawnStream([
+      "bash",
+      "-c",
+      `bash -c 'trap "" TERM; echo $$; exec >/dev/null; while true; do sleep 1; done' & wait`,
+    ]);
+    let descendantPid = 0;
+    const drain = (async () => {
+      for await (const line of h.stdout) {
+        if (!descendantPid) descendantPid = Number(line.trim());
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 300));
+    h.kill();
+    setTimeout(() => h.kill("SIGKILL"), 200);
+    await drain;
+    await h.exitCode;
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(descendantPid).toBeGreaterThan(0); // the probe actually ran
+    let alive = false;
+    try {
+      process.kill(descendantPid, 0);
+      alive = true;
+    } catch {
+      // gone, as required
+    }
+    if (alive) {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // best effort cleanup
+      }
+    }
+    expect(alive).toBe(false);
   });
 
   test("kill() defaults to SIGTERM, and the signal argument is honoured", async () => {
