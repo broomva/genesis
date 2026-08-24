@@ -43,7 +43,10 @@ const BASH = modernBash();
 
 /** Run the guard with curl forced to return `code`. Returns stdout + whether it
  *  attempted `systemctl restart tailscaled`. */
-function runGuard(code: string, opts: { postRestartCode?: string; sequence?: string[] } = {}) {
+function runGuard(
+  code: string,
+  opts: { postRestartCode?: string; sequence?: string[]; stateDir?: string } = {},
+) {
   const box = mkdtempSync(join(tmpdir(), "funnel-guard-"));
   const bin = join(box, "bin");
   mkdirSync(bin, { recursive: true });
@@ -78,7 +81,7 @@ printf '%s' "${"${codes[$i]}"}"
   const p = Bun.spawnSync([BASH, GUARD], {
     env: {
       PATH: `${bin}:/usr/bin:/bin`,
-      GENESIS_FUNNEL_STATE_DIR: join(box, "state"),
+      GENESIS_FUNNEL_STATE_DIR: opts.stateDir ?? join(box, "state"),
       GENESIS_FUNNEL_COOLDOWN: "0", // never let cooldown mask a restart decision
     },
   });
@@ -149,6 +152,51 @@ describe("funnel guard — classification (BRO-2274)", () => {
     expect(r.restartedTailscaled).toBe(true);
     expect(r.stdout).toContain("needs a human");
     expect(r.exitCode).toBe(1);
+  });
+
+  // THE COOLDOWN'S OWN DEPENDENCY. `last` falls back to 0 when unreadable, so
+  // `since = now - 0` clears any cooldown and the guard restarts on EVERY tick — the
+  // restart loop the cooldown exists to prevent, which by the script's own note also
+  // drops SSH. An unwritable state dir must therefore disable the restart, not the
+  // measurement.
+  // TWO GUARDS COVER THIS, AND ASSERTING "NOT restarting" PROVED NEITHER.
+  //
+  // First version of these tests checked only that phrase. Both the mkdir guard and
+  // the last-restart-write guard emit it, so removing EITHER left the other to
+  // satisfy the assertion — a mutation sweep showed both deletions SURVIVING. The
+  // assertions below name the specific path, and each case isolates one guard.
+  test("state dir UNCREATABLE → measures, refuses via the cooldown-state guard", () => {
+    const box = mkdtempSync(join(tmpdir(), "funnel-guard-state-"));
+    const blocker = join(box, "not-a-dir");
+    writeFileSync(blocker, "x"); // a FILE, so mkdir -p <file>/sub fails ENOTDIR
+    const r = runGuard("000", { stateDir: join(blocker, "state") });
+    expect(r.stdout).toContain("ingress 203.0.113.10 -> 000"); // still measured
+    expect(r.stdout).toContain("state dir");
+    expect(r.stdout).toContain("cooldown state is unusable");
+    expect(r.restartedTailscaled).toBe(false);
+    expect(r.exitCode).toBe(1);
+  });
+
+  test("state dir EXISTS but is READ-ONLY → refuses via the write guard", () => {
+    // mkdir -p succeeds (it already exists), so this isolates the second guard:
+    // an unrecorded restart is an unbounded one, because the next tick sees no
+    // cooldown at all.
+    const box = mkdtempSync(join(tmpdir(), "funnel-guard-ro-"));
+    const state = join(box, "state");
+    mkdirSync(state, { recursive: true });
+    chmodSync(state, 0o500); // r-x: listable, not writable
+    const r = runGuard("000", { stateDir: state });
+    expect(r.stdout).toContain("cannot record the restart time");
+    expect(r.restartedTailscaled).toBe(false);
+    expect(r.exitCode).toBe(1);
+    chmodSync(state, 0o700); // so the temp dir can be cleaned up
+  });
+
+  // Polarity partner: a WORKING state dir must still restart, or the guard above
+  // would pass by disabling the feature entirely.
+  test("a usable state dir still restarts on a genuine 000", () => {
+    const r = runGuard("000", { postRestartCode: "405" });
+    expect(r.restartedTailscaled).toBe(true);
   });
 
   test("no public A record → cannot measure, takes no action", () => {

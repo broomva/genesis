@@ -52,7 +52,23 @@ backend_down_code() { [[ "$1" == "502" || "$1" == "503" || "$1" == "504" ]]; }
 
 log() { echo "[funnel-guard] $*"; }
 
-mkdir -p "$STATE_DIR"
+# THE COOLDOWN IS ONLY AS REAL AS THE STATE BEHIND IT (CodeRabbit, Major).
+#
+# `last` falls back to 0 when the file is unreadable, so `since = now - 0` always
+# clears any cooldown. An unwritable or full /var/lib therefore makes the cooldown
+# VACUOUS and produces a restart on every tick — the exact restart loop the cooldown
+# exists to prevent, and one that "also drops SSH" by the script's own note.
+#
+# So the guard keeps MEASURING (the header calls that the whole point, and the probe
+# is what tells an operator anything) but refuses the one irreversible action it can
+# no longer rate-limit. Failing closed on the restart leaves a human able to log in;
+# a restart loop takes that away.
+state_ok=1
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  state_ok=0
+  log "WARNING: state dir $STATE_DIR is unusable -- the restart cooldown cannot be"
+  log "  enforced, so this run will measure but never restart tailscaled"
+fi
 
 mapfile -t IPS < <(dig +short +time=5 +tries=2 @1.1.1.1 "$HOST" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
 if [ "${#IPS[@]}" -eq 0 ]; then
@@ -108,8 +124,20 @@ if [ "$since" -lt "$COOLDOWN" ]; then
   exit 1
 fi
 
+if [ "$state_ok" = 0 ]; then
+  log "UNHEALTHY on every public ingress, but the cooldown state is unusable --"
+  log "  NOT restarting: an unrate-limited restart loop is worse than this outage"
+  exit 1
+fi
+
+# Record the attempt BEFORE acting, and refuse to act if it cannot be recorded: an
+# unrecorded restart is an unbounded one, because the next tick sees no cooldown.
+if ! printf '%s\n' "$now" > "$STATE_DIR/last-restart" 2>/dev/null; then
+  log "cannot record the restart time in $STATE_DIR -- NOT restarting tailscaled"
+  exit 1
+fi
+
 log "UNHEALTHY on every public ingress -- restarting tailscaled"
-echo "$now" > "$STATE_DIR/last-restart"
 systemctl restart tailscaled || { log "tailscaled restart FAILED"; exit 1; }
 
 # RETRY, DON'T ASK FOR A HUMAN AFTER 20 SECONDS.
