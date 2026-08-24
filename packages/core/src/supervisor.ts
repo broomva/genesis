@@ -285,6 +285,32 @@ export function hardenedExtraArgs(
   return [...(extraArgs ?? []), "--strict-mcp-config"];
 }
 
+/** BRO-2235 — a tenant HOME that the chosen engine will not honor must REFUSE.
+ *
+ *  Only the print engine threads `home` into the spawn. The interactive engine
+ *  reaches the child across the session-host socket, and the codex engine builds
+ *  its own environment; neither carries it today. So a workspace provisioned with
+ *  `home` — which is an operator saying "this tenant must not use my credential or
+ *  my skills" — would, on either of those engines, run against the operator's HOME
+ *  and look exactly like a turn that worked.
+ *
+ *  FAIL-CLOSED, and the opposite of `tenantEnv`, deliberately. `tenantEnv` is
+ *  fail-safe because an UNSET home means no isolation was ever asked for, and
+ *  refusing there would turn a provisioning gap into an outage. Here the operator
+ *  HAS asked, and the only alternatives are "refuse the turn" or "run it
+ *  unisolated". An availability failure is recoverable; silently serving a tenant
+ *  from the operator's credential is not.
+ *
+ *  Pure + exported so the invariant is covered by a test rather than by a comment. */
+export function engineHomeRefusal(
+  workspace: { home?: string },
+  engine: string | undefined,
+): string | undefined {
+  if (!workspace.home?.trim()) return undefined; // no isolation requested
+  if (engine === "print") return undefined; // the only engine that carries it
+  return `Workspace is provisioned with a per-tenant HOME, but the "${engine ?? "unknown"}" engine does not carry it — the turn would run with the operator's HOME. Refusing rather than running unisolated.`;
+}
+
 /** BRO-2236 / BRO-2241 — the fail-closed half of confinement.
  *
  *  `hardenedExtraArgs` above decides whether a turn is hardened. These decide
@@ -718,6 +744,21 @@ export class Supervisor {
       session.engine =
         neverRan && requested && this.runners[requested] ? requested : this.defaultEngine;
     }
+    // BRO-2235. Placement is load-bearing three ways.
+    //
+    // AFTER the engine binding above: the binding decides whether `home` will
+    // actually travel, so a workspace can be correct and the turn still unisolated
+    // purely from which engine the thread landed on.
+    //
+    // BEFORE `phase = "running"` is persisted: a refusal here leaves the session in
+    // whatever phase it already held. Refusing after the write stranded it in
+    // "running" permanently — the row never returns to a runnable state.
+    //
+    // BEFORE the host lease: this throw is outside the try/finally that releases
+    // one, so refusing costs no host and leaks nothing.
+    const homeRefusal = engineHomeRefusal(workspace, session.engine ?? this.defaultEngine);
+    if (homeRefusal) throw new Error(homeRefusal);
+
     session.phase = "running";
     await this.store.upsertSession(session);
 
