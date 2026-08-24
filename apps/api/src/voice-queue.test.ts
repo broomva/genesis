@@ -343,3 +343,35 @@ describe("a journal that cannot be read must not read as 'all pending'", () => {
     expect(readQueueStatus(d).entries[0]?.status).toBe("retrying");
   });
 });
+
+describe("DRIFT GUARD: the legacy attempt cap must equal the consumer's", () => {
+  test("MAX_ATTEMPTS_FALLBACK matches chat-bot MAX_ATTEMPTS, read from ITS source", () => {
+    // The fallback only classifies rows written before `terminal` existed, but if
+    // the consumer's cap moves and this does not, those rows silently flip
+    // between "retrying" and "abandoned" — the status lie this was added to fix.
+    // Read, never copied: a copied number agrees with itself forever.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "chat-bot", "src", "voice-delivery.ts"),
+      "utf8",
+    );
+    const m = src.match(/export const MAX_ATTEMPTS\s*=\s*(\d+)/);
+    expect(m?.[1]).toBeDefined();
+    // Exercised through behaviour rather than by exporting the constant: a legacy
+    // row AT the consumer's cap must read "abandoned", one below it "retrying".
+    const cap = Number(m?.[1]);
+    const mk = (attempts: number) => {
+      const d = tmp();
+      appendFileSync(
+        join(d, VOICE_QUEUE_FILE),
+        `${JSON.stringify({ id: "v-1", callerId: "1", request: "x", createdAt: "t" })}\n`,
+      );
+      appendFileSync(
+        join(d, HANDLED_FILE),
+        `${JSON.stringify({ id: "v-1", at: "t", disposition: "failed:send", attempts })}\n`,
+      );
+      return readQueueStatus(d).entries[0]?.status;
+    };
+    expect(mk(cap)).toBe("abandoned");
+    expect(mk(cap - 1)).toBe("retrying");
+  });
+});

@@ -154,15 +154,20 @@ export function readQueueStatus(dir: string): { entries: VoiceQueueEntry[]; degr
   let degraded: string | undefined;
   const readLines = (name: string): unknown[] => {
     const p = join(dir, name);
-    if (!existsSync(p)) return [];
     let raw: string;
     try {
+      // Read FIRST rather than existsSync-then-read. existsSync answers false for
+      // a path it cannot stat — an unreadable parent directory, for instance — so
+      // gating on it turned "I am not allowed to look" into "there is nothing
+      // here", which is the exact silent lie the degraded flag exists to prevent.
       raw = readFileSync(p, "utf8");
     } catch (e) {
-      // NOT silently empty. An unreadable delivered.jsonl would otherwise make
-      // every ticket look "pending" — the view confidently reporting the opposite
-      // of the truth, and hiding precisely the failures it exists to surface.
-      degraded = `${name} could not be read: ${e instanceof Error ? e.message : e}`;
+      const code = (e as { code?: string })?.code;
+      // ENOENT is the ONLY healthy absence. Everything else is degradation.
+      if (code === "ENOENT") return [];
+      // The name, never the path: the message reaches a browser and the absolute
+      // queue location is not the client's business.
+      degraded = `${name} could not be read (${code ?? "unknown error"})`;
       return [];
     }
     const out: unknown[] = [];

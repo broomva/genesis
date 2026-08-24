@@ -82,9 +82,14 @@ export function VoiceQueue({ open }: { open: boolean }) {
         // exactly when an operator needs it. 401 usually means the api has no
         // GENESIS_TOKEN, without which this route is deliberately not served.
         setAvailable(true);
+        // 401 does NOT mean the engine lacks a token — that case is unregistered
+        // and answers 404. It means this caller was rejected, or the BFF's token
+        // and the engine's disagree.
+        setEntries(null);
+        setDegraded(null);
         setError(
           res.status === 401
-            ? "Not authorised. This panel needs GENESIS_TOKEN set on the engine."
+            ? "Not authorised — the web and engine tokens may not match."
             : `Could not load the queue (HTTP ${res.status}).`,
         );
         return;
@@ -98,6 +103,10 @@ export function VoiceQueue({ open }: { open: boolean }) {
       setError(null);
       setAvailable(true);
     } catch (e) {
+      // Drop what we had: rows under a fresh error read as current state and are
+      // not — a stale "delivered" during an outage is worse than an empty panel.
+      setEntries(null);
+      setDegraded(null);
       setAvailable(true);
       setError(e instanceof Error ? e.message : "Could not reach the queue.");
     } finally {

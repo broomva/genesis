@@ -394,10 +394,14 @@ export function build(opts: BuildOpts) {
     const voiceQueueDir = opts.voiceQueueDir;
     const token = opts.token;
     app.get("/admin/voice/queue", async (c) => {
+      // HEADER ONLY. The shared helper also accepts ?token=…, and copying that
+      // here put a live secret somewhere it gets written down: access logs,
+      // proxy logs, browser history, referrers. Tolerable for a thread list;
+      // not for the endpoint that serves callers' phone numbers. Compared
+      // explicitly rather than through unauthorized() so an absent token can
+      // never mean "allow". (P20 round 2, BLOCKER.)
       const auth = c.req.header("authorization");
-      const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : c.req.query("token");
-      // Compared explicitly rather than through unauthorized(): the point is that
-      // an absent token can never mean "allow" on this route.
+      const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : undefined;
       if (!bearer || bearer !== token) return c.json({ error: "unauthorized" }, 401);
       const { entries: all, degraded } = readQueueStatus(voiceQueueDir);
       // Bounded. Both journals are append-only and never compacted, so an
