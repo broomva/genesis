@@ -58,8 +58,8 @@ eq ()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
 # reason that has nothing to do with the deployment. Unset it before trusting a
 # red result.
 #
-# The body goes to a FILE and is compared by hash, never through a shell
-# variable. `$(...)` strips trailing newlines and cannot carry NUL, and ${#var}
+# The body goes to a FILE and is compared byte-for-byte with cmp, never through
+# a shell variable. `$(...)` strips trailing newlines and cannot carry NUL, and ${#var}
 # counts characters rather than bytes — so a shell-string comparison would report
 # "identical" for bodies that differ, which is exactly the false green this probe
 # exists to avoid. cmp reads the files themselves.
@@ -105,6 +105,35 @@ compare () {
   eq "$label — anonymous caller still gets $want" "$want" "$pc"
 }
 
+# ── Self-test ──────────────────────────────────────────────────────────────
+# A harness that cannot report red is not evidence. NEGATIVE_CONTROL=1 runs ONLY
+# this and exits — it never shares a run with a real probe.
+#
+# Two earlier designs of this were wrong in the same way. The first printed a
+# failing line without checking the counter moved, so it would have passed even
+# if bad() were broken. The second checked the counter but aimed a leg at a live
+# endpoint and then reset FAILED, so a genuine failure during the control's own
+# request would have been discarded. Both leaked between the control and the
+# measurement. Keeping them in separate runs removes the category: nothing real
+# is probed here, so there is nothing to subtract and nothing that can be masked.
+#
+# Both ports are closed, which exercises the neither-answered arm. That proves
+# bad() increments and the exit code follows it — it does NOT exercise the
+# divergence arm, and this says so rather than implying wider coverage.
+if [ "${NEGATIVE_CONTROL:-0}" = "1" ]; then
+  echo "▶ SELF-TEST — the run below MUST report red"
+  compare "self-test (both ports closed)" \
+    "http://127.0.0.1:1/voice/request" \
+    "http://127.0.0.1:1/voice/request" 401
+  echo
+  if [ "$FAILED" -gt 0 ]; then
+    echo "✓ the harness reported red ($FAILED failure(s)) — a green run from it means something"
+    exit 0
+  fi
+  echo "✗ THE HARNESS CANNOT REPORT RED — every green run from it is worthless"
+  exit 1
+fi
+
 echo "▶ probing $HOST"
 # The public leg is HTTPS, so https_proxy/HTTPS_PROXY govern it — the first
 # version watched only http_proxy and would have stayed silent in the case it
@@ -132,26 +161,6 @@ eq "genesis-api /health is 200" "200" \
 # and prove it by asserting the COUNTER MOVED, not by eyeballing the output. The
 # earlier version printed a failing line without checking FAILED had grown, which
 # would have passed even if bad() were broken.
-if [ "${NEGATIVE_CONTROL:-0}" = "1" ]; then
-  echo "▶ NEGATIVE CONTROL"
-  # BOTH legs point at loopback, so this control probes NOTHING real. That is
-  # deliberate: the first version aimed its public leg at the live funnel and
-  # then reset FAILED wholesale, which would have erased a genuine failure that
-  # happened to occur during the control's own request. A control that can hide
-  # a real fault is worse than no control.
-  before=$FAILED
-  compare "negative control" \
-    "http://127.0.0.1:$API_PORT/voice/request" \
-    "http://127.0.0.1:1/voice/request" 401
-  if [ "$FAILED" -gt "$before" ]; then
-    printf '  ✓ the harness reported red (FAILED %d → %d); discarding the injected failures\n' "$before" "$FAILED"
-    FAILED=$before
-  else
-    printf '  ✗ THE HARNESS CANNOT REPORT RED — a green run from it means nothing\n'
-    FAILED=$((before + 1))
-  fi
-fi
-
 echo
 if [ "$FAILED" -eq 0 ]; then
   echo "✓ no differential detected, and both routes still refuse anonymous callers"
