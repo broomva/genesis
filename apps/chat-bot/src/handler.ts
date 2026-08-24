@@ -20,6 +20,7 @@ import {
 import { classifyDispatchFailure, dispatchFailureMessage } from "./dispatch-failure";
 import { genesisStream } from "./genesis";
 import { withStallTimeout } from "./stall-timeout";
+import { FENCE_OVERHEAD, balanceFences, markdownToWhatsApp } from "./whatsapp-format";
 
 /** The slice of Chat SDK's `Thread` this handler needs. */
 export interface PostableThread {
@@ -612,7 +613,21 @@ export async function handleAgentMessage(
       // Buffered path: drain first, then post whole. Streaming here would post
       // a message and try to edit it, which this channel cannot do.
       const reply = await drainStream(stream);
-      const chunks = chunkForWhatsapp(reply, opts.chunkTarget);
+      // Convert BEFORE chunking. WhatsApp shows a plain string verbatim, so the
+      // agent's markdown reached phones as raw `##` and `|---|` pipes
+      // (BRO-2267). Order matters: converting first means a table is rendered
+      // whole and only then split, whereas chunking first could cut a table
+      // across two messages and destroy the row structure. A split emphasis
+      // marker is a cosmetic wart; split data is not.
+      // Render, chunk, then re-balance fences ACROSS chunk boundaries. Each
+      // WhatsApp message is rendered independently by the client, so a fenced
+      // block split in two leaves an unmatched ``` in one message and loses
+      // monospace in the next.
+      // Reserve FENCE_OVERHEAD below the target: balancing may add a reopening
+      // and a closing fence, and a chunk pushed past the transport cap is
+      // REJECTED — the reply then simply never arrives.
+      const target = (opts.chunkTarget ?? CHUNK_TARGET) - FENCE_OVERHEAD;
+      const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(reply), target));
       posting = true;
       if (chunks.length === 0) {
         // An empty reply must still say something — silence is indistinguishable

@@ -751,3 +751,35 @@ describe("P20 round 2 — status ordering and the shared budget", () => {
     expect(posts.some((p) => p.includes("\u26a0\ufe0f"))).toBe(true);
   });
 });
+
+describe("BRO-2267 — markdown is converted before it reaches WhatsApp", () => {
+  test("the buffered path converts; nothing raw reaches the channel", async () => {
+    // Wiring guard driven through the REAL handler, not by grepping source: a
+    // converter that exists and is never called is the defect this repo keeps
+    // shipping.
+    const thread = mockThread("kapso:a:b");
+    const md = "## Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n**bold**";
+    await handleAgentMessage(thread, "go", {
+      baseUrl: "https://x",
+      fetchImpl: okFetch(md),
+      streaming: false,
+    });
+    const sent = thread.posts.join("\n");
+    expect(sent).not.toMatch(/^#{1,6}\s/m); // no heading hashes
+    expect(sent).not.toContain("|---|"); // no alignment row
+    expect(sent).not.toContain("**"); // no stray double asterisks
+    expect(sent).toContain("*Title*"); // heading became bold
+    expect(sent).toContain("*bold*");
+  });
+
+  test("a STREAMING channel is left alone — Telegram renders markdown itself", async () => {
+    // Polarity partner. Converting for Telegram would DOWNGRADE it: it has real
+    // headings and tables, and WhatsApp syntax is not its syntax.
+    const thread = mockThread("tg-1");
+    await handleAgentMessage(thread, "go", {
+      baseUrl: "https://x",
+      fetchImpl: okFetch("## Title\n\n**bold**"),
+    });
+    expect(thread.posts.join("\n")).toContain("## Title");
+  });
+});
