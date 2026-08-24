@@ -184,6 +184,14 @@ export interface HandledEntry {
   readonly at: string;
   readonly disposition: string;
   readonly attempts: number;
+  /** Whether this ticket will be attempted again.
+   *
+   *  Written by the CONSUMER, which owns MAX_ATTEMPTS, so a reader does not have
+   *  to re-derive it from a copy of that constant. The api serves this queue to
+   *  the PWA and would otherwise need its own cap — two constants that must agree
+   *  forever, in different apps, with nothing to catch the drift. Optional so an
+   *  entry written before this field existed still parses. */
+  readonly terminal?: boolean;
 }
 
 /** Read the log into a per-id view. Tolerant for the same reason parseQueue is. */
@@ -223,7 +231,10 @@ export function appendHandled(path: string, entry: HandledEntry): void {
 export function terminalIds(handled: ReadonlyMap<string, HandledEntry>): Set<string> {
   const out = new Set<string>();
   for (const [id, e] of handled) {
-    if (e.disposition === "delivered" || e.disposition === "undeliverable") out.add(id);
+    // `terminal` when the writer recorded it; otherwise re-derive, so entries
+    // written before the field existed still behave correctly.
+    if (e.terminal === true) out.add(id);
+    else if (e.disposition === "delivered" || e.disposition === "undeliverable") out.add(id);
     else if (e.attempts >= MAX_ATTEMPTS) out.add(id);
   }
   return out;
@@ -282,6 +293,7 @@ export async function drainOnce(deps: DrainDeps): Promise<{
         at: now(),
         disposition: d.kind === "failed" ? `failed:${d.reason}` : d.kind,
         attempts: prior + 1,
+        terminal: d.kind !== "failed" || prior + 1 >= MAX_ATTEMPTS,
       });
     } catch (e) {
       // Loud, because the durable bound is gone until this is fixed: a restart

@@ -16,7 +16,7 @@
 // throw into an honest 503 ("could not record the request; please try again")
 // that the agent reads to the caller. Propagating is what makes that 503 true.
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type DeliverablePrincipal, type VoiceTicket, normalizeCallerId } from "./voice";
 
@@ -75,6 +75,15 @@ export function parseVoicePrincipals(raw: string | undefined): DeliverablePrinci
  *  already promised, and the same on-disk convention as the session traces. */
 export const VOICE_QUEUE_FILE = "queue.jsonl";
 
+/** The consumer's log of what became of each ticket.
+ *
+ *  MUST equal apps/chat-bot/src/voice-delivery.ts HANDLED_FILE. The two apps do
+ *  not share a module, so this is a second declaration of one name — the same
+ *  situation normalizeCallerId is in, and it fails the same way: silently, by
+ *  reading an empty queue and reporting every ticket pending. The drift test
+ *  below pins them together. */
+export const HANDLED_FILE = "delivered.jsonl";
+
 /** Build the enqueue sink. The directory is created ONCE here rather than per
  *  append: /voice/request runs with a caller on the line, so the hot path is one
  *  append and nothing else. */
@@ -85,4 +94,115 @@ export function createVoiceQueue(dir: string): (ticket: VoiceTicket) => void {
     // No try/catch: see FAILURE POLICY above. A throw here becomes the 503.
     appendFileSync(file, `${JSON.stringify(ticket)}\n`);
   };
+}
+
+// ── Operator view (BRO-2284) ───────────────────────────────────────────────
+//
+// The queue is two append-only files written by two processes: the api records
+// tickets, the chat-bot records what became of them. Neither is readable as a
+// STATE without joining them, and until now the only way to see a failure was to
+// ssh in and read a journal. This is the join, served to the PWA.
+
+/** What happened to a ticket, from the operator's point of view. */
+export type VoiceStatus =
+  | "pending" // nothing has tried it yet
+  | "delivered" // answered on WhatsApp
+  | "undeliverable" // the caller was not recognized: nowhere to send
+  | "retrying" // failed, but will be attempted again
+  | "abandoned"; // failed and will not be attempted again
+
+export interface VoiceQueueEntry {
+  readonly id: string;
+  readonly callerId: string;
+  readonly deliverTo?: string;
+  readonly request: string;
+  readonly createdAt: string;
+  readonly status: VoiceStatus;
+  readonly attempts: number;
+  readonly lastAttemptAt?: string;
+  /** For a failure, WHY — "window-closed" | "dispatch" | "send". The first is the
+   *  one worth surfacing: it means the recipient has not messaged us in 24h, and
+   *  no amount of retrying changes that. */
+  readonly reason?: string;
+}
+
+interface RawHandled {
+  id: string;
+  at: string;
+  disposition: string;
+  attempts: number;
+  terminal?: boolean;
+}
+
+function isHandled(v: unknown): v is RawHandled {
+  if (!v || typeof v !== "object") return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.id === "string" && e.id.length > 0 && typeof e.disposition === "string";
+}
+
+/** Join queue.jsonl with delivered.jsonl. Newest ticket first, because an
+ *  operator opening this is asking "what just happened", not "what happened
+ *  first". Tolerant of both files for the same reason parseQueue is: they are
+ *  being appended to by another process while this reads them. */
+export function readQueueStatus(dir: string): VoiceQueueEntry[] {
+  const readLines = (name: string): unknown[] => {
+    const p = join(dir, name);
+    if (!existsSync(p)) return [];
+    let raw: string;
+    try {
+      raw = readFileSync(p, "utf8");
+    } catch {
+      return [];
+    }
+    const out: unknown[] = [];
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        out.push(JSON.parse(s));
+      } catch {
+        // Skipped, never fatal — see parseQueue.
+      }
+    }
+    return out;
+  };
+
+  const handled = new Map<string, RawHandled>();
+  for (const v of readLines(HANDLED_FILE)) if (isHandled(v)) handled.set(v.id, v);
+
+  const seen = new Set<string>();
+  const entries: VoiceQueueEntry[] = [];
+  for (const v of readLines(VOICE_QUEUE_FILE)) {
+    if (!v || typeof v !== "object") continue;
+    const t = v as Record<string, unknown>;
+    if (typeof t.id !== "string" || !t.id || typeof t.request !== "string") continue;
+    // A stable id can appear twice (a provider retry); show the ticket once.
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+
+    const h = handled.get(t.id);
+    const [kind, reason] = (h?.disposition ?? "").split(":");
+    const status: VoiceStatus = !h
+      ? "pending"
+      : kind === "delivered"
+        ? "delivered"
+        : kind === "undeliverable"
+          ? "undeliverable"
+          : h.terminal
+            ? "abandoned"
+            : "retrying";
+
+    entries.push({
+      id: t.id,
+      callerId: typeof t.callerId === "string" ? t.callerId : "",
+      ...(typeof t.deliverTo === "string" ? { deliverTo: t.deliverTo } : {}),
+      request: t.request,
+      createdAt: typeof t.createdAt === "string" ? t.createdAt : "",
+      status,
+      attempts: typeof h?.attempts === "number" ? h.attempts : 0,
+      ...(h?.at ? { lastAttemptAt: h.at } : {}),
+      ...(reason ? { reason } : {}),
+    });
+  }
+  return entries.reverse();
 }

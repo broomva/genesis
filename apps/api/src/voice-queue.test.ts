@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCaller } from "./voice";
-import { VOICE_QUEUE_FILE, createVoiceQueue, parseVoicePrincipals } from "./voice-queue";
+import {
+  HANDLED_FILE,
+  VOICE_QUEUE_FILE,
+  createVoiceQueue,
+  parseVoicePrincipals,
+  readQueueStatus,
+} from "./voice-queue";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -129,5 +135,103 @@ describe("createVoiceQueue", () => {
     const lines = readFileSync(file, "utf8").trim().split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0] as string).id).toBe("t-0");
+  });
+});
+
+describe("readQueueStatus — the operator view", () => {
+  const q = (dir: string, lines: object[]) => {
+    for (const l of lines) appendFileSync(join(dir, VOICE_QUEUE_FILE), `${JSON.stringify(l)}\n`);
+  };
+  const h = (dir: string, lines: object[]) => {
+    for (const l of lines) appendFileSync(join(dir, HANDLED_FILE), `${JSON.stringify(l)}\n`);
+  };
+  const t = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    callerId: "573017758620",
+    deliverTo: "573017758620",
+    request: `ask ${id}`,
+    createdAt: "2026-08-24T00:00:00Z",
+    ...over,
+  });
+
+  test("a ticket nobody has touched is pending", () => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    expect(readQueueStatus(d)).toMatchObject([{ id: "v-1", status: "pending", attempts: 0 }]);
+  });
+
+  test.each([
+    ["delivered", { disposition: "delivered", attempts: 1, terminal: true }, "delivered"],
+    ["undeliverable", { disposition: "undeliverable", attempts: 1, terminal: true }, "undeliverable"],
+    ["a retryable failure", { disposition: "failed:send", attempts: 1, terminal: false }, "retrying"],
+    ["an exhausted failure", { disposition: "failed:send", attempts: 3, terminal: true }, "abandoned"],
+  ])("%s maps to %p", (_label, entry, expected) => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [{ id: "v-1", at: "2026-08-24T00:00:05Z", ...entry }]);
+    expect(readQueueStatus(d)[0]?.status).toBe(expected as string);
+  });
+
+  test("a closed window surfaces its REASON — the whole point of this view", () => {
+    // Without the reason an operator sees "failed" and cannot tell a transport
+    // blip from "this person has not messaged us in 24h, and retrying is futile".
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [
+      {
+        id: "v-1",
+        at: "2026-08-24T00:00:05Z",
+        disposition: "failed:window-closed",
+        attempts: 1,
+        terminal: false,
+      },
+    ]);
+    expect(readQueueStatus(d)[0]).toMatchObject({ status: "retrying", reason: "window-closed" });
+  });
+
+  test("newest first — an operator asks what JUST happened", () => {
+    const d = tmp();
+    q(d, [t("v-old"), t("v-new")]);
+    expect(readQueueStatus(d).map((e) => e.id)).toEqual(["v-new", "v-old"]);
+  });
+
+  test("a stable id appearing twice is shown ONCE", () => {
+    const d = tmp();
+    q(d, [t("v-1"), t("v-1")]);
+    expect(readQueueStatus(d)).toHaveLength(1);
+  });
+
+  test("a truncated or malformed line does not hide the tickets around it", () => {
+    const d = tmp();
+    q(d, [t("v-1")]);
+    appendFileSync(join(d, VOICE_QUEUE_FILE), '{"id":"v-2","request":"partial\n');
+    q(d, [t("v-3")]);
+    expect(readQueueStatus(d).map((e) => e.id)).toEqual(["v-3", "v-1"]);
+  });
+
+  test("missing files are an empty queue, not a crash", () => {
+    expect(readQueueStatus(join(tmp(), "nope"))).toEqual([]);
+  });
+
+  test("an entry written BEFORE `terminal` existed still classifies", () => {
+    // Backward compatibility with records already on disk.
+    const d = tmp();
+    q(d, [t("v-1")]);
+    h(d, [{ id: "v-1", at: "x", disposition: "delivered", attempts: 1 }]);
+    expect(readQueueStatus(d)[0]?.status).toBe("delivered");
+  });
+});
+
+describe("DRIFT GUARD: the two apps must name the same file", () => {
+  test("api HANDLED_FILE equals chat-bot's, read from ITS SOURCE not copied here", () => {
+    // A copied literal is not a guard — it agrees with itself forever while the
+    // real constant moves. This reads the other app's source, so renaming there
+    // fails here.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "chat-bot", "src", "voice-delivery.ts"),
+      "utf8",
+    );
+    const m = src.match(/export const HANDLED_FILE\s*=\s*"([^"]+)"/);
+    expect(m?.[1]).toBe(HANDLED_FILE);
   });
 });

@@ -16,6 +16,7 @@ import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
 import { PAGE } from "./ui";
+import { readQueueStatus } from "./voice-queue";
 import {
   type DeliverablePrincipal,
   type VoiceTicket,
@@ -92,6 +93,17 @@ export interface BuildOpts {
   /** Numbers the voice channel may deliver an answer to. A caller matching one
    *  gets follow-up on that number; everyone else can only leave a message. */
   voicePrincipals?: readonly DeliverablePrincipal[];
+  /** Where the voice queue lives on disk. Enables the OPERATOR view at
+   *  GET /admin/voice/queue — the joined state of tickets and what became of
+   *  them.
+   *
+   *  DELIBERATELY NOT UNDER /voice. The Tailscale Funnel publishes exactly the
+   *  /voice prefix to the internet so an ElevenLabs agent can reach
+   *  /voice/identify and /voice/request. A queue view mounted there would put
+   *  every caller's request text on the public internet behind no secret at all.
+   *  This path sits outside that prefix and is gated like /threads: open on the
+   *  loopback, authenticated at the BFF. */
+  voiceQueueDir?: string;
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
@@ -359,6 +371,24 @@ export function build(opts: BuildOpts) {
         // blocked on #107.)
         followUp: "none",
       });
+    });
+  }
+
+  // Operator view of the voice queue (BRO-2284). Until this existed the only way
+  // to see a failed delivery was to ssh in and read a journal, which means a
+  // closed 24h service window — the failure most likely to happen and least
+  // likely to be noticed — was effectively invisible.
+  //
+  // Same bearer gate as /threads, and see voiceQueueDir above for why the path is
+  // NOT under /voice.
+  if (opts.voiceQueueDir) {
+    const voiceQueueDir = opts.voiceQueueDir;
+    app.get("/admin/voice/queue", async (c) => {
+      if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
+      const entries = readQueueStatus(voiceQueueDir);
+      const counts: Record<string, number> = {};
+      for (const e of entries) counts[e.status] = (counts[e.status] ?? 0) + 1;
+      return c.json({ entries, counts });
     });
   }
 

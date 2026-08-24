@@ -404,6 +404,9 @@ const { app, websocket } = build({
   voiceSecret,
   voicePrincipals,
   enqueueVoice,
+  // Enables the operator view. Independent of voiceSecret: the queue is worth
+  // inspecting even on a deploy where the phone channel is switched off.
+  voiceQueueDir,
 });
 
 // Bun.serve idles a connection after `idleTimeout` seconds of NO bytes and closes
