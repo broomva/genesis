@@ -517,6 +517,7 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
   // ends, and the admission slot it holds is never released, permanently locking
   // that workspace out at perWorkspace=1.
   let escalation: ReturnType<typeof setTimeout> | undefined;
+  let forcedKill = false;
   const watchdog = startWatchdog({
     idleTimeoutMs: opts.idleTimeoutMs,
     maxTurnMs: opts.maxTurnMs,
@@ -562,8 +563,11 @@ export async function runAgent(opts: RunOptions): Promise<RunResult> {
     // (P20 round 4). A descendant that closed stdout ends the stream early, the
     // `finally` ran before the timer, and the escalation was dropped — so the
     // process the watchdog set out to kill simply carried on.
-    if (watchdog.reason) handle.kill("SIGKILL");
-    handle.kill(); // idempotent; reaps the child on every exit path (F14)
+    // ONE final signal, not two (P20 round 5). This used to send SIGKILL and then
+    // fall through to the polite `handle.kill()` below — harmless, but duplicate
+    // backend work and one more chance to address a stale target.
+    forcedKill = watchdog.reason !== undefined;
+    handle.kill(forcedKill ? "SIGKILL" : undefined); // idempotent; reaps on every exit path (F14)
   }
 
   // A crash with no terminal result must surface as blocked, not a stuck "running" (F20).

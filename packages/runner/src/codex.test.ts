@@ -622,6 +622,41 @@ describe("runCodex turn bounds (BRO-2260)", () => {
     expect(host.killed.length).toBeGreaterThan(0);
   });
 
+  // P20 round 5 was RIGHT and I had claimed otherwise: the kill-escalation
+  // regression schedules SIGKILL by hand against LocalHost, so it exercises the
+  // HOST's latch and not the RUNNER's escalate-on-reap branch. Deleting that branch
+  // left it green. This test covers the branch itself — a reaped turn must end with
+  // a forced SIGKILL, not merely the polite signal, because a descendant that
+  // closed stdout would otherwise survive.
+  test("the reap path FORCES a SIGKILL, not just the polite signal", async () => {
+    const host = new WedgedHost();
+    await expect(
+      runCodex({
+        prompt: "hi",
+        cwd: "/tmp/does-not-matter",
+        host,
+        worktree: false,
+        maxTurnMs: 60,
+        killGraceMs: 5_000, // long enough that the timer canNOT be what delivers it
+      }),
+    ).rejects.toThrow(/stopped/i);
+    expect(host.killed).toContain("SIGKILL");
+  });
+
+  // NEGATIVE CONTROL: a turn that ends normally must NOT be force-killed, or the
+  // assertion above would pass for a runner that SIGKILLs unconditionally.
+  test("a normal codex turn is not force-killed", async () => {
+    const host = new FakeLocalHost(FIXTURE_ANSWER.split("\n"));
+    const killed: NodeJS.Signals[] = [];
+    const inner = host.spawnStream.bind(host);
+    host.spawnStream = (cmd: string[], opts?: ExecOpts) => {
+      const h = inner(cmd, opts);
+      return { ...h, kill: (s?: NodeJS.Signals) => killed.push(s ?? "SIGTERM") };
+    };
+    await runCodex({ prompt: "hi", cwd: "/repo", host, worktree: false, maxTurnMs: 60_000 });
+    expect(killed).not.toContain("SIGKILL");
+  });
+
   test("the total clock reaps a codex turn that is never idle", async () => {
     const host = new WedgedHost();
     await expect(

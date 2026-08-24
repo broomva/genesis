@@ -160,11 +160,11 @@ export class LocalHost implements ExecutionHost {
     // the admission slot it holds — hangs forever. The guard against one hazard
     // reintroduced the exact hazard it was added beside.
     //
-    // Both conditions are required, and together they are the group-settled
-    // signal: the direct child is gone AND the stream has ended. A descendant
-    // still holding stdout keeps the stream open, so it can never be silently
-    // suppressed; once both are true nothing of ours is alive and a further
-    // signal could only ever hit a stranger.
+    // CORRECTED (P20 round 5): child-exit plus stdout-closure does NOT prove the
+    // group is gone — a descendant that redirects its output closes the stream and
+    // keeps running, which is the regression in kill-escalation.test.ts. These two
+    // conditions only mark when the handle STOPPED BEING USED; the kill guard below
+    // is a time window from that moment, not a claim about the group.
     let exited = false;
     let streamClosed = false;
     let settledAt: number | undefined;

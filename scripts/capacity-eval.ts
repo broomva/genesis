@@ -125,7 +125,15 @@ record("one turn runs at rest", true, `completed in ${single.ms}ms`);
 console.log("\nunder load:");
 const busyPrompt =
   "Run this exact shell command and report nothing else: for i in $(seq 1 60); do echo working; sleep 1; done";
-const inflight = Array.from({ length: FANOUT }, () => turn(busyPrompt).catch(() => undefined));
+// Keep the ERROR, do not swallow it (P20 round 5). Mapping failures to `undefined`
+// meant four HTTP 500s alongside one admitted turn and one refusal still produced a
+// passing evaluation — the eval would certify a broken backend as a working bound.
+const inflight = Array.from({ length: FANOUT }, () =>
+  turn(busyPrompt).then(
+    (r) => ({ ok: true as const, ...r }),
+    (e) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }),
+  ),
+);
 
 // Give the fan-out a moment to actually occupy the box before probing ingress.
 await new Promise((r) => setTimeout(r, 3000));
@@ -147,8 +155,22 @@ record(
 );
 
 const settled = await Promise.all(inflight);
-const refused = settled.filter((r) => r?.refused).length;
-const ran = settled.filter((r) => r && !r.refused).length;
+const errored = settled.filter((r) => !r.ok);
+const refused = settled.filter((r) => r.ok && r.refused).length;
+const ran = settled.filter((r) => r.ok && !r.refused).length;
+
+// An HTTP failure is neither an admitted turn nor a refusal — it is the backend
+// breaking, and counting it as either would let a 500-ing server pass.
+record(
+  "no turn failed with a transport/HTTP error",
+  errored.length === 0,
+  errored.length === 0
+    ? `${FANOUT} requests, none errored`
+    : `${errored.length} errored: ${errored
+        .map((e) => ("error" in e ? e.error : "?"))
+        .join(" | ")
+        .slice(0, 200)}`,
+);
 
 // The gate must REFUSE the excess rather than admit it. Both halves matter: all
 // refused would mean the gate is stuck closed; none refused means it is absent.

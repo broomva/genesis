@@ -433,6 +433,7 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
   // perWorkspace=1 locks that workspace out permanently.
   const startedAtMs = Date.now();
   let escalation: ReturnType<typeof setTimeout> | undefined;
+  let forcedKill = false;
   const watchdog = startWatchdog({
     idleTimeoutMs: opts.idleTimeoutMs,
     maxTurnMs: opts.maxTurnMs,
@@ -471,8 +472,11 @@ export async function runCodex(opts: RunOptions): Promise<RunResult> {
     // (P20 round 4). A descendant that closed stdout ends the stream early, the
     // `finally` ran before the timer, and the escalation was dropped — so the
     // process the watchdog set out to kill simply carried on.
-    if (watchdog.reason) handle.kill("SIGKILL");
-    handle.kill();
+    // ONE final signal, not two (P20 round 5). This used to send SIGKILL and then
+    // fall through to the polite `handle.kill()` below — harmless, but duplicate
+    // backend work and one more chance to address a stale target.
+    forcedKill = watchdog.reason !== undefined;
+    handle.kill(forcedKill ? "SIGKILL" : undefined);
   }
 
   if (state.phase !== "done" && state.phase !== "blocked" && state.phase !== "awaiting") {
