@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { seedSkills } from "./skill-seed";
@@ -94,5 +94,56 @@ describe("the whatsapp-channel skill states what the channel actually does", () 
   test("it warns that long replies are split", async () => {
     // \s+ because the source is hard-wrapped: the phrase spans a line break.
     expect(await text.text()).toMatch(/separate\s+messages/i);
+  });
+});
+
+describe("a CORRECTED skill actually reaches an existing tenant", () => {
+  test("re-seeding replaces a stale file rather than skipping it", () => {
+    // The blocker: seedSkills without `overwrite` SKIPS a file whose content
+    // differs, so a corrected skill lands on newly-provisioned tenants and
+    // silently never reaches existing ones. For a file whose purpose is telling
+    // the agent facts about the channel, a stale copy is worse than none — it
+    // is a confidently-stated falsehood the agent acts on.
+    const root = mkdtempSync(join(tmpdir(), "reseed-"));
+    try {
+      const first = seedSkills(root, { sourceDir: SOURCE, overwrite: true });
+      expect(first.written.length).toBeGreaterThan(0);
+
+      // Simulate an operator edit by corrupting the seeded copy, then re-seed.
+      const seeded = first.written[0] as string;
+      writeFileSync(seeded, "STALE CONTENT");
+      const second = seedSkills(root, { sourceDir: SOURCE, overwrite: true });
+
+      expect(second.skipped.filter((p) => p.includes("/whatsapp-channel/"))).toEqual([]);
+      expect(readFileSync(seeded, "utf8")).not.toBe("STALE CONTENT");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("WITHOUT overwrite the stale copy survives — the defect, pinned", () => {
+    // Bidirectional proof: this asserts the failure mode is real, so the fix
+    // above cannot be quietly reverted without a test going red.
+    const root = mkdtempSync(join(tmpdir(), "reseed-no-"));
+    try {
+      const first = seedSkills(root, { sourceDir: SOURCE });
+      const seeded = first.written[0] as string;
+      writeFileSync(seeded, "STALE CONTENT");
+      seedSkills(root, { sourceDir: SOURCE });
+      expect(readFileSync(seeded, "utf8")).toBe("STALE CONTENT");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the PROVISIONER passes overwrite, not just the tests", () => {
+    // A fix proven only in a unit test is a fix that never ships: the caller is
+    // what production runs.
+    const script = readFileSync(
+      resolve(import.meta.dir, "../../../scripts/provision-whatsapp-tenants.ts"),
+      "utf8",
+    );
+    const call = /seedSkills\(t\.dir, \{[\s\S]*?\}\)/.exec(script)?.[0] ?? "";
+    expect(call).toContain("overwrite: true");
   });
 });

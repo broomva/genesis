@@ -350,10 +350,20 @@ for (const t of tenants) {
   // permission escalation because `allowed-tools:` frontmatter is a real permission
   // layer. Seeding root-owned 0444 gives the tenant the skill and nobody the layer.
   // Optional: unset GENESIS_TENANT_SKILLS_DIR simply seeds none.
+  // overwrite: TRUE, unlike seedAgentStack, and the asymmetry is deliberate.
+  //
+  // These files are root-owned 0444, so a TENANT cannot have modified them —
+  // the only way a seeded skill differs from source is that the OPERATOR
+  // changed it. Without overwrite, seedSkills skips exactly that case, so a
+  // corrected skill reaches newly-provisioned tenants and silently never
+  // reaches existing ones. For a file whose whole purpose is telling the agent
+  // facts about the channel, a stale copy is worse than none: it is a
+  // confidently-stated falsehood the agent will act on. (P20 BLOCKER.)
   const skills = TENANT_SKILLS_DIR
     ? seedSkills(t.dir, {
         sourceDir: TENANT_SKILLS_DIR,
         ownership: { uid: 0, gid: 0, mode: 0o444 },
+        overwrite: true,
       })
     : undefined;
   if (skills) {

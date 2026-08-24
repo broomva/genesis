@@ -19,11 +19,15 @@ escalation at the default tier. See `packages/core/src/skill-seed.ts`.
 Only `.md`, `.txt`, `.json`, `.yaml`/`.yml` are copied — an allowlist, because a
 root process must not copy arbitrary trees into a tenant sandbox.
 
-**A skill here cannot carry an executable.** Anything the agent needs to *run*
-has to exist in the environment (the way `google-chrome` already does) and be
-permitted in the tenant's `settings.json`. Knowledge is seeded; capability is
-installed. Keeping those separate is what lets this directory stay unaudited-
-but-safe.
+**Nothing here is seeded with an executable bit**, and the allowlist is on the
+FILENAME SUFFIX only — so it stops a `.sh` from being copied, but it does not
+stop a script stored as `.txt` and run through an interpreter. Treat the rule as
+"capability does not ship here", not as a sandbox: a root process copying files
+into a tenant is not the layer that constrains what the tenant may execute. That
+is `settings.json`.
+
+Anything the agent needs to *run* should exist in the environment the way
+`google-chrome` already does. Knowledge is seeded; capability is installed.
 
 Directory names must match `^[a-z0-9][a-z0-9-]{0,63}$`.
 
