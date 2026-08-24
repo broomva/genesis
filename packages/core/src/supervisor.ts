@@ -30,7 +30,7 @@ import {
   runAgent,
 } from "@genesis/runner";
 import { seedAgentStack } from "./agent-stack";
-import { type ConcurrencyLimits, TurnGate, type TurnSlot } from "./concurrency";
+import { type ConcurrencyLimits, TurnGate, TurnRejectedError, type TurnSlot } from "./concurrency";
 import { InMemoryStore, type Store, isoNow, newId } from "./store";
 import type { Session, TokenUsage, Turn, Workspace } from "./types";
 import { InMemoryWorkspaceRepository, type WorkspaceRepository } from "./workspace-repository";
@@ -756,7 +756,29 @@ export class Supervisor {
     // `session.noWorktree`, so admitting after it meant a REFUSED request could
     // permanently fix an idle session's worktree posture and change how the
     // eventual resend runs. A refusal must leave nothing behind.
-    const slot = this.gate.acquire(workspace.id);
+    let slot: TurnSlot;
+    try {
+      slot = this.gate.acquire(workspace.id);
+    } catch (e) {
+      // A REFUSAL MUST LEAVE A TRACE (BRO-2308). `acquire` throws before the try
+      // below that owns the `dispatch ✖` logging, so a refused turn reached the
+      // client correctly and left NOTHING server-side — measured: zero matches
+      // across 24h of logs while refusals were actively firing.
+      //
+      // That makes "are we hitting capacity?" unanswerable, which is the entire
+      // operational question this gate exists to manage; and a stuck-closed gate
+      // (a leaked slot) would refuse every user while the logs looked normal.
+      //
+      // Ids and counts ONLY — never the turn text. On a shared number the message
+      // belongs to a tenant, and the rest of this path is already careful about it.
+      if (e instanceof TurnRejectedError) {
+        console.warn(
+          `[genesis] dispatch ⊘ thread=${threadId} workspace=${workspace.id} refused ` +
+            `(${e.scope} limit ${e.limit}) — in flight: workspace=${this.gate.activeFor(workspace.id)} global=${this.gate.active}`,
+        );
+      }
+      throw e;
+    }
     try {
       if (session.noWorktree === undefined && session.agentSessionId === undefined) {
         const canWorktree = !!registered && !defaultNoWorktree;

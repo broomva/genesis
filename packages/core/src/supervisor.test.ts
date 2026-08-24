@@ -1179,6 +1179,89 @@ describe("supervisor — workspace selection (BRO-1627)", () => {
     await first;
   });
 
+  // BRO-2308. A refusal reached the client correctly and left NOTHING server-side —
+  // measured on the deployed box: zero log matches across 24h while refusals were
+  // actively firing. An untested log line is exactly what regresses silently, and
+  // the failure it exists to reveal (a stuck-closed gate) is itself silent.
+  test("a refusal is LOGGED, with scope and live counts (BRO-2308)", async () => {
+    const warns: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warns.push(a.join(" "));
+    };
+    try {
+      const r = blockingRunner();
+      const sup = new Supervisor({
+        defaultWorkspace: ws,
+        run: r.run,
+        concurrency: { perWorkspace: 1 },
+      });
+      const first = sup.dispatch("t-a", "one");
+      await Bun.sleep(5);
+      await expect(sup.dispatch("t-b", "two")).rejects.toThrow(TurnRejectedError);
+
+      const line = warns.find((w) => w.includes("⊘"));
+      expect(line).toBeDefined();
+      expect(line).toContain("t-b"); // which thread was turned away
+      expect(line).toContain(ws.id); // which workspace
+      expect(line).toContain("workspace limit 1"); // which bound, and its value
+      expect(line).toMatch(/in flight: workspace=1 global=1/); // the live counts
+      // NEVER the turn text — on a shared number that belongs to a tenant.
+      expect(line).not.toContain("two");
+
+      r.releaseAll();
+      await first;
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+
+  // NEGATIVE CONTROL: an ordinary turn must not emit a refusal line, or the
+  // assertion above would pass for code that logs unconditionally.
+  test("a turn that is ADMITTED logs no refusal (BRO-2308)", async () => {
+    const warns: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warns.push(a.join(" "));
+    };
+    try {
+      const sup = new Supervisor({
+        defaultWorkspace: ws,
+        run: fakeRunner("ok"),
+        concurrency: { perWorkspace: 1 },
+      });
+      await sup.dispatch("t-solo", "hello");
+      expect(warns.filter((w) => w.includes("⊘"))).toEqual([]);
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+
+  // The THIRD polarity, and the one a mutation exposed: guarding on the error TYPE
+  // must actually matter. Logging unconditionally would emit "refused (undefined
+  // limit undefined)" for an ordinary crash — a misleading line pointing an
+  // operator at capacity when the real cause was something else entirely.
+  test("a NON-refusal failure logs no refusal line (BRO-2308)", async () => {
+    const warns: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...a: unknown[]) => {
+      warns.push(a.join(" "));
+    };
+    try {
+      const sup = new Supervisor({
+        defaultWorkspace: ws,
+        concurrency: { perWorkspace: 1 },
+        run: async () => {
+          throw new Error("boom");
+        },
+      });
+      await expect(sup.dispatch("t-crash", "hello")).rejects.toThrow("boom");
+      expect(warns.filter((w) => w.includes("⊘"))).toEqual([]);
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+
   test("turn bounds are forwarded to the runner (BRO-2260)", async () => {
     let seen: { idleTimeoutMs?: number; maxTurnMs?: number } = {};
     const sup = new Supervisor({

@@ -193,6 +193,28 @@ describe("dispatchFailureMessage — tenant-visible, and must leak nothing", () 
 import { TurnRejectedError } from "../../../packages/core/src/concurrency";
 import { TurnReapedError } from "../../../packages/runner/src/watchdog";
 
+/** EVERY DispatchFailure member. The first version named four of eight, so the
+ *  "all kinds" assertions silently skipped half — including the two the same PR
+ *  had just added.
+ *
+ *  KEYED BY THE UNION, not `satisfies readonly DispatchFailure[]` (P20 round 2):
+ *  that only checks the listed values ARE members; it does not require every
+ *  member to be listed, so the exact gap it was meant to close stayed open. A
+ *  `Record<DispatchFailure, true>` makes the compiler demand one key per member,
+ *  so adding a union member without listing it here fails typecheck. */
+const ALL_KINDS = Object.keys({
+  "backend-unreachable": true,
+  "backend-error": true,
+  unauthorized: true,
+  timeout: true,
+  "capacity-own": true,
+  "capacity-server": true,
+  "turn-timeout-idle": true,
+  "turn-timeout-total": true,
+  "agent-error": true,
+  unknown: true,
+} satisfies Record<DispatchFailure, true>) as DispatchFailure[];
+
 /** Wrap as the stream does: a dispatch error arrives agent-reported. */
 class AgentReportedLike extends Error {
   // The duck-typed flag the classifier actually checks (see `isAgentReported`).
@@ -226,27 +248,94 @@ describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => 
     expect(server).not.toMatch(/previous message/i);
   });
 
-  // The reap message used to promise "Nothing was saved". That was false — the
-  // user turn is persisted and the agent's file/command side effects survive the
-  // kill — and acting on it would make a resend duplicate real mutations.
-  test("the timeout message does not promise a clean slate", () => {
-    const m = dispatchFailureMessage("turn-timeout");
+  // The TOTAL reap message used to promise "Nothing was saved". That was false —
+  // the user turn is persisted and the agent's file/command side effects survive
+  // the kill — and acting on it would make a resend duplicate real mutations.
+  test("the total-timeout message does not promise a clean slate", () => {
+    const m = dispatchFailureMessage("turn-timeout-total");
     expect(m).not.toMatch(/nothing was saved/i);
     expect(m).toMatch(/part-way|already be done/i);
   });
 
-  test("both reap reasons classify as turn-timeout", () => {
+  // BRO-2307. The two clocks mean different things, so they must say different
+  // things — the same defect shape P20 round 2 found in `capacity`, one layer over.
+  test("the two reap clocks classify separately", () => {
+    const idle = new TurnReapedError("idle", 900_000, 900_000);
+    const total = new TurnReapedError("total", 1_800_000, 1_800_000);
+    expect(classifyDispatchFailure(new AgentReportedLike(idle.message))).toBe("turn-timeout-idle");
+    expect(classifyDispatchFailure(new AgentReportedLike(total.message))).toBe(
+      "turn-timeout-total",
+    );
+  });
+
+  test("an idle reap does not claim the turn was too big", () => {
+    const m = dispatchFailureMessage("turn-timeout-idle");
+    // It stalled; size was never the issue, and telling the user to shrink the
+    // task points them away from the actual cause.
+    expect(m).not.toMatch(/took too long|smaller/i);
+    expect(m).not.toBe(dispatchFailureMessage("turn-timeout-total"));
+  });
+
+  // P20 caught the over-correction: dropping "took too long" is right, dropping
+  // the PARTIAL-WORK warning is not. Stdout going quiet does not mean nothing
+  // happened — a turn can mutate files then stall, so a bare "send it again"
+  // invites a duplicate mutation. BOTH clocks must keep the warning.
+  test("BOTH reap messages warn that work may already be done", () => {
+    for (const kind of ["turn-timeout-idle", "turn-timeout-total"] as const) {
+      expect(dispatchFailureMessage(kind)).toMatch(/may already be done/i);
+    }
+  });
+
+  // EXHAUSTIVE ROUTING SWEEP. The classifier anchors on message prefixes, so any
+  // reword in @genesis/runner can silently drop a reap into `agent-error` — a
+  // regression with no failing assertion anywhere unless something walks the
+  // whole input space. Every plausible bound, including the degenerate ones that
+  // change the sentence shape, through the REAL error into the REAL classifier.
+  test("every reap message routes to its own class, at every bound", () => {
+    const bounds = [
+      0,
+      -1,
+      1,
+      999,
+      1_000,
+      20_000,
+      59_500,
+      60_000,
+      90_000,
+      119_500,
+      900_000,
+      1_800_000,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ];
     for (const reason of ["idle", "total"] as const) {
-      const real = new TurnReapedError(reason, 1_800_000, 1_800_000);
-      expect(classifyDispatchFailure(new AgentReportedLike(real.message))).toBe("turn-timeout");
+      for (const b of bounds) {
+        const msg = new TurnReapedError(reason, 0, b).message;
+        expect(classifyDispatchFailure(new AgentReportedLike(msg))).toBe(
+          reason === "idle" ? "turn-timeout-idle" : "turn-timeout-total",
+        );
+        // ...and the sentence must never be malformed at any bound.
+        expect(msg).not.toMatch(/the the|undefined|NaN|60 seconds/);
+        expect(msg).not.toMatch(/(^|\s)0 (minute|second)/);
+      }
+    }
+  });
+
+  test("no message promises that a retry will succeed", () => {
+    for (const kind of ["turn-timeout-idle", "turn-timeout-total"] as const) {
+      expect(dispatchFailureMessage(kind)).not.toMatch(/usually|will work|should work/i);
     }
   });
 
   test("the messages are actionable and disclose nothing about the box", () => {
-    for (const kind of ["capacity-own", "capacity-server", "turn-timeout"] as const) {
+    for (const kind of ALL_KINDS) {
       const m = dispatchFailureMessage(kind);
       expect(m.length).toBeGreaterThan(20);
-      expect(m).toMatch(/again|smaller/i);
+      // "Actionable" is not always "try again". `unauthorized` deliberately says
+      // retrying will NOT help and names an operator — asserting /again/ over the
+      // full set caught that the old four-member list had never exercised it.
+      // Every message must tell the reader what to do next, whichever that is.
+      expect(m).toMatch(/again|smaller|operator|check|wait/i);
       // No paths, hosts, workspace ids or counts — a shared number is read by
       // people who are not the operator.
       expect(m).not.toMatch(/\/home|ws-|localhost|127\.0\.0\.1|genesis-/);

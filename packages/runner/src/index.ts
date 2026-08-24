@@ -14,7 +14,13 @@ import {
 import { resolveClaudeBinary } from "@genesis/session-host";
 import { TurnReapedError, startWatchdog } from "./watchdog";
 
-export { TurnReapedError, startWatchdog, type ReapReason, type Watchdog } from "./watchdog";
+export {
+  TurnReapedError,
+  formatDuration,
+  startWatchdog,
+  type ReapReason,
+  type Watchdog,
+} from "./watchdog";
 
 /** Reasoning-effort levels across engines (BRO-1573/1623). The union spans both
  *  providers; the per-provider arrays below gate which reach which engine —
