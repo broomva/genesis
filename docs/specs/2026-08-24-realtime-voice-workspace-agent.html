@@ -3,7 +3,7 @@
 meta:
   slug: realtime-voice-workspace-agent
   ticket: (new epic — file as BRO-XXXX) · relates BRO-2228 (voice channel), BRO-2284 (voice delivery), BRO-1620 (engines), BRO-1567/1627 (threads/workspace)
-  status: design — revision 2 (post Strata A round 1: FAIL 2/10)
+  status: design — revision 3 (post Strata A rounds 1-2: FAIL 2/10 → FAIL 3/10)
   date: 2026-08-24
   decisions:
     - architecture = OPTION C — realtime voice front, Genesis as an async dispatch, narration via contextual updates
@@ -14,6 +14,12 @@ meta:
     - r2 — the event channel is now PHASE 1 and the bulk of the work; narration is downstream of it
     - r2 — exactly THREE events take a turn (result, permission, awaiting); everything else is non-interrupting
     - r2 — Phase 0 measures the PROTOCOL, not the microphone; iOS routing is one measurement inside it
+    - r3 — push-to-talk gates the MIC; the vendor session is held for an active run + idle timer (r2's teardown killed narration)
+    - r3 — terminal delivery names sendUserMessage; failure = "ready, not spoken" on screen, never silence
+    - r3 — seq is an ORDERING rule; nothing can retract an in-flight utterance, and the residual is stated
+    - r3 — EventLog is ADDITIVE; Hub's turn schema is re-published by an adapter until the PWA moves
+    - r3 — runId is client-generated (an idempotency key must precede its request); one active run per thread
+    - r3 — Phase 0 gains a decision table: measurement (4) failing means Option C fails, fallback is Option A
   research:
     - developers.openai.com/api/docs/guides/realtime-function-calling — no documented tool-response timeout; concurrency during a pending call unspecified
     - elevenlabs.io/docs/agents-platform/libraries/react — WebRTC for voice; sendContextualUpdate / sendUserMessage / clientTools
@@ -29,6 +35,8 @@ meta:
     - strata-A r1 (codex-cli 0.149.1) — FAIL 2/10 · 5 blockers, 13 major, 5 minor
     - r1 blockers upheld: no event transport at narration granularity; final answer has no way to be spoken;
       no permission round-trip; threadId authorization unstated; client-tool turn behaviour is an inference
+    - strata-A r2 — FAIL 3/10 · 6 fixed, 6 partial, 4 not fixed, 0 new defects; 4 blockers were defects
+      INTRODUCED by revision 2's own fixes (see the review ledger)
 -->
 <html lang="en">
 <head>
@@ -76,12 +84,12 @@ meta:
 
 <body><div class="wrap">
 
-<div class="kick">Genesis · design spec · revision 2</div>
+<div class="kick">Genesis · design spec · revision 3</div>
 <h1>Realtime voice, wired to the workspace session</h1>
 <p class="sub">A voice you can interrupt, that dispatches real work into your Genesis session and narrates it while it runs — without pretending the voice model is the agent doing the work.</p>
 
 <div class="card warn">
-<p><strong>Revision 2.</strong> Revision 1 was reviewed adversarially by a second model and failed at <strong>2/10</strong> with five blockers. Four of them were correct, and one was <em>understated</em>: the spec built its entire narration design on an event stream that does not reach the browser at all. This revision does not defend the original — it moves the missing subsystem to the front of the plan and marks every vendor behaviour that is still an assumption. The review ledger is at the foot of this document.</p>
+<p><strong>Revision 3.</strong> Two rounds of cross-model adversarial review, <strong>2/10</strong> then <strong>3/10</strong>. Round 1 found that the spec built its narration design on an event stream that does not reach the browser at all — true, and worse than the reviewer could see. Round 2 found that four of revision 2's own fixes were contradictions in their own right: a cost control that killed the channel it was funding, a requirement whose mechanism had been deleted while fixing something else, a sequence number promoted to a "correctness" it cannot deliver, and a subsystem that would have broken the text UI to ship a voice feature. This revision fixes those. The review ledger, with every disposition, is at the foot of the document.</p>
 </div>
 
 <h2>The problem this exists to solve</h2>
@@ -99,7 +107,7 @@ meta:
 <h2>The channel does not exist yet</h2>
 <div class="card warn">
 <p>Revision 1 claimed this was "buildable here specifically" because <code>packages/session-host/src/ir.ts</code> defines a typed event stream — <code>tool.use</code>, <code>tool.result</code>, <code>permission.request</code>, <code>awaiting</code>, <code>turn.complete</code>. Those types are real. What is <em>not</em> real is any path that carries them to a browser.</p>
-<p>Here is everything a subscriber can receive today, verified in-tree:</p>
+<p>Here is what a subscriber can receive today. This is the output of <code>grep -rn "hub.publish" --include="*.ts" apps packages</code> at <code>8cc05ff</code> — a static sweep, so it establishes that no <em>lexical</em> call site publishes anything richer, not that none could exist behind an indirection:</p>
 <pre>// apps/api/src/server.ts — the ONLY three hub.publish call sites
 :638   hub.publish(threadId, { kind: "turn", role: "user",  text })
 :640   hub.publish(threadId, { ... })
@@ -180,7 +188,7 @@ meta:
   <line x1="150" y1="344" x2="150" y2="384" stroke="#6b7a93" stroke-width="2" marker-end="url(#ar)"/>
   <line x1="330" y1="384" x2="330" y2="344" stroke="#31c48d" stroke-width="2" marker-end="url(#arg)"/>
 </svg>
-<p class="note">Two things changed shape from revision 1. The event channel is now a named subsystem with a sequence number, a replay cursor and an auth gate — not an arrow. And events land in the <strong>browser</strong>, not at the vendor: narration is a client-side projection, so the policy is unit-testable without a microphone and no raw engine output is shipped to a third party without passing through it.</p>
+<p class="note">Two things changed shape from revision 1. The event channel is now a named subsystem with a sequence number, a replay cursor and an auth gate — not an arrow. And events land in the <strong>browser</strong>, not at the vendor: narration is a client-side projection, so the policy is unit-testable without a microphone and every payload passes through code we own before it is sent. That buys inspection and redaction <em>before</em> the send — it is not a privacy boundary, and the section below says so.</p>
 </div>
 
 <h2>The load-bearing assumption — and it is still an assumption</h2>
@@ -194,7 +202,28 @@ meta:
 <tr><td>A contextual update delivered mid-generation reaches the current utterance</td><td><span class="pill p-risk">unverified</span> — measured in phase 0</td></tr>
 <tr><td>A superseded update cannot influence audio already generated</td><td><span class="pill p-no">false</span> — supersede is forward-only by construction</td></tr>
 </table>
-<p>The last row matters more than it looks. <code>is_superseded</code> can only affect what the model reads <em>next</em>; it cannot retract a stale progress note that has already shaped an in-flight sentence. So the design must not rely on supersede for correctness — only for volume. Correctness comes from the sequence number: <strong>the projection drops any event whose <code>seq</code> is lower than the highest already narrated for that <code>runId</code></strong>, and refuses every progress event after that run's terminal event. That is a client-side rule we own and can test, rather than a vendor guarantee we hope for.</p>
+<p>The last row matters more than it looks, and revision 2 drew the wrong conclusion from it. <code>is_superseded</code> can only affect what the model reads <em>next</em>; it cannot retract a stale progress note that has already shaped an in-flight sentence. Revision 2 responded by claiming "correctness comes from the sequence number" — but a sequence number cannot unspeak audio either. <strong>Nothing available to this design can retract an utterance already being generated.</strong></p>
+<p>So the seq rule is an <em>ordering and suppression</em> rule, not a correctness one:</p>
+<ul>
+<li>The projection drops any event whose <code>seq</code> is not greater than the highest already narrated for that <code>runId</code> — strictly greater, so a replayed boundary event is not spoken twice.</li>
+<li>After a run's terminal event, every further progress event for that <code>runId</code> is dropped unconditionally.</li>
+<li>The high-water mark is persisted per <code>runId</code> in <code>sessionStorage</code>, so a page reload does not re-narrate a replayed window.</li>
+</ul>
+<p>What that buys is a bounded staleness, stated plainly: <strong>at most one utterance may be in flight when a later event supersedes it.</strong> A progress note can therefore still finish playing after the result has arrived. The design does not pretend otherwise; the screen carries the authoritative state, and the dock marks the run complete the moment the terminal event lands regardless of what is still being spoken.</p>
+</div>
+
+<h2>Session lifetime — the channel must outlive the button</h2>
+<div class="card warn">
+<p>Revision 2 added "releasing the button must end the session, not just mute it" as a cost control and thereby destroyed the feature. The entire point is that you speak, the work runs for minutes, and the result comes back — so a session that dies on button release has nothing left to speak with by the time the answer arrives.</p>
+<table>
+<tr><th>State</th><th>Mic</th><th>ElevenLabs session</th></tr>
+<tr><td>Idle, dock open</td><td>closed</td><td>closed — nothing bills</td></tr>
+<tr><td>Push-to-talk held</td><td>open</td><td>open</td></tr>
+<tr><td>Released, no run active</td><td>closed</td><td>open, 90-second idle timer</td></tr>
+<tr><td>Released, run active</td><td>closed</td><td><strong>held open for the run</strong> + 90s</td></tr>
+<tr><td>Run exceeds the session cap (10 min)</td><td>closed</td><td>closed — result lands on screen, dock shows <em>ready, not spoken</em></td></tr>
+</table>
+<p>Push-to-talk gates the <em>microphone</em>, which is what the user is anxious about; the session is what narration needs, and it closes on a timer. Cost is bounded by the cap, and the case where the cap bites is a specified degradation with a visible affordance rather than an unexplained silence.</p>
 </div>
 
 <h2>Narration policy — three things take a turn, everything else informs</h2>
@@ -205,12 +234,17 @@ meta:
 <tr><td><code>tool.use</code></td><td>"reading handler.ts", "running the tests"</td><td>contextual update · <code>progress</code></td></tr>
 <tr><td><code>tool.result</code> <em>isError</em></td><td>"the tests failed — three in whatsapp-format"</td><td>contextual update · <code>progress</code></td></tr>
 <tr><td><code>thinking</code></td><td>— dropped, but see below —</td><td>none</td></tr>
-<tr><td><code>turn.complete</code></td><td><strong>the answer</strong></td><td><span class="pill p-yes">takes a turn</span></td></tr>
-<tr><td><code>error</code></td><td>"it failed: &lt;message&gt;"</td><td><span class="pill p-yes">takes a turn</span></td></tr>
-<tr><td><code>permission.request</code> · <code>awaiting</code></td><td>"it's waiting on you"</td><td><span class="pill p-risk">out of scope — see non-goals</span></td></tr>
+<tr><td><code>turn.complete</code></td><td><strong>the answer</strong></td><td><span class="pill p-yes">turn</span> · <code>sendUserMessage</code></td></tr>
+<tr><td><code>error</code></td><td>"it failed: &lt;message&gt;"</td><td><span class="pill p-yes">turn</span> · <code>sendUserMessage</code></td></tr>
+<tr><td>heartbeat <span class="note">(synthetic)</span></td><td>"still working, about ninety seconds in"</td><td>contextual update · <code>progress</code></td></tr>
 </table>
-<p><strong>Dropping <code>thinking</code> is not the same as saying nothing.</strong> Revision 1 dropped it to avoid sounding like it was stalling, and thereby created the silence it was trying to avoid: a worker can reason for minutes before its first tool call. The projection therefore emits a <em>heartbeat</em> — a single "still working, about ninety seconds in" derived from elapsed time and event count, never from the content of the reasoning. Volume is capped by construction rather than by dropping the only signal that work is alive.</p>
-<p><strong>Length has a number, not an adjective.</strong> The result event carries the assistant's final text. If it is under 600 characters the agent is instructed to deliver it; above that it says what happened and points at the screen. Reading a diff aloud is useless, and "use judgement" is not a policy a test can hold.</p>
+<p><strong>"Takes a turn" now names an operation.</strong> Revision 2 stated the requirement and deleted the mechanism. The mechanism is <code>sendUserMessage</code> — the SDK primitive that injects a turn and therefore causes speech. Two things follow. Its exact name and behaviour are a <em>phase 0 measurement</em>, not a settled fact, because a design that cannot make the agent speak on demand has no terminal delivery at all. And delivery can fail: if the session is gone or the call errors, the result is already on screen and the dock marks it <em>ready, not spoken</em> — a visible, recoverable state rather than silence the user must guess about.</p>
+<p><strong>Dropping <code>thinking</code> is not the same as saying nothing.</strong> Revision 1 dropped it to avoid sounding like it was stalling, and thereby created the silence it was trying to avoid: a worker can reason for minutes before its first tool call. The dock therefore runs a timer — not the pure projection, which only ever sees events — and synthesises a heartbeat event after 45 seconds of silence on an active run, then every 60 seconds, capped at four. The text is derived from elapsed time and the count of events seen, never from the content of the reasoning. It is delivered as a contextual update, so it informs without interrupting, and it stops the instant a real event or the terminal event arrives.</p>
+<p><strong>Length and safety are two rules, not one.</strong> Revision 2 collapsed them into a single 600-character threshold, which made length decide whether a hostile or secret-bearing string got spoken. They are now independent:</p>
+<ul>
+<li><em>Safety, applied first.</em> The result text goes through the same redaction and delimiting as every other payload, and is always handed over as a delimited quotation, never interpolated into the instruction region. A payload that trips a redaction pattern is not spoken at all — the agent says the answer is on screen.</li>
+<li><em>Length, applied second.</em> Under 600 characters the agent delivers the quoted text; above it, it says what happened and points at the screen. Reading a diff aloud is useless, and "use judgement" is not a policy a test can hold.</li>
+</ul>
 </div>
 
 <h2>Everything on this channel is untrusted text</h2>
@@ -219,7 +253,7 @@ meta:
 <ul>
 <li>Payloads are <strong>truncated and delimited</strong>, never interpolated into the instruction region of an update.</li>
 <li>The web agent's prompt is written to treat all event payloads as data to be reported, never as instructions — and that instruction's effectiveness is a <em>measurement in phase 0</em>, not an assumption.</li>
-<li>Everything on the channel is shipped to a third-party vendor. A redaction pass (tokens, absolute home paths, <code>.env</code> contents) is part of the projection, not a later hardening step.</li>
+<li>Everything the projection forwards is shipped to a third-party vendor. A redaction pass (known token shapes, absolute home paths, <code>.env</code> contents) runs in the projection rather than as a later hardening step — but it is <strong>pattern-based and therefore incomplete</strong>. A secret with no recognisable shape, pasted into a file and echoed by a tool, will pass through it. The design reduces exposure; it does not eliminate it, and a workspace holding material that must never reach a vendor should not have voice enabled.</li>
 <li>The <code>voice-agent-config.test.ts</code> pattern extends to the web agent: CI fails when the prompt starts promising capabilities the system does not have.</li>
 </ul>
 <p class="note">This does not make the voice model trustworthy. It makes the blast radius bounded and the failure legible: the screen always holds the authoritative record, and the spoken layer is explicitly a narration of it.</p>
@@ -230,15 +264,25 @@ meta:
 
 <div class="phase"><div class="pnum">0</div><div>
 <strong>Protocol spike — the real go / no-go.</strong> One day, throwaway, against the live ElevenLabs agent. Measures, in order of how badly a wrong answer hurts: (1) does returning a client-tool result produce a spoken turn? (2) does a contextual update delivered mid-generation reach the current utterance or only the next? (3) under a burst of ten updates on one <code>contextId</code>, what does the model actually see? (4) can a contextual update alone ever cause speech, or is a turn always required for the result? (5) does the prompt-level "treat payloads as data" instruction hold against a hostile string? Then — and only then — (6) iOS <code>getUserMedia</code> in the installed PWA and whether capture forces speaker output.
-<p class="note">Revision 1 made (6) the whole gate. A no-go there changes an affordance — push-to-talk, headphones, a text fallback. A no-go on (1)–(4) changes the architecture. The spike must fail in the order that matters.</p>
+<p class="note">Revision 1 made (6) the whole gate. A no-go there changes an affordance — push-to-talk, headphones, a text fallback. A no-go on (1)–(4) changes the architecture. The spike must fail in the order that matters — and "changes the architecture" is not a decision, so each answer has a consequence written down before the measurement is taken:</p>
+<table>
+<tr><th>If the measurement says…</th><th>…then</th></tr>
+<tr><td>(1) returning a client-tool result <em>does</em> force a spoken turn</td><td>Survivable: the tool returns a one-clause acknowledgement worth speaking ("on it — dispatched to genesis"). Only if the forced turn cannot be kept short does Option C fail.</td></tr>
+<tr><td>(2) a contextual update reaches only the <em>next</em> turn</td><td>Progress narration is dead as designed. Fall back to short turns via <code>sendUserMessage</code> at a fixed cadence — noisier, still useful. Re-score before building.</td></tr>
+<tr><td>(3) a burst on one <code>contextId</code> is not deduplicated as documented</td><td>The dock rate-limits to one update per 5s and coalesces itself. Cheap; no architectural change.</td></tr>
+<tr><td>(4) <code>sendUserMessage</code> cannot reliably cause speech</td><td><strong>Option C fails.</strong> There is no terminal delivery, and the honest fallback is Option A — voice as an I/O skin, with the answer read on completion.</td></tr>
+<tr><td>(5) the "payloads are data" instruction does not hold against a hostile string</td><td>Result text is never spoken verbatim; the agent reports type and length and points at the screen. Degrades the feature, does not kill it.</td></tr>
+<tr><td>(6) iOS forces speaker output</td><td>Affordance change only: headphone guidance, or desktop-first launch. Not a gate.</td></tr>
+</table>
 </div></div>
 
 <div class="phase"><div class="pnum">1</div><div>
-<strong>The event channel.</strong> The bulk of the work and the part with value independent of voice. Emit IR-granular events from the print engine into a per-thread <code>EventLog</code> that assigns a monotonic <code>seq</code> and a <code>runId</code>, retains a bounded window in memory, and serves <code>GET /threads/:id/events?since=&lt;seq&gt;</code> so a reconnecting subscriber resumes rather than restarts. Replaces <code>Hub</code>, whose own comment has been asking for this since it was written. Gate it: the BFF route authenticates <em>and</em> checks thread ownership, and the engine's <code>/ws</code> stops accepting an unauthenticated caller-supplied thread id.
+<strong>The event channel.</strong> The bulk of the work and the part with value independent of voice. Emit IR-granular events from the print engine into a per-thread <code>EventLog</code> that stamps every event with a monotonic <code>seq</code> and with the <code>runId</code> the dispatch carried, retains a bounded window in memory, and serves <code>GET /threads/:id/events?since=&lt;seq&gt;</code> so a reconnecting subscriber resumes rather than restarts. <strong>Additive, not a swap.</strong> The PWA's live chat feed consumes <code>Hub</code>'s <code>{kind:"turn"}</code> schema today; replacing it outright would break the text UI to ship a voice feature. So <code>EventLog</code> is new, and <code>Hub</code>'s three existing messages are re-published from it by an adapter that keeps the old shape byte-identical. <code>Hub</code> retires only after the PWA moves to the new stream, in its own change. Gate the new surface: the BFF route authenticates <em>and</em> checks thread ownership, and the engine's <code>/ws</code> stops accepting an unauthenticated caller-supplied thread id.
+<p class="note"><strong>Replay has a shape, not just a query.</strong> <code>?since=&lt;seq&gt;</code> is <em>exclusive</em>. The window is bounded at 500 events or 30 minutes per thread, whichever is smaller. A cursor older than the window returns <code>{ gap: true, from: &lt;oldest&gt; }</code> rather than a silent partial history, and the dock narrates a gap as "I lost track of the details — here's where it is now" after reading current run state. Catch-up and live-tail are one operation, not two: the subscription is opened first and buffered, the backfill is served into it, and only then is the buffer drained — so an event emitted between the two cannot fall down the crack.</p>
 </div></div>
 
 <div class="phase"><div class="pnum">2</div><div>
-<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId }</code>, authorizes the principal <em>against that thread</em>, forwards, returns immediately. The client-supplied <code>runId</code> is the idempotency key — a retried dispatch after a lost response must not run the work twice, and it is what lets the projection tie an event stream back to the utterance that caused it.
+<strong><code>POST /api/voice/dispatch</code>.</strong> Sibling of <code>/api/chat</code>. Accepts <code>{ threadId, text, runId }</code>, authorizes the principal <em>against that thread</em>, forwards, returns immediately. The <code>runId</code> is generated by the client, because an idempotency key must exist before the request it protects. The server records it on first sight and returns the original outcome for any repeat, so a retry after a lost response cannot run the work twice; it is also what ties an event stream back to the utterance that caused it. <strong>One active run per thread</strong>: a dispatch arriving while a run is in flight is rejected with a distinct code, and the agent says so rather than starting a second worker in the same worktree.
 </div></div>
 
 <div class="phase"><div class="pnum">3</div><div>
@@ -266,7 +310,7 @@ meta:
 <tr><td>The voice agent claims work it did not do</td><td>A confident wrong summary reads as the workspace agent's word</td><td>Bounded; not eliminated. The screen is authoritative; phase 5 diffs speech against the event log</td></tr>
 <tr><td>Voice-only turns exist only at the vendor</td><td>Context the user gave by voice is missing when the thread resumes</td><td>Every voice utterance is mirrored into the thread transcript, dispatching or not</td></tr>
 <tr><td>iOS forces speaker output on <code>getUserMedia</code></td><td>May be unusable in the intended context</td><td>Phase 0 measurement (6); degrades to push-to-talk or headphones</td></tr>
-<tr><td>Cost per minute of open mic</td><td>An always-listening session bills continuously</td><td>Push-to-talk <em>and</em> an idle-disconnect — releasing the button must end the session, not just mute it</td></tr>
+<tr><td>Cost per minute of open mic</td><td>An always-listening session bills continuously</td><td>Push-to-talk gates the <em>microphone</em>; the session ends on an idle timer, never on button release — see session lifetime</td></tr>
 </table>
 </div>
 
@@ -298,8 +342,10 @@ meta:
 <table>
 <tr><th>Round</th><th>Strata</th><th>Verdict</th><th>Disposition</th></tr>
 <tr><td>1</td><td>A — codex-cli 0.149.1 (cross-vendor)</td><td><span class="pill p-no">FAIL 2/10</span></td><td>5 blockers · 13 major · 5 minor</td></tr>
+<tr><td>2</td><td>A — same, dispositions verified</td><td><span class="pill p-no">FAIL 3/10</span></td><td>6 fixed · 6 partial · 4 not fixed · 0 new defects</td></tr>
 </table>
-<p class="note"><strong>Blockers upheld and fixed:</strong> no event transport at narration granularity (understated by the reviewer — the events reach no subscriber at all); the final answer had no mechanism to be spoken; permission resolution had no other half; thread authorization was asserted by reference to a function that does not do it; the client-tool turn behaviour was an inference presented as settled. <strong>Findings rejected:</strong> none — every blocker survived checking against the tree. <strong>Reviewer error corrected:</strong> the claim that no transport exists at all; <code>Hub</code> plus <code>GET /ws</code> exist, but carry turn-granular messages with no cursor and no gate, which is why the conclusion held anyway.</p>
+<p class="note"><strong>Round 1 — blockers upheld and fixed:</strong> no event transport at narration granularity (understated by the reviewer — the events reach no subscriber at all); the final answer had no mechanism to be spoken; permission resolution had no other half; thread authorization was asserted by reference to a function that does not do it; the client-tool turn behaviour was an inference presented as settled. None rejected. <strong>Reviewer error corrected:</strong> the claim that no transport exists at all — <code>Hub</code> plus <code>GET /ws</code> exist but carry turn-granular messages with no cursor and no gate, which is why the conclusion held anyway.</p>
+<p class="note"><strong>Round 2 — what it caught that round 1 could not.</strong> Four defects were <em>introduced by revision 2's own fixes</em>, and that is the finding worth recording: <em>(i)</em> a push-to-talk cost control that ended the session narration needed; <em>(ii)</em> "takes a turn" kept as a requirement after its mechanism was deleted; <em>(iii)</em> the seq rule promoted to "correctness" when it cannot retract an in-flight utterance any better than supersede can; <em>(iv)</em> "replaces <code>Hub</code>" ignoring that the text UI consumes it. Also upheld: length and safety collapsed into one threshold; a privacy claim the browser boundary does not deliver; a <code>runId</code> assigned in two places; an in-tree claim stated more strongly than the grep that produced it. <strong>Reframed rather than accepted:</strong> the reviewer's merge condition was an end-to-end prototype passing adversarial tests. That is a request for the artifact this document exists to authorise, not a defect in it — which is why phase 0 now carries a decision table binding each measurement to a named consequence, including the one that fails Option C outright.</p>
 </div>
 
 <div class="foot">Genesis · Realtime voice workspace agent · design · revision 2 · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Source facts verified in-tree at <code>8cc05ff</code>; vendor behaviours marked unverified are measured in phase 0, not assumed.</div>
