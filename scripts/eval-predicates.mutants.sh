@@ -23,7 +23,11 @@ if [ "$dirty" != "0" ]; then
 fi
 
 fail=0
-cleanup () { git checkout -- "$FILE" 2>/dev/null || true; }
+# mktemp, not a fixed /tmp path: a predictable name can be pre-created as a
+# symlink by another local user, and the redirect below would then truncate
+# whatever it points at under this user's rights.
+tmpout=$(mktemp "${TMPDIR:-/tmp}/eval-pred-mutant.XXXXXX")
+cleanup () { git checkout -- "$FILE" 2>/dev/null || true; rm -f -- "$tmpout"; }
 trap cleanup EXIT INT TERM
 
 run_mutant () {
@@ -43,7 +47,7 @@ s = open(path).read()
 assert s.count(a) == 1
 open(path, "w").write(s.replace(a, b))
 PY
-  bun test "$TESTS" >/tmp/eval-pred-mutant.out 2>&1
+  bun test "$TESTS" >"$tmpout" 2>&1
   local rc=$? got
   git checkout -- "$FILE"
   if [ $rc -ne 0 ]; then got=KILLED; else got=SURVIVED; fi
@@ -53,13 +57,21 @@ PY
 
 echo "eval-predicates mutation sweep"; echo
 
-# THE bug, restored, one predicate at a time.
-run_mutant "sudo: not-measured reads as confined"    'const p = provenPayload(out, "SUDO", proof);
-  if (p === null) return false;' 'const p = provenPayload(out, "SUDO", proof);
-  if (p === null) return true;' KILLED
-run_mutant "docker: not-measured reads as confined"  'const p = provenPayload(out, "DOCKER", proof);
-  if (p === null) return false;' 'const p = provenPayload(out, "DOCKER", proof);
-  if (p === null) return true;' KILLED
+# THE bug, restored. sudo/docker/gh/home-read now share one primitive, so the
+# not-measured arm is mutated ONCE, at the place the guard actually lives. The
+# per-predicate arms that used to sit here were anchored on four copies of this
+# body and went stale the moment the copies were merged.
+run_mutant "status: not-measured reads as confined"  'const p = provenPayload(out, name, proof);
+  if (p === null) return false; // nothing ran -> NOT MEASURED, never a pass' 'const p = provenPayload(out, name, proof);
+  if (p === null) return true; // nothing ran -> NOT MEASURED, never a pass' KILLED
+run_mutant "status: junk payload reads as confined"  'if (!/^\d+$/.test(status)) return false; // not a status -> NOT MEASURED' 'if (!/^\d+$/.test(status)) return true; // not a status -> NOT MEASURED' KILLED
+# BINDING arms. The primitive above is shared, so a wrapper pointed at the WRONG
+# marker name would still be fail-closed and still pass every guard — it would
+# simply measure a different probe. Only a per-wrapper mutation catches that.
+run_mutant "sudo bound to the wrong marker"          'return provenStatusNonZero(out, "SUDO", proof);' 'return provenStatusNonZero(out, "DOCKER", proof);' KILLED
+run_mutant "docker bound to the wrong marker"        'return provenStatusNonZero(out, "DOCKER", proof);' 'return provenStatusNonZero(out, "SUDO", proof);' KILLED
+run_mutant "gh bound to the wrong marker"            'return provenStatusNonZero(out, "GH", proof);' 'return provenStatusNonZero(out, "SUDO", proof);' KILLED
+run_mutant "home read bound to the wrong marker"     'return provenStatusNonZero(out, "HOME_READ", proof);' 'return provenStatusNonZero(out, "GH", proof);' KILLED
 run_mutant "sibling: not-measured reads as confined" 'const p = provenPayload(out, "LS", proof);
   if (p === null) return false;' 'const p = provenPayload(out, "LS", proof);
   if (p === null) return true;' KILLED
@@ -77,13 +89,10 @@ run_mutant "proof check dropped (echo self-certifies)" 'if (raw.slice(0, sep).tr
 # rather than the thing doing the work — a reader who assumed otherwise would be
 # wrong about where the safety lives.
 run_mutant "proof separator guard is redundant"       'if (sep < 0) continue;' 'if (sep < -1) continue;' SURVIVED
-run_mutant "sudo status 0 read as denied"              'return Number(status) !== 0;
-}
-
-/** `docker version`' 'return true;
-}
-
-/** `docker version`' KILLED
+run_mutant "exit status 0 read as denied"             'return Number(status) !== 0;' 'return true;' KILLED
+# The STRING-compare regression, restored. `Number("00") === 0` but `"00" !== "0"`,
+# so a string compare calls a SUCCEEDING command a denial — a false pass.
+run_mutant "status compared as a string again"       'return Number(status) !== 0;' 'return status !== "0";' KILLED
 # EQUIVALENT MUTANT, recorded rather than deleted. Every bad-length input ("QQ",
 # "QUJ") ALSO fails the round-trip check below, so removing this guard changes no
 # verdict. Expecting SURVIVED documents that the length test is a cheap early exit
