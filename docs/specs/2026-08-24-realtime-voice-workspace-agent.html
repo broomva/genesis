@@ -1,0 +1,247 @@
+<!doctype html>
+<!--
+meta:
+  slug: realtime-voice-workspace-agent
+  ticket: (new epic — file as BRO-XXXX) · relates BRO-2228 (voice channel), BRO-2284 (voice delivery), BRO-1620 (engines), BRO-1567/1627 (threads/workspace)
+  status: design
+  date: 2026-08-24
+  decisions:
+    - architecture = OPTION C — realtime voice front, Genesis as an async dispatch, narration via contextual updates
+    - vendor = ElevenLabs Agents (already provisioned + config-as-code), NOT OpenAI Realtime, NOT AI SDK 7 beta
+    - the voice tool RETURNS IMMEDIATELY; progress arrives as sendContextualUpdate, never as a held-open tool call
+    - a SECOND agent (web), distinct from the phone agent — different trust model, different prompt
+    - identity binding = same threadId as the PWA chat, so voice and text share one session/worktree/--resume
+  research:
+    - developers.openai.com/api/docs/guides/realtime-function-calling — no documented tool-response timeout; concurrency during a pending call unspecified
+    - elevenlabs.io/docs/agents-platform/libraries/react — WebRTC for voice; sendContextualUpdate / sendUserMessage / clientTools
+    - elevenlabs changelog 2026-05 — contextId + is_superseded on contextual updates (supersede-not-accumulate)
+    - iOS PWA getUserMedia works in standalone; forces audio output to speaker; Safari permission persistence is weak
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Genesis — Realtime Voice Workspace Agent (design)</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#182031; --line:#243043; --line2:#2f3d55;
+    --ink:#e6edf7; --muted:#93a1b8; --dim:#6b7a93;
+    --blue:#4c8dff; --green:#31c48d; --amber:#f6b73c; --violet:#a78bfa; --red:#f2705a;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 72px}
+  .kick{color:var(--blue);font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  h1{font-size:32px;line-height:1.2;margin:12px 0 8px;letter-spacing:-.02em}
+  h2{font-size:20px;margin:44px 0 12px;letter-spacing:-.01em}
+  h3{font-size:15px;margin:26px 0 8px;color:var(--muted);font-weight:600}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:14px 0}
+  .card.warn{border-color:#5a3a26;background:#1a1410}
+  .card.good{border-color:#22503c;background:#0f1a16}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.07em}
+  code{font-family:var(--mono);font-size:13px;background:var(--panel2);padding:1px 6px;border-radius:5px;color:var(--violet)}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:var(--ink)}
+  .pill{display:inline-block;font:600 11px/1 var(--mono);padding:5px 9px;border-radius:999px;letter-spacing:.06em;text-transform:uppercase}
+  .p-yes{background:#12301f;color:var(--green);border:1px solid #22503c}
+  .p-no{background:#31201c;color:var(--red);border:1px solid #5a2f28}
+  .p-risk{background:#2e2415;color:var(--amber);border:1px solid #5a3a26}
+  .grid{display:grid;gap:14px}
+  @media(min-width:820px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+  .note{color:var(--muted);font-size:13.5px}
+  .phase{display:flex;gap:14px;align-items:flex-start;margin:10px 0}
+  .pnum{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:var(--panel2);border:1px solid var(--line2);color:var(--blue);font:600 12px/26px var(--mono);text-align:center}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0}
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  a{color:var(--blue);text-decoration:none}
+  .kv{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body><div class="wrap">
+
+<div class="kick">Genesis · design spec</div>
+<h1>Realtime voice, wired to the workspace session</h1>
+<p class="sub">A voice you can interrupt, that dispatches real work into your Genesis session and narrates it while it runs — without pretending the voice model is the agent doing the work.</p>
+
+<h2>The problem this exists to solve</h2>
+<div class="card">
+<p>WhatsApp gave us a channel but a poor instrument: turn-based, no interruption, and a reply that arrives whole. The obvious next step — "add speech to the PWA" — splits into three designs that are <em>not</em> interchangeable, because in Genesis <strong>the session is the context</strong>. A session binds a workspace, owns a worktree, and carries <code>agentSessionId</code> for <code>--resume</code> continuity. Anything that does not ride the same <code>threadId</code> is a different agent with a different memory.</p>
+<table>
+<tr><th>Option</th><th>Feels realtime</th><th>Is the workspace agent</th><th>Verdict</th></tr>
+<tr><td><strong>A</strong> — voice as an I/O skin on <code>/api/chat</code></td><td><span class="pill p-no">no</span></td><td><span class="pill p-yes">yes</span></td><td>Context free, but a turn can take minutes of silence</td></tr>
+<tr><td><strong>B</strong> — realtime agent with tool access</td><td><span class="pill p-yes">yes</span></td><td><span class="pill p-no">no</span></td><td>Fast, but you are talking <em>about</em> the session, not to it</td></tr>
+<tr><td><strong>C</strong> — realtime front, async dispatch, narrated</td><td><span class="pill p-yes">yes</span></td><td><span class="pill p-yes">both</span></td><td><strong>This spec.</strong> Two agents, one honest about which is which</td></tr>
+</table>
+<p class="note">C is not a compromise between A and B — it is the recognition that a conversational partner and a long-running worker are <em>different roles</em>, and the interesting engineering is the channel between them.</p>
+</div>
+
+<h2>Why this is buildable here specifically</h2>
+<div class="card good">
+<p>Genesis already emits the exact material narration needs. <code>packages/session-host/src/ir.ts</code> defines a typed event firehose per session:</p>
+<pre>session.lifecycle · message.user · message.assistant · thinking
+tool.use · tool.result · permission.request · permission.resolved
+status · turn.complete · awaiting · error · unknown</pre>
+<p>That is not a log — it is a semantic stream. <code>tool.use</code> carries a name and input ("running the test suite"), <code>permission.request</code> carries a tool name ("it wants to write outside the workspace"), <code>awaiting</code> means the agent is blocked <em>on you</em>. Narration is a projection of this stream into speech, and the projection already has a home: <code>packages/projection/</code> turns these events into UI parts today.</p>
+</div>
+
+<h2>Vendor decision: ElevenLabs Agents</h2>
+<div class="card">
+<table>
+<tr><th></th><th>ElevenLabs Agents</th><th>OpenAI Realtime</th><th>AI SDK 7 realtime</th></tr>
+<tr><td>Transport</td><td>WebRTC (voice), WS (text)</td><td>WebRTC / WS</td><td>Gateway-routed</td></tr>
+<tr><td>Non-interrupting context injection</td><td><span class="pill p-yes">sendContextualUpdate</span></td><td>out-of-band <code>response.create</code></td><td>unverified</td></tr>
+<tr><td>Supersede stale progress</td><td><span class="pill p-yes">contextId + is_superseded</span></td><td>manual</td><td>unverified</td></tr>
+<tr><td>Client-side tools</td><td><span class="pill p-yes">clientTools / hook</span></td><td>yes</td><td>yes</td></tr>
+<tr><td>Already provisioned here</td><td><span class="pill p-yes">already live</span></td><td>no</td><td>no</td></tr>
+<tr><td>SDK cost to adopt</td><td>add a client dep</td><td>add a client dep</td><td><span class="pill p-risk">ai@6 → 7 beta</span></td></tr>
+</table>
+<p>The decisive factor is not raw capability — all three could carry audio. It is that ElevenLabs is <strong>already reviewed infrastructure here</strong>: a provisioned agent, two webhook tools, <code>integrations/elevenlabs/</code> config-as-code, a provisioning script that survived a live 422, and <code>apps/api/src/voice-agent-config.test.ts</code> which fails CI when the prompt starts promising things the system cannot do. A second vendor would duplicate all of it.</p>
+<p class="note"><strong>The one feature that decides the architecture</strong> is <code>sendContextualUpdate</code> with <code>contextId</code>: progress updates that inform the agent <em>without taking a turn</em>, and where a later update <em>supersedes</em> an earlier one instead of accumulating. A minutes-long agent turn emits dozens of events; without supersede semantics the voice model drowns in stale context.</p>
+</div>
+
+<h2>Architecture</h2>
+<div class="card">
+<svg viewBox="0 0 940 520" role="img" aria-label="Realtime voice architecture: the PWA holds a WebRTC session with an ElevenLabs agent; a client tool dispatches to the Genesis BFF which returns immediately; Genesis IR events stream back over the existing SSE channel and are projected into contextual updates that the voice agent narrates." style="width:100%;height:auto;display:block">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#4c8dff"/>
+    </marker>
+    <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#31c48d"/>
+    </marker>
+  </defs>
+  <style>
+    .bx{fill:#182031;stroke:#2f3d55;rx:10}
+    .bx2{fill:#121722;stroke:#243043;rx:12}
+    .t{fill:#e6edf7;font:600 13px -apple-system,sans-serif}
+    .m{fill:#93a1b8;font:11.5px "SF Mono",ui-monospace,monospace}
+    .lbl{fill:#93a1b8;font:11px "SF Mono",ui-monospace,monospace}
+    .ln{stroke:#4c8dff;stroke-width:1.6;fill:none}
+    .lg{stroke:#31c48d;stroke-width:1.6;fill:none}
+    .grp{fill:none;stroke:#243043;stroke-dasharray:4 4;rx:14}
+  </style>
+
+  <rect class="grp" x="8" y="8" width="560" height="330"/>
+  <text class="lbl" x="22" y="28">PWA · Next 16 · installed standalone</text>
+
+  <rect class="bx" x="30" y="48" width="180" height="52"/>
+  <text class="t" x="46" y="70">&lt;VoiceDock /&gt;</text>
+  <text class="m" x="46" y="88">mic · WebRTC</text>
+
+  <rect class="bx" x="350" y="48" width="200" height="52"/>
+  <text class="t" x="366" y="70">ElevenLabs agent</text>
+  <text class="m" x="366" y="88">“Genesis Web” · barge-in</text>
+
+  <path class="ln" d="M212 66 H346" marker-end="url(#ah)"/>
+  <text class="lbl" x="232" y="60">audio ⇄ WebRTC</text>
+
+  <path class="ln" d="M450 104 V150 H232" marker-end="url(#ah)"/>
+  <text class="lbl" x="250" y="142">clientTool: dispatch_to_workspace(request)</text>
+
+  <rect class="bx" x="30" y="168" width="240" height="52"/>
+  <text class="t" x="46" y="190">POST /api/voice/dispatch</text>
+  <text class="m" x="46" y="208">{ threadId, text } → returns at once</text>
+
+  <rect class="bx" x="30" y="256" width="240" height="56"/>
+  <text class="t" x="46" y="278">existing SSE stream</text>
+  <text class="m" x="46" y="296">same threadId · IR events</text>
+
+  <path class="lg" d="M270 284 H330 V126 H346" marker-end="url(#ahg)"/>
+  <text class="lbl" x="46" y="240">narrate(event) → sendContextualUpdate(contextId)</text>
+
+  <rect class="bx2" x="612" y="48" width="300" height="72"/>
+  <text class="t" x="630" y="72">BFF auth gate</text>
+  <text class="m" x="630" y="92">authorizePrincipal — Better Auth passkey</text>
+  <text class="m" x="630" y="108">unchanged, shared with /api/chat</text>
+
+  <path class="ln" d="M272 194 H600" marker-end="url(#ah)"/>
+
+  <rect class="bx2" x="612" y="160" width="300" height="72"/>
+  <text class="t" x="630" y="184">genesis-api :8787</text>
+  <text class="m" x="630" y="204">Supervisor → session(threadId)</text>
+  <text class="m" x="630" y="220">→ workspace + worktree</text>
+
+  <rect class="bx2" x="612" y="264" width="300" height="72"/>
+  <text class="t" x="630" y="288">claude -p --resume</text>
+  <text class="m" x="630" y="308">the agent that does the work</text>
+  <text class="m" x="630" y="324">emits the IR event stream</text>
+
+  <path class="ln" d="M762 124 V156" marker-end="url(#ah)"/>
+  <path class="ln" d="M762 236 V260" marker-end="url(#ah)"/>
+  <path class="lg" d="M612 300 H276" marker-end="url(#ahg)"/>
+
+  <rect class="grp" x="8" y="368" width="904" height="130"/>
+  <text class="lbl" x="22" y="390">the two channels, kept distinct</text>
+  <path class="ln" d="M40 416 H100" marker-end="url(#ah)"/>
+  <text class="m" x="112" y="420">command — user speech becomes one dispatch; the tool returns in milliseconds</text>
+  <path class="lg" d="M40 452 H100" marker-end="url(#ahg)"/>
+  <text class="m" x="112" y="456">narration — IR events projected into non-interrupting context, superseded as work moves on</text>
+  <text class="m" x="112" y="484">nothing holds a tool call open, so barge-in never blocks and no vendor timeout is relied on</text>
+</svg>
+
+<h3>The load-bearing decision: the tool returns immediately</h3>
+<p>OpenAI's realtime docs specify <strong>no timeout</strong> for a tool response and say nothing about whether the session may speak while a call is pending. ElevenLabs' server-tools docs are equally silent on long-running jobs. Building on an unspecified behaviour is how you ship something that works in a demo and dies on a real ten-minute test run.</p>
+<p>So <code>dispatch_to_workspace</code> is a <strong>client tool</strong> that fires the dispatch and returns within milliseconds — <code>{ accepted: true, summary: "dispatched to broomva/genesis" }</code>. The conversation continues normally. Everything after that arrives as contextual updates. No held-open call, no dependence on vendor timeout semantics, and barge-in keeps working because the agent is never blocked.</p>
+</div>
+
+<h3>Narration policy — a projection, not a firehose</h3>
+<div class="card">
+<table>
+<tr><th>IR event</th><th>Spoken as</th><th>contextId</th></tr>
+<tr><td><code>tool.use</code></td><td>"reading handler.ts", "running the tests"</td><td><code>progress</code> (superseded)</td></tr>
+<tr><td><code>thinking</code></td><td>— suppressed —</td><td>n/a</td></tr>
+<tr><td><code>tool.result</code> <span class="kv">isError</span></td><td>"the tests failed — three in whatsapp-format"</td><td><code>progress</code></td></tr>
+<tr><td><code>permission.request</code></td><td><strong>interrupts</strong> — "it wants to write outside the workspace. Allow?"</td><td>via <code>sendUserMessage</code></td></tr>
+<tr><td><code>awaiting</code></td><td><strong>interrupts</strong> — "it's waiting on you"</td><td>via <code>sendUserMessage</code></td></tr>
+<tr><td><code>turn.complete</code></td><td>the actual answer, spoken</td><td><code>result</code></td></tr>
+<tr><td><code>error</code></td><td>"it failed: &lt;message&gt;"</td><td><code>result</code></td></tr>
+</table>
+<p><code>thinking</code> is deliberately dropped: it is long, high-volume, and narrating it makes the agent sound like it is stalling. Progress shares one <code>contextId</code> so only the newest survives — the voice model should know <em>where the work is now</em>, not everywhere it has been.</p>
+<p class="note">Two events use <code>sendUserMessage</code> rather than a contextual update, because they must <em>take a turn</em>: a permission request and an <code>awaiting</code> block are the two cases where the system genuinely needs the human, and a non-interrupting update would leave them waiting in silence.</p>
+</div>
+
+<h2>What must be built</h2>
+<div class="card">
+<div class="phase"><div class="pnum">0</div><div><strong>Spike: iOS mic + audio routing</strong> — <span class="pill p-risk">go / no-go</span><br>
+<span class="note">Half a day, throwaway. Confirms <code>getUserMedia</code> in the installed PWA and measures the known iOS behaviour of forcing output to the speaker once capture starts. If voice means speakerphone-only on the target device, the product decision changes before any code is written.</span></div></div>
+<div class="phase"><div class="pnum">1</div><div><strong>A second ElevenLabs agent, as code</strong><br>
+<span class="note">A <em>separate</em> agent from the phone one — different trust model (an authenticated PWA session, not a spoofable caller id), different prompt, different tools. Extends <code>integrations/elevenlabs/</code> and inherits the provisioning script and the prompt regression test.</span></div></div>
+<div class="phase"><div class="pnum">2</div><div><strong><code>POST /api/voice/dispatch</code> in the BFF</strong><br>
+<span class="note">Sibling of <code>/api/chat</code>, reusing <code>authorizePrincipal</code> unchanged. Accepts <code>{ threadId, text }</code>, forwards to genesis, returns immediately. The threadId is what binds voice to the existing session — same workspace, same worktree, same resume.</span></div></div>
+<div class="phase"><div class="pnum">3</div><div><strong><code>&lt;VoiceDock&gt;</code> + the narration projection</strong><br>
+<span class="note">A pure function <code>narrate(irEvent) → {kind:"context"|"turn"|"drop", text, contextId}</code>, unit-tested against recorded event fixtures. The React surface is thin; the policy is testable without a microphone.</span></div></div>
+<div class="phase"><div class="pnum">4</div><div><strong>Dogfood loop</strong><br>
+<span class="note">Drive a real task by voice in a scratch workspace: ask for a change, hear it work, interrupt it, answer a permission prompt by voice, hear the result. Capture the session transcript plus the IR trace and diff what was <em>said</em> against what <em>happened</em>.</span></div></div>
+</div>
+
+<h2>Risks, named</h2>
+<div class="card warn">
+<table>
+<tr><th>Risk</th><th>Why it matters</th><th>Response</th></tr>
+<tr><td><strong>iOS forces speaker output</strong> on <code>getUserMedia</code></td><td>Voice becomes speakerphone even with headphones — may be unusable in the intended context</td><td>Phase 0 measures it before anything is built</td></tr>
+<tr><td>Safari permission persistence is weak</td><td>Re-granting the mic every session is friction that kills daily use</td><td>Measure in phase 0; a push-to-talk affordance degrades better than always-on</td></tr>
+<tr><td><strong>The voice agent may claim work it did not do</strong></td><td>It is a language model narrating another agent's actions — the exact failure the phone prompt test exists for</td><td>Reuse the <code>voice-agent-config.test.ts</code> pattern; narration text is <em>derived</em> from IR events, never invented</td></tr>
+<tr><td>Two agents, one identity</td><td>A user cannot tell which agent is speaking; a confident wrong summary reads as the workspace agent's word</td><td>Narration is a projection with a fixed vocabulary; the result is quoted, not paraphrased</td></tr>
+<tr><td>Cost per minute of open mic</td><td>An always-listening session bills continuously</td><td>Push-to-talk or explicit session start; never auto-open on page load</td></tr>
+<tr><td>Vendor docs are silent on long tool calls</td><td>Any design that holds a call open is built on an unspecified behaviour</td><td><strong>Already designed out</strong> — the tool returns immediately</td></tr>
+</table>
+</div>
+
+<h2>What this deliberately does not do</h2>
+<div class="card">
+<ul>
+<li><strong>No AI SDK 7 upgrade.</strong> The web app is on <code>ai@6.0.213</code>; realtime there is beta and would put a major-version migration on the critical path of a feature that does not need it.</li>
+<li><strong>No change to the phone agent.</strong> Different trust model, different prompt, different failure modes. They share a vendor and a provisioning discipline, nothing else.</li>
+<li><strong>No speech synthesis of the agent's raw output.</strong> Reading a diff aloud is useless. The voice agent speaks <em>about</em> the work; the screen shows the work.</li>
+<li><strong>No second source of truth.</strong> Voice dispatches into the same thread the text UI uses. There is no voice-only history to reconcile.</li>
+</ul>
+</div>
+
+<div class="foot">
+Genesis · Realtime voice workspace agent · design · 2026-08-24 · Option C. Relates BRO-2228 (voice channel), BRO-2284 (voice delivery leg), BRO-1620 (engine registry), BRO-1567/1627 (threads &amp; workspace binding). Research: ElevenLabs React SDK + 2026-05 changelog (contextId/is_superseded), OpenAI realtime function-calling guide (no documented tool timeout), iOS PWA getUserMedia behaviour.
+</div>
+
+</div></body></html>
