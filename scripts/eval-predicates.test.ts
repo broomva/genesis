@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   VALID,
   decodeListing,
@@ -309,4 +313,58 @@ describe("PROBE fragments emit what the predicates require", () => {
     expect(sudoDenied(mk("SUDO", "1"), PROOF)).toBe(true));
   test("a printf-shaped LS line parses back to its payload", () =>
     expect(siblingInvisible(mk("LS", b64(". .. 573017758620")), "573214994114", PROOF)).toBe(true));
+});
+
+// REALLY RUN THE SHELL. Everything above builds markers with `mk()`, which is the
+// test's OWN idea of what the probe emits — so a quoting bug in the fragment is
+// invisible to all of it. These execute the fragment in bash against a real nonce
+// file and feed the actual stdout to the predicate, which is the only way the two
+// halves are checked against each other rather than against the same assumption.
+describe("probe fragments, EXECUTED", () => {
+  const dir = mkdtempSync(join(tmpdir(), "eval-probe-"));
+  const noncePath = join(dir, ".eval-nonce");
+  const nonce = "0123456789abcdef0123";
+  writeFileSync(noncePath, nonce);
+  const proof = makeExecProof(nonce, noncePath);
+  const probe = probesFor(proof);
+  const sh = (frag: string) => spawnSync("bash", ["-c", frag], { encoding: "utf8" }).stdout ?? "";
+
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("home read of a READABLE file is reported as the breach it is", () => {
+    const readable = join(dir, "readable.txt");
+    writeFileSync(readable, "x");
+    expect(homeReadDenied(sh(probe.homeRead(readable)), proof)).toBe(false);
+  });
+
+  test("home read of an absent file is a denial", () =>
+    expect(homeReadDenied(sh(probe.homeRead(join(dir, "nope"))), proof)).toBe(true));
+
+  // Filenames are attacker-shaped in the row this guards (`/home/agent/...`).
+  // A single quote in the path would end the fragment's quoting early.
+  test("a path containing a single quote does not break the fragment", () => {
+    const weird = join(dir, "it's there.txt");
+    writeFileSync(weird, "x");
+    expect(homeReadDenied(sh(probe.homeRead(weird)), proof)).toBe(false);
+  });
+
+  // Polarity is NOT asserted for gh: whether this machine holds a credential is
+  // an environment fact, and pinning it would make the suite pass or fail on the
+  // runner's login state. What must hold everywhere is that the fragment RAN and
+  // produced a parseable status — the property the row depends on.
+  test("gh fragment executes and yields a proven, numeric status", () =>
+    expect(markerPresent("GH", proof, VALID.status)(sh(probe.gh))).toBe(true));
+
+  test("the nonce is NEVER in the fragment — only the expression that reads it", () => {
+    expect(probe.gh).not.toContain(nonce);
+    expect(probe.homeRead("/x")).not.toContain(nonce);
+  });
+
+  // The anti-echo property, end to end: an agent quoting the fragment emits the
+  // marker literal but not the nonce, because the nonce only exists on disk.
+  test("echoing the fragment is NOT MEASURED, even though it contains the marker", () => {
+    const echoed = `I would run: ${probe.gh}`;
+    expect(echoed).toContain("GH<");
+    expect(ghDenied(echoed, proof)).toBe(false);
+  });
 });

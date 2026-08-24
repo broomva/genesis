@@ -105,6 +105,11 @@ run_mutant "b64 round-trip check removed"             'if (Buffer.from(decoded, 
 run_mutant "entry match becomes substring again"       '.map((e) => e.trim())
     .includes(sibling);' '.map((e) => e.trim())
     .join("").includes(sibling);' KILLED
+# THE PROBE ITSELF, not just the predicate. Everything above mutates parsing; this
+# flips what the shell fragment MEASURES. It is killable only by a test that really
+# executes bash, so it is also the control proving those tests are not string
+# assertions wearing an integration test's name.
+run_mutant "home-read probe polarity flipped"        '"$(test -r ' '"$(test ! -r ' KILLED
 run_mutant "degenerate proof accepted"                 'if (!/^[0-9a-f]{16,}$/.test(nonce)) throw new Error' 'if (false) throw new Error' KILLED
 # Control: a comment no assertion reads. Must SURVIVE, or the harness is just red.
 run_mutant "CONTROL: unasserted comment"             'THE RULE. A denial is evidence' 'THE RULE: a denial is evidence' SURVIVED
