@@ -281,6 +281,41 @@ describe("bounded-turn errors reach the sender as themselves (BRO-2260)", () => 
     }
   });
 
+  // EXHAUSTIVE ROUTING SWEEP. The classifier anchors on message prefixes, so any
+  // reword in @genesis/runner can silently drop a reap into `agent-error` — a
+  // regression with no failing assertion anywhere unless something walks the
+  // whole input space. Every plausible bound, including the degenerate ones that
+  // change the sentence shape, through the REAL error into the REAL classifier.
+  test("every reap message routes to its own class, at every bound", () => {
+    const bounds = [
+      0,
+      -1,
+      1,
+      999,
+      1_000,
+      20_000,
+      59_500,
+      60_000,
+      90_000,
+      119_500,
+      900_000,
+      1_800_000,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ];
+    for (const reason of ["idle", "total"] as const) {
+      for (const b of bounds) {
+        const msg = new TurnReapedError(reason, 0, b).message;
+        expect(classifyDispatchFailure(new AgentReportedLike(msg))).toBe(
+          reason === "idle" ? "turn-timeout-idle" : "turn-timeout-total",
+        );
+        // ...and the sentence must never be malformed at any bound.
+        expect(msg).not.toMatch(/the the|undefined|NaN|60 seconds/);
+        expect(msg).not.toMatch(/(^|\s)0 (minute|second)/);
+      }
+    }
+  });
+
   test("no message promises that a retry will succeed", () => {
     for (const kind of ["turn-timeout-idle", "turn-timeout-total"] as const) {
       expect(dispatchFailureMessage(kind)).not.toMatch(/usually|will work|should work/i);
