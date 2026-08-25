@@ -101,3 +101,62 @@ repair cost more than the fault. Diagnosis goes to a human; the human decides.
 
 **No `Persistent=true`.** A catch-up burst after downtime would probe an ingress
 that is still coming up and record failures that mean nothing.
+
+---
+
+# Deployment watch
+
+`genesis-watch.sh` answers *is the deployment healthy?* in one command, on the host.
+
+```bash
+install -m 0755 docs/deploy/systemd/genesis-watch.sh ~/.local/bin/
+genesis-watch.sh                       # default window: 20 min ago
+WINDOW="24 hours ago" genesis-watch.sh # widen it
+```
+
+## Why a script, when the checks are five journalctl lines
+
+They were five journalctl lines, retyped every pass for a day, and that is how a
+real defect got in: `journalctl --since '23:40'` means **today** at 23:40, so
+after midnight it names a *future* window and returns nothing. Several
+"0 warnings / 0 leaks" readings were an empty query rather than a measurement.
+They happened to be correct, which is the worst case — **a check that can only
+return clean is not a check.**
+
+So every window here is relative (`20 min ago`), which cannot invert at a date
+boundary, and the counts that must never be nonzero — markdown leaks, OOM kills —
+are taken over the **whole journal**, so they cannot be quietly scoped away by a
+narrow window.
+
+The default 20-minute window is for a polling loop. **Run it at 24 hours
+periodically anyway**: the first 24-hour run surfaced seven `genesis-api`
+warnings and four `genesis-web` ones that every short-window pass had missed,
+including `final-sigterm timed out` and two left-over `claude` processes in the
+cgroup.
+
+## Two deliberate non-failures
+
+**A failed sibling user unit is reported, never counted.** A unit that fails on
+its own schedule is not this deployment's health, and conflating them trains the
+reader to ignore red.
+
+**An exit-code line with a restart beside it is deploy churn, not a fault.**
+Redeploying stops the old process — which logs `Failed with result 'exit-code'`
+— and starts a new one in the same second. The check compares failures against
+restarts rather than alarming on every deploy.
+
+## Verify it, because a watch that cannot report red is worthless
+
+```bash
+NEGATIVE_CONTROL=1 genesis-watch.sh        # must print red, then exit 0
+REPO=/nonexistent genesis-watch.sh         # must exit 1
+```
+
+Each branch was proven to fire before this shipped: a down unit (exit 1), the
+disk threshold (exit 1), a missing repo (exit 1), the leak invariant pointed at
+a present pattern (78 hits, exit 1), and the warning branch at `-p info` over 24h
+(165/42/661, exit 1).
+
+**No remediation.** It never restarts anything, for the same reason
+`deploy-probe.sh` does not: every automated repair tried on this host has cost
+more than the fault.
