@@ -1,0 +1,199 @@
+<!doctype html>
+<!--
+meta:
+  slug: voice-into-an-armed-thread
+  ticket: (new — file as BRO-XXXX) · relates BRO-2228/2284 (voice channel), and DIFFERS FROM the Option C spec (realtime-voice-workspace-agent)
+  status: design — first draft
+  date: 2026-08-25
+  decisions:
+    - voice dispatches into an EXISTING PWA thread, not a synthetic one-shot session
+    - the thread is ARMED from the authenticated side (the PWA); the phone call never names a thread
+    - an unarmed call keeps today's behaviour exactly — no regression path
+    - NO realtime machinery: no WebRTC, no contextual updates, no narration. That is the Option C spec.
+    - delivery is the thread itself, which removes the 24h WhatsApp window from the critical path
+  source-facts (verified in-tree at ae2752d, not inferred):
+    - apps/api/src/server.ts:434 — POST /chat requires threadId; nothing else identifies a session
+    - packages/core/src/supervisor.ts:892 — resumeSessionId: session.agentSessionId, so same threadId resumes
+    - apps/chat-bot/src/index.ts — the voice dispatch already passes an arbitrary threadId; it synthesizes `voice:${ticket.id}`
+    - apps/api/src/voice.ts:84 — VoiceTicket carries callerId, deliverTo, request, conversationId; no thread
+    - apps/api/src/voice-queue.ts:36 — parseVoicePrincipals is an env allowlist of caller ids
+    - apps/web/lib/api-auth.ts — authorizePrincipal AUTHENTICATES; it does not check thread ownership, and no route does
+    - apps/api/src/server.ts:735 — GET /ws has no auth gate (matters only if live narration is ever added)
+  measured:
+    - 5 voice answers delivered in the 24h to 2026-08-25 02:00; every one a test prompt (12-29 chars)
+    - 0 substantive voice answers observed end to end
+-->
+<html lang="en">
+<head>
+
+<body><div class="wrap">
+
+<div class="kick">Genesis · design spec</div>
+<h1>Voice into an armed thread</h1>
+<p class="sub">Point the voice leg at a session you already have open, instead of a fresh one nobody remembers — and take the consent from the authenticated side, because a phone number is not a credential.</p>
+
+<div class="card good">
+<p><strong>This is not the Option C spec.</strong> That one (<code>realtime-voice-workspace-agent</code>, PASS 8/10) builds a realtime conversational front with narration, barge-in and a dispatch capability. This is a much smaller thing that captures most of the same value: <em>change one argument in the existing voice path, and add a gate deciding who may set it.</em> No WebRTC, no contextual updates, no protocol spike.</p>
+</div>
+
+<h2>What voice does today, measured</h2>
+<div class="card">
+<p>A call reaches an ElevenLabs agent, which records the request as a ticket. A poller in <code>chat-bot</code> drains the queue every 15s, runs the request as a real Genesis turn in the caller's tenant workspace, and sends the answer to their WhatsApp. It works — five answers delivered in the 24 hours to 2026-08-25 02:00.</p>
+<p>Two properties limit it, and both are structural rather than incidental:</p>
+<table>
+<tr><th>Property</th><th>Consequence</th></tr>
+<tr><td><code>threadId: voice:${ticket.id}</code> — a fresh session per call</td><td>No memory. Two calls share nothing, and voice cannot see the conversation you are already having. Deliberate: the comment says sharing a thread "would bleed context between unrelated calls"</td></tr>
+<tr><td>The answer is pushed to WhatsApp</td><td>A phone call does <strong>not</strong> open Meta's 24-hour service window. If you have not messaged the bot recently the answer <em>cannot</em> be delivered — and that is only discoverable when the send fails</td></tr>
+</table>
+<p class="note">Worth stating plainly: every voice answer delivered so far has been a test prompt of 12–29 characters ("reply with exactly…"). <strong>No substantive voice answer has been observed end to end.</strong> The channel is proven to carry bytes; it is not proven to carry a useful reply.</p>
+</div>
+
+<h2>The observation this rests on</h2>
+<div class="card">
+<p><code>threadId</code> is the only thing that identifies a session. Verified, not assumed:</p>
+<pre>apps/api/src/server.ts:434     const threadId = body.threadId;
+                               if (!threadId) return c.json({ error: "threadId required" }, 400);
+
+packages/core/src/supervisor.ts:892
+                               resumeSessionId: session.agentSessionId   ← same threadId, same --resume</pre>
+<p>And the voice drain <strong>already passes an arbitrary threadId</strong> — it just makes one up:</p>
+<pre>apps/chat-bot/src/index.ts
+    genesisStream({ baseUrl, threadId: `voice:${ticket.id}`, text: ticket.request, workspaceId })</pre>
+<p>So dispatching a call into an existing session is a change to one argument. Everything expensive — the session, the worktree, <code>--resume</code>, the workspace binding — already exists and already works.</p>
+</div>
+
+<h2>What that buys</h2>
+<div class="card good">
+<div class="grid c2">
+<div>
+<h3>The 24-hour window leaves the critical path</h3>
+<p class="note">Nothing needs pushing to a phone. A turn on your thread <em>is</em> in your thread; you open the PWA and it is there. Today's worst failure — the answer exists and cannot be delivered — stops existing rather than being mitigated.</p>
+</div>
+<div>
+<h3>Voice gains memory</h3>
+<p class="note">Same <code>threadId</code> → same <code>agentSessionId</code> → <code>--resume</code>. Voice becomes another way to talk to the <em>same</em> agent, mid-conversation, rather than a stranger who has to be re-briefed every call.</p>
+</div>
+</div>
+</div>
+
+<h2>And what it costs — the blast radius inverts</h2>
+<div class="card warn">
+<p>The PWA session is genuinely trusted: a Better Auth passkey on your device. The <strong>voice leg is not.</strong> It arrives as a phone call identified by caller ID, and caller ID is spoofable. Trust in the workspace does not launder the identity of whoever dialled.</p>
+<table>
+<tr><th></th><th>Today</th><th>Dispatching into your PWA thread</th></tr>
+<tr><td>A spoofed caller obtains</td><td>an answer in <strong>their own</strong> tenant workspace</td><td>a turn executed <strong>inside your session and your worktree</strong></td></tr>
+<tr><td>Worst case</td><td>they waste your compute</td><td>they act in your work</td></tr>
+</table>
+<p>Compounding it, and verified rather than assumed: <code>authorizePrincipal</code> authenticates a principal — a Better Auth session or the machine token — and <strong>does not check thread ownership. No route does.</strong> That is safe today only because the deployment is single-owner. It becomes load-bearing the moment a call can <em>name</em> a thread.</p>
+<p class="note">This is the same lesson the Option C spec took five review rounds to reach, arriving from a different direction: <em>consent must come from the authenticated side, never from the voice side.</em> There it was "fresh speech is presence, not consent". Here it is "a phone number is not a credential".</p>
+</div>
+
+<h2>The design: arm from the PWA, never from the call</h2>
+<div class="card">
+<svg viewBox="0 0 1000 330" width="100%" role="img" aria-label="The PWA arms a thread; a call is resolved against the armed set and dispatched into that thread, with the answer landing back in the thread.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#6b7a93"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#31c48d"/></marker>
+  </defs>
+  <rect x="20" y="20" width="290" height="110" rx="12" fill="#121722" stroke="#2f3d55"/>
+  <text x="38" y="46" fill="#93a1b8" font-family="SF Mono,monospace" font-size="11" letter-spacing="1.3">PWA — AUTHENTICATED</text>
+  <text x="38" y="74" fill="#e6edf7" font-size="13.5">thread “parallax receipts”</text>
+  <text x="38" y="96" fill="#31c48d" font-size="12.5">[ arm for voice · 30 min ]</text>
+  <text x="38" y="116" fill="#6b7a93" font-size="11.5" font-family="SF Mono,monospace">the consent happens here</text>
+
+  <rect x="20" y="200" width="290" height="105" rx="12" fill="#121722" stroke="#2f3d55"/>
+  <text x="38" y="226" fill="#93a1b8" font-family="SF Mono,monospace" font-size="11" letter-spacing="1.3">PHONE — UNTRUSTED</text>
+  <text x="38" y="254" fill="#e6edf7" font-size="13.5">caller id (spoofable)</text>
+  <text x="38" y="276" fill="#e6edf7" font-size="13.5">“what happened to the tests?”</text>
+  <text x="38" y="296" fill="#f2705a" font-size="11.5" font-family="SF Mono,monospace">names no thread, ever</text>
+
+  <rect x="390" y="95" width="250" height="135" rx="12" fill="#182031" stroke="#2f3d55"/>
+  <text x="408" y="121" fill="#93a1b8" font-family="SF Mono,monospace" font-size="11" letter-spacing="1.3">ARMED SET (server)</text>
+  <text x="408" y="149" fill="#e6edf7" font-size="12.5">threadId → principal, expiry</text>
+  <text x="408" y="173" fill="#93a1b8" font-size="12">a call resolves against it</text>
+  <text x="408" y="197" fill="#93a1b8" font-size="12">no match ⇒ today's behaviour,</text>
+  <text x="408" y="215" fill="#93a1b8" font-size="12">unchanged</text>
+
+  <rect x="710" y="95" width="270" height="135" rx="12" fill="#121722" stroke="#2f3d55"/>
+  <text x="728" y="121" fill="#93a1b8" font-family="SF Mono,monospace" font-size="11" letter-spacing="1.3">GENESIS</text>
+  <text x="728" y="149" fill="#e6edf7" font-size="12.5">session(threadId) → worktree</text>
+  <text x="728" y="173" fill="#e6edf7" font-size="12.5">claude -p --resume</text>
+  <text x="728" y="199" fill="#31c48d" font-size="12.5">the answer lands in the thread</text>
+
+  <line x1="312" y1="88" x2="384" y2="130" stroke="#31c48d" stroke-width="2" marker-end="url(#a2)"/>
+  <text x="318" y="112" fill="#31c48d" font-size="11" font-family="SF Mono,monospace">arms</text>
+  <line x1="312" y1="240" x2="384" y2="196" stroke="#6b7a93" stroke-width="2" marker-end="url(#a1)"/>
+  <text x="318" y="238" fill="#93a1b8" font-size="11" font-family="SF Mono,monospace">resolves</text>
+  <line x1="644" y1="162" x2="704" y2="162" stroke="#6b7a93" stroke-width="2" marker-end="url(#a1)"/>
+  <line x1="845" y1="92" x2="845" y2="60" stroke="#31c48d" stroke-width="2" marker-end="url(#a2)"/>
+  <line x1="845" y1="60" x2="318" y2="60" stroke="#31c48d" stroke-width="2" marker-end="url(#a2)"/>
+  <text x="500" y="52" fill="#31c48d" font-size="11.5" text-anchor="middle" font-family="SF Mono,monospace">no WhatsApp push — it is already in your thread</text>
+</svg>
+<p>The authenticated side nominates the target. A call is <em>resolved</em> against the armed set; it never supplies a thread id. So the worst a spoofed caller achieves is reaching a thread the real owner deliberately opened, during a window they deliberately opened.</p>
+<table>
+<tr><th>Step</th><th>Who</th><th>What</th></tr>
+<tr><td>1</td><td>You, in the PWA</td><td>Arm a thread for voice. One control, an explicit duration.</td></tr>
+<tr><td>2</td><td>BFF</td><td>Records <code>(threadId, principal, expiresAt)</code>. Authorizes the principal against the thread — <strong>the check that does not exist yet.</strong></td></tr>
+<tr><td>3</td><td>Caller</td><td>Speaks a request. The ticket carries <code>callerId</code> as it does now, and no thread.</td></tr>
+<tr><td>4</td><td>Drain</td><td>Resolves the caller to an armed thread. <em>No match ⇒ exactly today's behaviour</em>, tenant workspace and WhatsApp delivery.</td></tr>
+<tr><td>5</td><td>Genesis</td><td>Runs the turn on that <code>threadId</code>, resuming the session.</td></tr>
+<tr><td>6</td><td>You</td><td>Open the thread. The answer is in it. Nothing was pushed anywhere.</td></tr>
+</table>
+<p class="note"><strong>Arming expires, and that is the point.</strong> A standing permission is indistinguishable from no permission after a week. A window you opened for this call is a window you remember opening.</p>
+</div>
+
+<h2>What must be built</h2>
+<div class="card">
+<div class="phase"><div class="pnum">1</div><div>
+<strong>Thread ownership authorization.</strong> The prerequisite, and the only part that is load-bearing for safety. <code>authorizePrincipal</code> authenticates; nothing checks that the principal owns the thread it is acting on. Single-owner today makes this invisible — arming makes it real. This is the same phase-1 item the Option C spec named, arrived at independently.
+</div></div>
+<div class="phase"><div class="pnum">2</div><div>
+<strong>The armed set.</strong> <code>POST /api/threads/:id/arm-voice</code> with a duration; a store of <code>(threadId, principal, expiresAt)</code>; expiry enforced on read, not by a sweeper. Small enough to be a file beside the voice queue, which is where the rest of this channel's state already lives.
+</div></div>
+<div class="phase"><div class="pnum">3</div><div>
+<strong>Resolution in the drain.</strong> Caller → principal (the existing <code>parseVoicePrincipals</code> allowlist) → armed thread, if any. Pass that <code>threadId</code> to <code>genesisStream</code> instead of the synthetic one. <em>Unarmed is not an error</em> — it is the current path, untouched.
+</div></div>
+<div class="phase"><div class="pnum">4</div><div>
+<strong>The arming control in the PWA.</strong> Per-thread, showing the remaining window and offering to cancel. The visible state is the security property: if you cannot see what is armed, you cannot notice what should not be.
+</div></div>
+<div class="phase"><div class="pnum">5</div><div>
+<strong>Dogfood.</strong> Arm a thread, call, and confirm the turn appears <em>in that thread</em> with continuity — that the agent knows what you were already discussing. Then let the arming expire and confirm the next call falls back cleanly to today's behaviour rather than erroring.
+</div></div>
+</div>
+
+<h2>Risks, named</h2>
+<div class="card">
+<table>
+<tr><th>Risk</th><th>Why it matters</th><th>Response</th></tr>
+<tr><td>A spoofed caller reaches an armed thread</td><td>They act inside real work, not their own sandbox</td><td>Bounded, not eliminated: only a thread you armed, only while armed. Shrinking the window shrinks the exposure, and the exposure is visible in the PWA</td></tr>
+<tr><td>Thread-ownership check lands wrong</td><td>Arming becomes a way to reach someone else's session</td><td>Phase 1 is the prerequisite, not a later hardening step. Nothing else ships first</td></tr>
+<tr><td>Two calls land on one armed thread concurrently</td><td>Interleaved turns in one worktree</td><td>The supervisor already serializes per thread; this needs confirming rather than assuming, and is listed as unverified below</td></tr>
+<tr><td>Arming is forgotten and left open</td><td>A standing permission nobody remembers</td><td>Expiry is mandatory and short by default; the PWA shows what is armed</td></tr>
+<tr><td>The transcript is wrong and the turn is destructive</td><td>ASR mishears; the agent acts on it in your worktree</td><td><strong>Unsolved here.</strong> Today's channel has the same property and lower stakes. See open questions</td></tr>
+</table>
+</div>
+
+<h2>What this deliberately does not do</h2>
+<div class="card">
+<div class="grid c2">
+<div><h3>No realtime anything</h3><p class="note">No WebRTC, no contextual updates, no narration, no barge-in, no dispatch capability held by a voice model. That is the Option C spec and it is a much larger build with a protocol spike in front of it. Nothing here depends on it, and it does not block it.</p></div>
+<div><h3>No change to the unarmed path</h3><p class="note">A call with no armed thread behaves exactly as it does today — tenant workspace, WhatsApp delivery, <code>followUp: "none"</code>. This adds a path; it does not replace one. Regression surface is a resolution step that can return nothing.</p></div>
+<div><h3>No confirmation of the transcript</h3><p class="note">Option C added a confirm-after-transcription step because a gesture proves intent but not wording. There is no screen in a phone call to confirm against. Named as an open question rather than waved at.</p></div>
+<div><h3>No multi-user story</h3><p class="note">Phase 1 makes ownership checkable, which is the precondition. Actually serving several users is a different piece of work and this does not pretend to be it.</p></div>
+</div>
+</div>
+
+<h2>Open questions — measure before building</h2>
+<div class="card warn">
+<ul>
+<li><strong>Does the supervisor serialize concurrent turns on one threadId?</strong> Stated in the risks table as "already serializes" — I have <em>not</em> verified it. If it does not, two calls into one armed thread interleave in a worktree. Check before phase 3.</li>
+<li><strong>Is a mistranscribed destructive request an acceptable risk here?</strong> Today it is bounded by the tenant workspace. Armed, it is not. A read-only default with an explicit "you may change things" arming mode is the obvious answer and doubles the surface; worth deciding rather than defaulting.</li>
+<li><strong>Is the answer discoverable?</strong> The 24-hour window disappears because nothing is pushed — but nothing is pushed. If you do not open the PWA you do not know the answer arrived. A single short WhatsApp "answered in <em>thread</em>" would restore the notification without carrying the content, and would itself be subject to the 24h window.</li>
+<li><strong>Does this actually want the ElevenLabs agent at all?</strong> If the target is a thread you already have open, a push-to-talk in the PWA that posts a transcript to <code>/api/chat</code> is strictly simpler and needs no phone, no funnel, and no allowlist. The phone leg earns its place only when you are away from the device — which is the real use case, but worth saying out loud.</li>
+</ul>
+</div>
+
+<div class="foot">Genesis · Voice into an armed thread · design · 2026-08-25. Source facts verified in-tree at <code>ae2752d</code>; measurements from the deployed host on 2026-08-24/25. Relates BRO-2228 and BRO-2284 (the voice channel this extends) and the Option C spec <code>realtime-voice-workspace-agent</code>, which this is deliberately smaller than and independent of.</div>
+
+</div></body>
+</html>
