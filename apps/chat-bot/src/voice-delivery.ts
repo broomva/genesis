@@ -20,7 +20,7 @@
 // The caller is told their message was written down. If an answer also arrives,
 // that is a bonus, not a commitment.
 
-import { isOutsideServiceWindow } from "./handler";
+import { isOutsideServiceWindow, renderForWhatsapp } from "./handler";
 
 /** One queued request. Mirrors the producer's shape in apps/api/src/voice.ts —
  *  the two are separate apps, so this is a structural copy, and `parseQueue`
@@ -100,7 +100,10 @@ export interface DeliverDeps {
   /** Run the agent turn. Returns the answer text. */
   readonly dispatch: (ticket: VoiceTicket, workspaceId: string | undefined) => Promise<string>;
   /** Send to a phone number. Throws on failure; a closed window throws too. */
-  readonly send: (to: string, text: string) => Promise<void>;
+  /** `ticketId` labels the leak warning. Deliberately NOT the phone number:
+   *  the warning's whole design is marker names and a length, and a recipient
+   *  in a log line is a privacy regression the old path did not have. */
+  readonly send: (to: string, text: string, ticketId: string) => Promise<void>;
   /** Which workspace the turn runs in — the caller's own tenant, so a voice
    *  request is confined exactly as their WhatsApp is. */
   readonly workspaceFor: (deliverTo: string) => string | undefined;
@@ -135,7 +138,7 @@ export async function deliverTicket(t: VoiceTicket, deps: DeliverDeps): Promise<
   }
 
   try {
-    await deps.send(t.deliverTo, text || "(the agent finished without producing any text)");
+    await deps.send(t.deliverTo, text || "(the agent finished without producing any text)", t.id);
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     if (isOutsideServiceWindow(e)) {
@@ -319,5 +322,77 @@ export async function drainOnce(deps: DrainDeps): Promise<{
     attempted: pending.length,
     delivered,
     failed,
+  };
+}
+
+/** What the voice leg actually puts on the wire, as ONE testable function.
+ *
+ *  This exists because the wiring was otherwise unverifiable. The send closure
+ *  lives inside startVoiceDelivery() in index.ts, which runs at module load, so
+ *  no test could reach it — and a mutation giving the voice path a different
+ *  chunk target passed the entire suite. A rendering invariant that no test can
+ *  observe is a convention, not an invariant.
+ *
+ *  Routing through renderForWhatsapp is the point: the voice leg used to call
+ *  markdownToWhatsApp with its own chunk-target arithmetic, so it was the one
+ *  conversion site with no BRO-2267 leak check, and the two paths could drift
+ *  with nothing to notice. */
+export function voiceSendChunks(
+  text: string,
+  ticketId: string,
+  warn?: (message: string) => void,
+): string[] {
+  // The label is the TICKET id, never the recipient. Review of the first attempt
+  // caught `voice=${to}` putting a phone number into a warning whose whole
+  // design is marker names and a length — a privacy regression the old path did
+  // not have. `warn` is the seam that lets a test assert that, because a
+  // mutation reducing the label to a constant otherwise passed the whole suite.
+  const { chunks } = renderForWhatsapp(text, { label: `voice=${ticketId}`, warn });
+  // An empty render still has to send something: silence is indistinguishable
+  // from the system having dropped the request, which is the failure this whole
+  // channel exists to avoid.
+  return chunks.length ? chunks : [text];
+}
+
+/** Minimal slice of the WhatsApp client the sender needs. */
+export interface VoiceWhatsapp {
+  readonly messages: {
+    sendText: (m: { phoneNumberId: string; to: string; body: string }) => Promise<unknown>;
+  };
+}
+
+export interface VoiceSenderOptions {
+  readonly wa: VoiceWhatsapp;
+  readonly phoneNumberId: string;
+  /** A send that accepts the connection and never answers would leave the drain
+   *  flag set forever and starve every later ticket in silence. */
+  readonly timeoutMs: number;
+  /** Test seam for the leak warning; production leaves it unset. */
+  readonly warn?: (message: string) => void;
+}
+
+/** Build the `send` the drain calls.
+ *
+ *  WHY THIS IS A FACTORY HERE RATHER THAN A CLOSURE IN index.ts. Review of the
+ *  first attempt made the point precisely: extracting only the RENDERING moved
+ *  the untestable boundary up one level rather than removing it. `index.ts`
+ *  could still have called `[text]` instead of voiceSendChunks and every test
+ *  would have passed, so "the two paths cannot drift" was still a claim no test
+ *  could observe. Building the sender here means a test can pass a fake client
+ *  and assert on the bodies that actually reach sendText — which is the only
+ *  boundary that matters. index.ts is left with wiring and no logic. */
+export function createVoiceSender(opts: VoiceSenderOptions) {
+  return async (to: string, text: string, ticketId: string): Promise<void> => {
+    for (const body of voiceSendChunks(text, ticketId, opts.warn)) {
+      const bail = AbortSignal.timeout(opts.timeoutMs);
+      await Promise.race([
+        opts.wa.messages.sendText({ phoneNumberId: opts.phoneNumberId, to, body }),
+        new Promise((_r, reject) => {
+          bail.addEventListener("abort", () =>
+            reject(new Error(`whatsapp send exceeded ${opts.timeoutMs}ms`)),
+          );
+        }),
+      ]);
+    }
   };
 }

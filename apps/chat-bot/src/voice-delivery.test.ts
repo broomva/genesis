@@ -9,17 +9,20 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CHUNK_TARGET, renderForWhatsapp } from "./handler";
 import {
   HANDLED_FILE,
   MAX_ATTEMPTS,
   type VoiceTicket,
   appendHandled,
+  createVoiceSender,
   deliverTicket,
   drainOnce,
   parseQueue,
   pendingTickets,
   readHandled,
   terminalIds,
+  voiceSendChunks,
 } from "./voice-delivery";
 
 const dirs: string[] = [];
@@ -374,5 +377,164 @@ describe("drainOnce", () => {
     });
     appendFileSync(join(qd, HANDLED_FILE), "{corrupt\n");
     expect(readHandled(join(qd, HANDLED_FILE)).has("other")).toBe(true);
+  });
+});
+
+describe("voiceSendChunks — the voice leg renders exactly as the WhatsApp handler", () => {
+  // Pins the invariant the extraction exists for. A mutation giving the voice
+  // path a different chunk target previously passed the whole suite, because the
+  // send closure lives inside startVoiceDelivery() and no test could reach it.
+  const replies = [
+    "## Summary\n\n**done** — see [docs](https://example.com/x)",
+    "| a | b |\n|---|---|\n| 1 | 2 |",
+    "```python\ndef f(*a, **kw): pass\n```",
+    `long: ${"lorem ipsum dolor sit amet. ".repeat(120)}`,
+    "• *already converted* — run `/parallax`",
+  ];
+  for (const [i, text] of replies.entries()) {
+    test(`case ${i}: identical to renderForWhatsapp's chunks`, () => {
+      expect(voiceSendChunks(text, "v-1")).toEqual(
+        renderForWhatsapp(text, { label: "thread=t", warn: () => {} }).chunks,
+      );
+    });
+  }
+  test("falls back to the raw text when the render produces nothing", () => {
+    // Silence is indistinguishable from the system dropping the request.
+    expect(voiceSendChunks("", "v-1")).toEqual([""]);
+  });
+  test("never returns an empty list", () => {
+    for (const t of [...replies, "", "   "]) {
+      expect(voiceSendChunks(t, "v-1").length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("createVoiceSender — what actually reaches sendText", () => {
+  // Review of the first attempt: extracting only the RENDERING moved the
+  // untestable boundary up a level. index.ts could still have sent `[text]`
+  // and every test would pass. This observes the boundary that matters.
+  const fake = () => {
+    const sent: Array<{ to: string; body: string }> = [];
+    return {
+      sent,
+      wa: {
+        messages: {
+          sendText: async (m: { phoneNumberId: string; to: string; body: string }) => {
+            sent.push({ to: m.to, body: m.body });
+            return {};
+          },
+        },
+      },
+    };
+  };
+
+  test("the bodies are exactly voiceSendChunks' output", async () => {
+    const text = "## Summary\n\n**done** — see [docs](https://example.com/x)";
+    const f = fake();
+    const send = createVoiceSender({ wa: f.wa, phoneNumberId: "pn-1", timeoutMs: 5000 });
+    await send("573000", text, "v-1");
+    expect(f.sent.map((m) => m.body)).toEqual(voiceSendChunks(text, "v-1"));
+  });
+
+  test("a long reply is sent as MULTIPLE bodies, all within the transport cap", async () => {
+    const text = `long: ${"lorem ipsum dolor sit amet. ".repeat(200)}`;
+    const f = fake();
+    await createVoiceSender({ wa: f.wa, phoneNumberId: "pn-1", timeoutMs: 5000 })(
+      "573000",
+      text,
+      "v-2",
+    );
+    expect(f.sent.length).toBeGreaterThan(1);
+    for (const m of f.sent) expect(m.body.length).toBeLessThanOrEqual(CHUNK_TARGET);
+  });
+
+  test("raw markdown never reaches sendText — the conversion is not bypassable here", async () => {
+    const f = fake();
+    await createVoiceSender({ wa: f.wa, phoneNumberId: "pn-1", timeoutMs: 5000 })(
+      "573000",
+      "## Heading\n\n**bold** text",
+      "v-3",
+    );
+    const all = f.sent.map((m) => m.body).join("\n");
+    expect(all).not.toContain("**bold**");
+    expect(all).not.toContain("## Heading");
+  });
+
+  test("every body goes to the recipient, and the phone number is not the warning label", async () => {
+    const f = fake();
+    await createVoiceSender({ wa: f.wa, phoneNumberId: "pn-1", timeoutMs: 5000 })(
+      "573000",
+      "hello",
+      "v-4",
+    );
+    for (const m of f.sent) expect(m.to).toBe("573000");
+    // The label is the ticket id; a recipient in a warning line was a privacy
+    // regression the old path did not have.
+    expect(voiceSendChunks("hello", "v-4")).toEqual(f.sent.map((m) => m.body));
+  });
+
+  test("a send that never answers is bounded, not left hanging", async () => {
+    const wa = { messages: { sendText: () => new Promise<unknown>(() => {}) } };
+    const send = createVoiceSender({ wa, phoneNumberId: "pn-1", timeoutMs: 30 });
+    await expect(send("573000", "hi", "v-5")).rejects.toThrow(/exceeded 30ms/);
+  });
+});
+
+describe("voiceSendChunks — the warning names the TICKET, never the recipient", () => {
+  // A mutation reducing the label to a constant passed the entire suite, so the
+  // privacy fix was unpinned. `|---|` is used because it is one of the few
+  // inputs the converter leaves for the detector, so the warning actually fires.
+  test("the label carries the ticket id", () => {
+    const seen: string[] = [];
+    voiceSendChunks("|---|", "v-abc123", (m) => seen.push(m));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("voice=v-abc123");
+  });
+  test("the recipient's number never appears in the warning", () => {
+    const seen: string[] = [];
+    const send = createVoiceSender({
+      wa: { messages: { sendText: async () => ({}) } },
+      phoneNumberId: "pn-1",
+      timeoutMs: 5000,
+      warn: (m) => seen.push(m),
+    });
+    return send("573017758620", "|---|", "v-abc123").then(() => {
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain("voice=v-abc123");
+      expect(seen[0]).not.toContain("573017758620");
+    });
+  });
+});
+
+describe("the raw-text fallback is unreachable from the drain (round-2 depth item)", () => {
+  // Review asked whether a NON-EMPTY input can render to zero chunks and escape
+  // conversion via `chunks.length ? chunks : [text]`. It can — whitespace-only
+  // input does. What makes that harmless is an upstream guard, so pin BOTH.
+  test("whitespace-only input is what triggers the fallback", () => {
+    for (const ws of [" ", "\n", "\t", "  \n \t "]) {
+      expect(renderForWhatsapp(ws, { label: "x", warn: () => {} }).chunks).toEqual([]);
+      expect(voiceSendChunks(ws, "v-1")).toEqual([ws]);
+    }
+  });
+  test("but deliverTicket trims, so send NEVER receives whitespace-only", async () => {
+    const seen: string[] = [];
+    const d = await deliverTicket(
+      { id: "v-1", callerId: "c", deliverTo: "573000", request: "r", createdAt: "x" },
+      {
+        dispatch: async () => "   \n\t  ",
+        send: async (_to, text) => {
+          seen.push(text);
+        },
+        workspaceFor: () => "ws",
+      },
+    );
+    expect(d.kind).toBe("delivered");
+    expect(seen).toEqual(["(the agent finished without producing any text)"]);
+    // The fallback is taken only when the RENDER is empty, so assert that
+    // directly. Comparing the output to the input would not discriminate: the
+    // placeholder is plain prose, so its converted form is byte-identical to it.
+    expect(
+      renderForWhatsapp(seen[0] as string, { label: "x", warn: () => {} }).chunks.length,
+    ).toBeGreaterThan(0);
   });
 });

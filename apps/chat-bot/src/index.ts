@@ -42,11 +42,9 @@ import { type ChannelConfig, principalOf, startupGateFor } from "./allowlist";
 import { botStateFile, createFileState } from "./file-state";
 import { genesisStream } from "./genesis";
 import {
-  CHUNK_TARGET,
   type HandlerOptions,
   TURN_STATUS_EMOJI,
   type TurnSignals,
-  chunkForWhatsapp,
   handleAgentMessage,
   nativeCommandMenu,
   parseCommand,
@@ -63,10 +61,9 @@ import {
 import { DEFAULT_STALL_MS, withStallTimeout } from "./stall-timeout";
 import { TenantStore } from "./tenant-store";
 import { admit, pruneTimestamps, rateLimit } from "./tenants";
-import { drainOnce } from "./voice-delivery";
+import { createVoiceSender, drainOnce } from "./voice-delivery";
 import { textToDispatch } from "./voice-note";
 import { webhookPort } from "./webhook-port";
-import { FENCE_OVERHEAD, balanceFences, markdownToWhatsApp } from "./whatsapp-format";
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 if (!botToken) {
@@ -689,27 +686,7 @@ function startVoiceDelivery(): void {
           for await (const chunk of stream) out += chunk;
           return out;
         },
-        send: async (to, text) => {
-          // BOUNDED for the same reason the dispatch is, at the OTHER call site —
-          // which is where this was missed. A Kapso send that accepts the
-          // connection and never answers leaves `running` true forever, and every
-          // later ticket is starved in silence. (P20 round 1.)
-          // Chunked exactly as the WhatsApp handler does: a message over the
-          // transport cap is REJECTED, and the answer then simply never arrives.
-          const target = CHUNK_TARGET - FENCE_OVERHEAD;
-          const chunks = balanceFences(chunkForWhatsapp(markdownToWhatsApp(text), target));
-          for (const body of chunks.length ? chunks : [text]) {
-            const bail = AbortSignal.timeout(voiceSendMs);
-            await Promise.race([
-              wa.messages.sendText({ phoneNumberId, to, body }),
-              new Promise((_r, reject) => {
-                bail.addEventListener("abort", () =>
-                  reject(new Error(`whatsapp send exceeded ${voiceSendMs}ms`)),
-                );
-              }),
-            ]);
-          }
-        },
+        send: createVoiceSender({ wa, phoneNumberId, timeoutMs: voiceSendMs }),
       });
       if (r.attempted > 0 || r.skippedLines > 0) {
         const bad = r.skippedLines ? `, ${r.skippedLines} unparseable line(s)` : "";
