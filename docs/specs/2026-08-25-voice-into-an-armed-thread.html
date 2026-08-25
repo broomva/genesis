@@ -25,7 +25,47 @@ meta:
 -->
 <html lang="en">
 <head>
-
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Genesis — Voice Into an Armed Thread (design)</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#182031; --line:#243043; --line2:#2f3d55;
+    --ink:#e6edf7; --muted:#93a1b8; --dim:#6b7a93;
+    --blue:#4c8dff; --green:#31c48d; --amber:#f6b73c; --violet:#a78bfa; --red:#f2705a;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 72px}
+  .kick{color:var(--blue);font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  h1{font-size:32px;line-height:1.2;margin:12px 0 8px;letter-spacing:-.02em}
+  h2{font-size:20px;margin:44px 0 12px;letter-spacing:-.01em}
+  h3{font-size:15px;margin:26px 0 8px;color:var(--muted);font-weight:600}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:14px 0}
+  .card.warn{border-color:#5a3a26;background:#1a1410}
+  .card.good{border-color:#22503c;background:#0f1a16}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.07em}
+  code{font-family:var(--mono);font-size:13px;background:var(--panel2);padding:1px 6px;border-radius:5px;color:var(--violet)}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:var(--ink)}
+  .pill{display:inline-block;font:600 11px/1 var(--mono);padding:5px 9px;border-radius:999px;letter-spacing:.06em;text-transform:uppercase}
+  .p-yes{background:#12301f;color:var(--green);border:1px solid #22503c}
+  .p-no{background:#31201c;color:var(--red);border:1px solid #5a2f28}
+  .p-risk{background:#2e2415;color:var(--amber);border:1px solid #5a3a26}
+  .grid{display:grid;gap:14px}
+  @media(min-width:820px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+  .note{color:var(--muted);font-size:13.5px}
+  .phase{display:flex;gap:14px;align-items:flex-start;margin:10px 0}
+  .pnum{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:var(--panel2);border:1px solid var(--line2);color:var(--blue);font:600 12px/26px var(--mono);text-align:center}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0}
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  a{color:var(--blue);text-decoration:none}
+  .kv{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
 <body><div class="wrap">
 
 <div class="kick">Genesis · design spec</div>
@@ -109,7 +149,7 @@ packages/core/src/supervisor.ts:892
 
   <rect x="390" y="95" width="250" height="135" rx="12" fill="#182031" stroke="#2f3d55"/>
   <text x="408" y="121" fill="#93a1b8" font-family="SF Mono,monospace" font-size="11" letter-spacing="1.3">ARMED SET (server)</text>
-  <text x="408" y="149" fill="#e6edf7" font-size="12.5">threadId → principal, expiry</text>
+  <text x="408" y="149" fill="#e6edf7" font-size="12.5">threadId → ownerId + callerId, expiry</text>
   <text x="408" y="173" fill="#93a1b8" font-size="12">a call resolves against it</text>
   <text x="408" y="197" fill="#93a1b8" font-size="12">no match ⇒ today's behaviour,</text>
   <text x="408" y="215" fill="#93a1b8" font-size="12">unchanged</text>
@@ -133,12 +173,21 @@ packages/core/src/supervisor.ts:892
 <table>
 <tr><th>Step</th><th>Who</th><th>What</th></tr>
 <tr><td>1</td><td>You, in the PWA</td><td>Arm a thread for voice. One control, an explicit duration.</td></tr>
-<tr><td>2</td><td>BFF</td><td>Records <code>(threadId, principal, expiresAt)</code>. Authorizes the principal against the thread — <strong>the check that does not exist yet.</strong></td></tr>
+<tr><td>2</td><td>BFF</td><td>Records <code>(threadId, ownerId, callerId, expiresAt)</code>. Authorizes <code>ownerId</code> against the thread — <strong>the check that does not exist yet.</strong> The owner also names <em>which caller</em> may reach it.</td></tr>
 <tr><td>3</td><td>Caller</td><td>Speaks a request. The ticket carries <code>callerId</code> as it does now, and no thread.</td></tr>
 <tr><td>4</td><td>Drain</td><td>Resolves the caller to an armed thread. <em>No match ⇒ exactly today's behaviour</em>, tenant workspace and WhatsApp delivery.</td></tr>
 <tr><td>5</td><td>Genesis</td><td>Runs the turn on that <code>threadId</code>, resuming the session.</td></tr>
 <tr><td>6</td><td>You</td><td>Open the thread. The answer is in it. Nothing was pushed anywhere.</td></tr>
 </table>
+<h3>Two identities, and they are not the same thing</h3>
+<p>Review of this draft caught a real ambiguity: it used the word <em>principal</em> for both sides, and they live in different identity spaces. Conflating them is how an implementation ends up authorizing one identity and dispatching on the other.</p>
+<table>
+<tr><th></th><th><code>ownerId</code></th><th><code>callerId</code></th></tr>
+<tr><td>Comes from</td><td>Better Auth session — a passkey on your device</td><td><code>parseVoicePrincipals</code>, a normalized phone number from an env allowlist</td></tr>
+<tr><td>Trust</td><td>authenticated</td><td><strong>asserted, spoofable</strong></td></tr>
+<tr><td>Used for</td><td>proving the arming request may touch this thread</td><td>matching an incoming call to an armed record</td></tr>
+</table>
+<p><strong>The mapping between them is asserted at arming time, by the authenticated side.</strong> The owner says "this thread, for this caller, for this long" — so the binding is a claim by the trusted party, never an inference from the untrusted one. A caller ID appearing in the allowlist proves only that the number is known; it never selects a thread on its own.</p>
 <p class="note"><strong>Arming expires, and that is the point.</strong> A standing permission is indistinguishable from no permission after a week. A window you opened for this call is a window you remember opening.</p>
 </div>
 
@@ -148,10 +197,10 @@ packages/core/src/supervisor.ts:892
 <strong>Thread ownership authorization.</strong> The prerequisite, and the only part that is load-bearing for safety. <code>authorizePrincipal</code> authenticates; nothing checks that the principal owns the thread it is acting on. Single-owner today makes this invisible — arming makes it real. This is the same phase-1 item the Option C spec named, arrived at independently.
 </div></div>
 <div class="phase"><div class="pnum">2</div><div>
-<strong>The armed set.</strong> <code>POST /api/threads/:id/arm-voice</code> with a duration; a store of <code>(threadId, principal, expiresAt)</code>; expiry enforced on read, not by a sweeper. Small enough to be a file beside the voice queue, which is where the rest of this channel's state already lives.
+<strong>The armed set.</strong> <code>POST /api/threads/:id/arm-voice</code> taking a duration and a <code>callerId</code>; a store of <code>(threadId, ownerId, callerId, expiresAt)</code>; expiry enforced on read, not by a sweeper. <strong>At most one armed record per <code>callerId</code></strong> — arming a second supersedes the first, so resolution is a lookup and never a choice. Small enough to be a file beside the voice queue, where the rest of this channel's state already lives.
 </div></div>
 <div class="phase"><div class="pnum">3</div><div>
-<strong>Resolution in the drain.</strong> Caller → principal (the existing <code>parseVoicePrincipals</code> allowlist) → armed thread, if any. Pass that <code>threadId</code> to <code>genesisStream</code> instead of the synthetic one. <em>Unarmed is not an error</em> — it is the current path, untouched.
+<strong>Resolution in the drain.</strong> <code>callerId</code> → the single armed record bearing it, if any → its <code>threadId</code>, passed to <code>genesisStream</code> in place of the synthetic one. <em>Unarmed is not an error</em> — it is the current path, untouched. Ambiguity cannot arise, because phase 2 permits only one armed record per caller; if one somehow does, <strong>refuse rather than pick</strong>.
 </div></div>
 <div class="phase"><div class="pnum">4</div><div>
 <strong>The arming control in the PWA.</strong> Per-thread, showing the remaining window and offering to cancel. The visible state is the security property: if you cannot see what is armed, you cannot notice what should not be.
@@ -168,6 +217,8 @@ packages/core/src/supervisor.ts:892
 <tr><td>A spoofed caller reaches an armed thread</td><td>They act inside real work, not their own sandbox</td><td>Bounded, not eliminated: only a thread you armed, only while armed. Shrinking the window shrinks the exposure, and the exposure is visible in the PWA</td></tr>
 <tr><td>Thread-ownership check lands wrong</td><td>Arming becomes a way to reach someone else's session</td><td>Phase 1 is the prerequisite, not a later hardening step. Nothing else ships first</td></tr>
 <tr><td>Two calls land on one armed thread concurrently</td><td>Interleaved turns in one worktree</td><td>The supervisor already serializes per thread; this needs confirming rather than assuming, and is listed as unverified below</td></tr>
+<tr><td>One caller resolves to several armed threads</td><td>The dispatch would have to guess, and could pick the wrong worktree</td><td>Cannot arise: one armed record per <code>callerId</code>, a second supersedes the first. If it somehow does, refuse rather than pick</td></tr>
+<tr><td><code>ownerId</code> and <code>callerId</code> conflated in implementation</td><td>Authorize one identity, dispatch on the other</td><td>Named apart in the store and every step; the arming request carries both, and only <code>ownerId</code> is ever authenticated</td></tr>
 <tr><td>Arming is forgotten and left open</td><td>A standing permission nobody remembers</td><td>Expiry is mandatory and short by default; the PWA shows what is armed</td></tr>
 <tr><td>The transcript is wrong and the turn is destructive</td><td>ASR mishears; the agent acts on it in your worktree</td><td><strong>Unsolved here.</strong> Today's channel has the same property and lower stakes. See open questions</td></tr>
 </table>
