@@ -108,3 +108,31 @@ describe("renderForWhatsapp — degenerate chunk targets (round 2 depth)", () =>
     });
   }
 });
+
+describe("renderForWhatsapp — both send paths render identically", () => {
+  // The point of routing the voice leg through this helper is that it cannot
+  // drift from the WhatsApp handler. Before, index.ts called markdownToWhatsApp
+  // directly with its own chunk-target arithmetic; the two could diverge and
+  // nothing would notice. This pins them to the same output.
+  const replies = [
+    "## Summary\n\n**done** — see [docs](https://example.com/x)",
+    "| a | b |\n|---|---|\n| 1 | 2 |",
+    "```python\ndef f(*a, **kw): pass\n```",
+    `long: ${"lorem ipsum dolor sit amet. ".repeat(120)}`,
+    "",
+  ];
+  for (const [i, text] of replies.entries()) {
+    it(`case ${i}: the voice label and the thread label produce the same chunks`, () => {
+      const viaHandler = renderForWhatsapp(text, { label: "thread=t-1", warn: () => {} });
+      const viaVoice = renderForWhatsapp(text, { label: "voice=573000", warn: () => {} });
+      expect(viaVoice.chunks).toEqual(viaHandler.chunks);
+      expect(viaVoice.chars).toBe(viaHandler.chars);
+    });
+  }
+  it("the label only changes the warning, never the delivery", () => {
+    const seen: string[] = [];
+    const r = renderForWhatsapp("|---|", { label: "voice=573000", warn: (m) => seen.push(m) });
+    expect(seen[0]).toContain("voice=573000");
+    expect(r.chunks).toEqual(renderForWhatsapp("|---|", { label: "x", warn: () => {} }).chunks);
+  });
+});
