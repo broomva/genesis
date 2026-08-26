@@ -59,7 +59,15 @@ describe("everything else is left alone", () => {
     // Kapso emitting the marker with nothing after it means it failed to hear
     // the note. Returning "" would dispatch an empty prompt; undefined routes
     // to the advisory, which in that case is true.
-    expect(upstreamTranscript("Audio attached (a.ogg)\n\nTranscript:   \n  ")).toBeUndefined();
+    // A COMPLETE envelope, so the only thing that can reject it is the empty
+    // transcript itself. Tightening the header made an earlier version of this
+    // test pass for the wrong reason — it had no URL, so it never reached the
+    // guard it was written to pin.
+    expect(
+      upstreamTranscript(
+        "Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg\n\nTranscript:   \n  ",
+      ),
+    ).toBeUndefined();
   });
 
   test("a caption BEFORE the envelope is not consumed", () => {
@@ -72,5 +80,49 @@ describe("everything else is left alone", () => {
   test("empty and undefined are handled", () => {
     expect(upstreamTranscript(undefined)).toBeUndefined();
     expect(upstreamTranscript("")).toBeUndefined();
+  });
+});
+
+describe("a human's typed words are never deleted (P20 round 1, BLOCKER)", () => {
+  // These inputs are the reviewer's, verbatim. It did not argue the first one
+  // was possible — it ran the code and printed the deletion.
+
+  test("a typed instruction between the opening words and a Transcript: line survives", () => {
+    const typedByAPerson =
+      "Audio attached (interview.ogg)\n" +
+      "Please summarize and preserve speaker names.\n" +
+      "Transcript: Alice: revenue rose.";
+    // Not an envelope: the header is broken across lines and carries no URL.
+    // Falling through means the WHOLE message is dispatched, instruction intact.
+    expect(upstreamTranscript(typedByAPerson)).toBeUndefined();
+  });
+
+  test("the bracketed variant of the envelope is still read", () => {
+    // Kapso's other documented emission. Left unhandled it would have kept
+    // producing the exact false advisory this change exists to remove.
+    const bracketed =
+      "[Audio attached] (voice.ogg) [Size: 50 KB | Type: audio/ogg] " +
+      "URL: https://api.kapso.ai/media/x\nTranscript: Hello, I need help with my order";
+    expect(upstreamTranscript(bracketed)).toBe("Hello, I need help with my order");
+  });
+
+  test("a header without a URL is not an envelope", () => {
+    expect(
+      upstreamTranscript("Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg]\nTranscript: hi"),
+    ).toBeUndefined();
+  });
+
+  test("a header split across lines is not an envelope", () => {
+    expect(
+      upstreamTranscript("Audio attached (a.ogg)\nURL: https://x/a.ogg\nTranscript: hi"),
+    ).toBeUndefined();
+  });
+
+  test("matching stays linear on pathological input", () => {
+    const hostile = `Audio attached (${"a".repeat(200)}) ${"b".repeat(500)} URL: https://x/${"c".repeat(2000)}\n${" ".repeat(60)}Transcript: ${"d".repeat(50_000)}`;
+    const started = performance.now();
+    upstreamTranscript(hostile);
+    upstreamTranscript(`${" ".repeat(2_000_000)}X`);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });
