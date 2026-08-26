@@ -47,8 +47,12 @@
  *  produce that by accident, and one who reproduces it exactly has typed the
  *  transcript they then get answered on.
  *
- *  Every quantifier is bounded, so matching is linear in the input and no
- *  pathological message can make it climb.
+ *  Every quantifier is bounded, and the leading `^` is not decoration: it is
+ *  what keeps matching linear. Mutation-tested by deleting it, at which point
+ *  a two-megabyte run of spaces sends the engine into catastrophic
+ *  backtracking and the suite stops finishing. Bounded quantifiers alone did
+ *  NOT save it — the anchor is doing that work, so do not "simplify" it away
+ *  on the grounds that the rest of the pattern looks safe.
  *
  *  `[Audio attached]` bracketed is Kapso's other documented emission; both are
  *  accepted, because the variant that reaches us is not ours to choose. */
