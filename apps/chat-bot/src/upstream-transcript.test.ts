@@ -209,3 +209,39 @@ describe("only a channel that actually transcribes is parsed", () => {
     expect(transcribesUpstream("telegram:not-kapso:1")).toBe(false);
   });
 });
+
+describe("the header admits no whitespace-bearing free text (P20 round 3)", () => {
+  // Round 3's blocker was the filename slot — the third span in three rounds.
+  // These pin the INVARIANT rather than the one input: a sentence needs
+  // spaces, so if no span accepts a space, no span can swallow a sentence.
+
+  test("prose inside the filename parens is not an envelope", () => {
+    expect(
+      upstreamTranscript(
+        "Audio attached (a.ogg — please summarize and preserve speaker names) " +
+          "[Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg\nTranscript: Alice: revenue rose.",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("a single space in the filename is enough to reject it", () => {
+    // The boundary of the invariant, not a restatement of the case above.
+    expect(
+      upstreamTranscript(
+        "Audio attached (a b.ogg) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg\nTranscript: hi",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("real Kapso filenames still pass", () => {
+    // The other half of the bidirectional proof: tightening must not have
+    // overshot into rejecting the vendor's actual values.
+    for (const name of ["audio_712bb19e4d77.ogg", "voice.ogg", "a-b.c.ogg", "AUDIO-2026.08.26.oga"]) {
+      expect(
+        upstreamTranscript(
+          `Audio attached (${name}) [Size: 12.5 KB | Type: audio/ogg] URL: https://x/${name}\nTranscript: heard`,
+        ),
+      ).toBe("heard");
+    }
+  });
+});

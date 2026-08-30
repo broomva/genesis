@@ -73,7 +73,36 @@
  *
  *  Brackets are PAIRED by alternation rather than independently optional,
  *  which round 2 found accepted malformed `[Audio attached (a.ogg) …`. */
-const FILENAME = /\([^)\n]{1,255}\)/.source;
+/** The filename slot — and the reason this pattern finally converges.
+ *
+ *  Round 3 blocked on THIS span, having already blocked on two others, and
+ *  named the reason: "inferring provenance from text shape keeps recreating
+ *  the same deletion risk." Every span I made exact turned the next one into
+ *  the hole — caption, then metadata, then here, where
+ *
+ *      Audio attached (a.ogg — please summarize and preserve speaker names)
+ *      [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg
+ *      Transcript: Alice: revenue rose.
+ *
+ *  deleted the instruction. My "no wildcard left" claim was simply false.
+ *
+ *  What stops the regress is not another tightening but an invariant that can
+ *  be CHECKED BY INSPECTION over the whole header:
+ *
+ *      NO SPAN OF THE HEADER ADMITS WHITESPACE-BEARING FREE TEXT.
+ *
+ *  Prose requires whitespace. The literal words are fixed; METADATA is an
+ *  exact grammar; URL_PART is `\S`-only; this was the last span that allowed
+ *  a space, and now does not. There is no remaining place for a sentence to
+ *  hide, so the next round has nowhere to relocate the finding — which is the
+ *  property the previous three fixes lacked.
+ *
+ *  It costs nothing real: Kapso names these itself (`audio_712bb19e4d77.ogg`),
+ *  and a filename with a space in it is not one of ours.
+ *
+ *  This does NOT make text-shape inference sound. A provenance-bearing field
+ *  from the adapter is still the right answer, and BRO-2393 keeps it open. */
+const FILENAME = /\([^\s)]{1,255}\)/.source;
 const METADATA = /\[Size:[ \t]*[\d.,]{1,15}[ \t]*[KMGT]?B[ \t]*\|[ \t]*Type:[ \t]*[\w.+-]{1,64}\/[\w.+-]{1,64}\]/.source;
 const URL_PART = /URL:[ \t]*\S{1,2048}/.source;
 
