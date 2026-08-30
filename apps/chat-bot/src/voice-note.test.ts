@@ -136,3 +136,75 @@ describe("textToDispatch — nothing involving audio is ever silent", () => {
     }
   });
 });
+
+describe("a voice note the channel already transcribed", () => {
+  // Regression for the 2026-08-26T15:24:48Z turn: the sender asked, by voice
+  // note, whether this bot can hold a voice conversation. It answered the
+  // question from Kapso's transcript AND told them the audio was skipped.
+  const ENVELOPE =
+    "Audio attached (audio_712bb19e4d77.ogg) [Size: 12.5 KB | Type: audio/ogg] URL: " +
+    "https://app.kapso.ai/rails/active_storage/blobs/redirect/eyJfcmFpbHM=--7916bc/audio.ogg\n\n" +
+    "Transcript: Can we have a voice notes conversation or can you send me audio?";
+
+  test("the SPOKEN words are dispatched, not the envelope", async () => {
+    const { t } = recordingThread();
+    const out = await textToDispatch(t, { text: ENVELOPE, attachments: [audio()] }, quiet);
+    expect(out).toBe("Can we have a voice notes conversation or can you send me audio?");
+  });
+
+  test("the sender is NOT told the audio was skipped", async () => {
+    const { posts, t } = recordingThread();
+    await textToDispatch(t, { text: ENVELOPE, attachments: [audio()] }, quiet);
+    expect(posts).toEqual([]);
+  });
+
+  test("without an attachment the same text is answered as typing", async () => {
+    // The negative control for the branch: it is the ATTACHMENT that makes
+    // this a voice note. Text alone, however shaped, is a typed message and
+    // must be dispatched whole rather than truncated to its tail.
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch(t, { text: ENVELOPE, attachments: [] }, quiet);
+    expect(out).toBe(ENVELOPE.trim());
+    expect(posts).toEqual([]);
+  });
+
+  test("an untranscribed voice note still gets the honest advisory", async () => {
+    // The fix must not silence the case it was built around. A caption plus
+    // audio Kapso did not transcribe is still audio we cannot hear.
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch(t, { text: "have a listen", attachments: [audio()] }, quiet);
+    expect(out).toBe("have a listen");
+    expect(posts).toEqual([AUDIO_IGNORED_NOTE]);
+  });
+});
+
+describe("the transcript path is confined to the channel that transcribes", () => {
+  const ENVELOPE =
+    "Audio attached (a.ogg) [Size: 12.5 KB | Type: audio/ogg] URL: https://app.kapso.ai/x/a.ogg\n\n" +
+    "Transcript: can you hear me?";
+
+  test("a kapso thread is answered from the transcript", async () => {
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch(
+      { ...t, id: "kapso:a:b:c" },
+      { text: ENVELOPE, attachments: [audio()] },
+      quiet,
+    );
+    expect(out).toBe("can you hear me?");
+    expect(posts).toEqual([]);
+  });
+
+  test("the same text on another channel is dispatched WHOLE", async () => {
+    // Round 2 MAJOR 1. The funnel is shared; the envelope is one vendor's.
+    // On Telegram this text is just something a person sent, and truncating
+    // it to its tail would be the same word-deletion defect by another route.
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch(
+      { ...t, id: "telegram:1" },
+      { text: ENVELOPE, attachments: [audio()] },
+      quiet,
+    );
+    expect(out).toBe(ENVELOPE.trim());
+    expect(posts).toEqual([AUDIO_IGNORED_NOTE]);
+  });
+});

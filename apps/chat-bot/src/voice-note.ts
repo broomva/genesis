@@ -25,6 +25,8 @@
 //
 // What remains is live, small, and the part that actually helps today.
 
+import { transcribesUpstream, upstreamTranscript } from "./upstream-transcript";
+
 /** The slice of Chat SDK's `Attachment` this module needs. */
 export interface AudioAttachment {
   readonly type: "image" | "file" | "video" | "audio";
@@ -102,6 +104,24 @@ export async function textToDispatch(
 ): Promise<string | undefined> {
   const typed = message.text?.trim();
   const note = findVoiceNote(message.attachments ?? []);
+
+  // The channel may have already listened for us. Kapso inlines a transcript
+  // into the message text, which made every branch below wrong at once: the
+  // audio was NOT skipped, so the advisory lied, and the text dispatched was
+  // an "Audio attached (…) URL: …" envelope rather than the spoken question.
+  //
+  // Gated on `note` so that text alone can never take this path: a sender who
+  // types the envelope by hand, with nothing attached, is answered as the
+  // typist they are. Gated on the CHANNEL too, because this funnel is shared
+  // by every adapter and the envelope belongs to exactly one of them — review
+  // found the parse running happily on a Telegram audio caption.
+  if (note && transcribesUpstream(thread.id)) {
+    const spoken = upstreamTranscript(message.text);
+    if (spoken) {
+      log.warn(`[genesis-bot] ${thread.id}: answered a voice note transcribed upstream`);
+      return spoken;
+    }
+  }
 
   if (typed && note) {
     // Both. Dispatch the text, and SAY the audio was skipped — but never let
