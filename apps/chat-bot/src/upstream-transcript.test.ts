@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { upstreamTranscript } from "./upstream-transcript";
+import { transcribesUpstream, upstreamTranscript } from "./upstream-transcript";
 
 /** The 2026-08-26T15:24:48Z payload, copied out of the journal rather than
  *  imagined. A fixture the author invented would encode the author's guess at
@@ -124,5 +124,88 @@ describe("a human's typed words are never deleted (P20 round 1, BLOCKER)", () =>
     upstreamTranscript(hostile);
     upstreamTranscript(`${" ".repeat(2_000_000)}X`);
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe("no wildcard is left for a human's words to fall into (P20 round 2)", () => {
+  // Round 2's blocker, verbatim. Round 1's blocker was the same invariant in
+  // a different branch; this is the third. The fix was not another tightening
+  // but removing free text from the grammar entirely, so the test that matters
+  // is whether an instruction can hide ANYWHERE inside the header.
+
+  test("a same-line instruction in the metadata slot is not swallowed", () => {
+    expect(
+      upstreamTranscript(
+        "Audio attached (interview.ogg) Please summarize and preserve speaker names. " +
+          "URL: https://x/interview.ogg\nTranscript: Alice: revenue rose.",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("an instruction before the URL, with real metadata present, is not swallowed", () => {
+    expect(
+      upstreamTranscript(
+        "Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg] and please reply in Spanish " +
+          "URL: https://x/a.ogg\nTranscript: hola",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("an instruction between the words and the filename is not swallowed", () => {
+    expect(
+      upstreamTranscript(
+        "Audio attached please be brief (a.ogg) [Size: 1 KB | Type: audio/ogg] " +
+          "URL: https://x/a.ogg\nTranscript: hi",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("unpaired brackets are rejected", () => {
+    // Round 2 MAJOR 2: independently optional brackets accepted this.
+    expect(
+      upstreamTranscript(
+        "[Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg\nTranscript: hello",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("junk in the metadata slot is rejected", () => {
+    expect(
+      upstreamTranscript(
+        "Audio attached (a.ogg) [whatever] URL: https://x/a.ogg\nTranscript: hi",
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("the filename bound is a real boundary, not decoration", () => {
+  // Round 2 was right and I was wrong: I called the surviving {1,255} mutant a
+  // no-behaviour bound. It differs from `+` at exactly 256 characters, so it
+  // needed a boundary test rather than an assertion that it did not.
+  const envelope = (name: string) =>
+    `Audio attached (${name}) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg\nTranscript: hi`;
+
+  test("255 characters is accepted", () => {
+    expect(upstreamTranscript(envelope("a".repeat(255)))).toBe("hi");
+  });
+
+  test("256 characters is rejected", () => {
+    expect(upstreamTranscript(envelope("a".repeat(256)))).toBeUndefined();
+  });
+});
+
+describe("only a channel that actually transcribes is parsed", () => {
+  test("kapso threads are", () => {
+    expect(transcribesUpstream("kapso:MTMxNDAx:NTczMDE3:MjY4ZjE3")).toBe(true);
+  });
+
+  test("telegram and other channels are not", () => {
+    expect(transcribesUpstream("telegram:1")).toBe(false);
+    expect(transcribesUpstream("slack:C123:456")).toBe(false);
+    expect(transcribesUpstream("")).toBe(false);
+  });
+
+  test("a channel merely containing the name is not", () => {
+    expect(transcribesUpstream("telegram:not-kapso:1")).toBe(false);
   });
 });

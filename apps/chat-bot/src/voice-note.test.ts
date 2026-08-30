@@ -177,3 +177,26 @@ describe("a voice note the channel already transcribed", () => {
     expect(posts).toEqual([AUDIO_IGNORED_NOTE]);
   });
 });
+
+describe("the transcript path is confined to the channel that transcribes", () => {
+  const ENVELOPE =
+    "Audio attached (a.ogg) [Size: 12.5 KB | Type: audio/ogg] URL: https://app.kapso.ai/x/a.ogg\n\n" +
+    "Transcript: can you hear me?";
+
+  test("a kapso thread is answered from the transcript", async () => {
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch({ ...t, id: "kapso:a:b:c" }, { text: ENVELOPE, attachments: [audio()] }, quiet);
+    expect(out).toBe("can you hear me?");
+    expect(posts).toEqual([]);
+  });
+
+  test("the same text on another channel is dispatched WHOLE", async () => {
+    // Round 2 MAJOR 1. The funnel is shared; the envelope is one vendor's.
+    // On Telegram this text is just something a person sent, and truncating
+    // it to its tail would be the same word-deletion defect by another route.
+    const { posts, t } = recordingThread();
+    const out = await textToDispatch({ ...t, id: "telegram:1" }, { text: ENVELOPE, attachments: [audio()] }, quiet);
+    expect(out).toBe(ENVELOPE.trim());
+    expect(posts).toEqual([AUDIO_IGNORED_NOTE]);
+  });
+});

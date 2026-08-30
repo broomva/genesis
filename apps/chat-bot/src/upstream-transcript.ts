@@ -41,23 +41,54 @@
  *  invariant (never discard what a human typed) forgotten in the one branch I
  *  did not enumerate.
  *
- *  So the header is now required to be intact and machine-shaped: a bracketed
- *  filename, then whatever metadata, then `URL:` and a URL, ALL ON ONE LINE,
- *  and the transcript marker immediately after it. A human typing prose cannot
- *  produce that by accident, and one who reproduces it exactly has typed the
- *  transcript they then get answered on.
+ *  ROUND 2 BLOCKED IT AGAIN, on a different branch of the same regex. The
+ *  header was required to be one line, but the metadata slot was a wildcard,
+ *  so
  *
- *  Every quantifier is bounded, and the leading `^` is not decoration: it is
- *  what keeps matching linear. Mutation-tested by deleting it, at which point
- *  a two-megabyte run of spaces sends the engine into catastrophic
- *  backtracking and the suite stops finishing. Bounded quantifiers alone did
- *  NOT save it — the anchor is doing that work, so do not "simplify" it away
- *  on the grounds that the rest of the pattern looks safe.
+ *     Audio attached (interview.ogg) Please summarize and preserve speaker
+ *     names. URL: https://x/interview.ogg
+ *     Transcript: Alice: revenue rose.
  *
- *  `[Audio attached]` bracketed is Kapso's other documented emission; both are
- *  accepted, because the variant that reaches us is not ours to choose. */
-const ENVELOPE_WITH_TRANSCRIPT =
-  /^[ \t]*\[?Audio attached\]?[ \t]*\([^)\n]{1,255}\)[^\n]{0,512}\bURL:[ \t]*\S{1,2048}[ \t]*\r?\n\s{0,64}Transcript:[ \t]*([\s\S]*)$/;
+ *  still returned only "Alice: revenue rose." That is the SAME invariant —
+ *  never delete what a human typed — broken for the third time in a third
+ *  branch. Tightening one more branch would only move the hole; a wildcard
+ *  anywhere in this pattern is a place a human's words can go to die.
+ *
+ *  So there is no wildcard left. Every span is an exact grammar: the literal
+ *  words, a parenthesised filename, Kapso's `[Size: … | Type: …]` block, the
+ *  URL, the marker. Nothing between them is free text.
+ *
+ *  AND recognition is gated on the channel, which is the actual root of the
+ *  class. This envelope is one vendor's; it has no business being recognised
+ *  on a Telegram audio caption at all. Round 2 called the "it is a format
+ *  recogniser, not a vendor hook" defence rationalisation, and it was right:
+ *  the funnel it sits in is channel-agnostic, so without a gate the parse ran
+ *  on every channel's audio.
+ *
+ *  The leading `^` is not decoration: it is what keeps matching linear.
+ *  Mutation-tested by deleting it, at which point a two-megabyte run of
+ *  spaces sends the engine into catastrophic backtracking and the suite stops
+ *  finishing. Bounds alone did NOT save it — the anchor does that work, so do
+ *  not "simplify" it away because the rest of the pattern looks safe.
+ *
+ *  Brackets are PAIRED by alternation rather than independently optional,
+ *  which round 2 found accepted malformed `[Audio attached (a.ogg) …`. */
+const FILENAME = /\([^)\n]{1,255}\)/.source;
+const METADATA = /\[Size:[ \t]*[\d.,]{1,15}[ \t]*[KMGT]?B[ \t]*\|[ \t]*Type:[ \t]*[\w.+-]{1,64}\/[\w.+-]{1,64}\]/.source;
+const URL_PART = /URL:[ \t]*\S{1,2048}/.source;
+
+const ENVELOPE_WITH_TRANSCRIPT = new RegExp(
+  `^[ \\t]*(?:\\[Audio attached\\]|Audio attached)[ \\t]*${FILENAME}[ \\t]*${METADATA}[ \\t]*${URL_PART}[ \\t]*\\r?\\n\\s{0,64}Transcript:[ \\t]*([\\s\\S]*)$`,
+);
+
+/** Channels known to transcribe voice notes upstream and inline the result.
+ *
+ *  A thread id carries its channel as a prefix ("kapso:<a>:<b>:<c>"). Gating
+ *  here rather than at the call site keeps every fact about a vendor's wire
+ *  format inside this one file. */
+export function transcribesUpstream(threadId: string): boolean {
+  return threadId.startsWith("kapso:");
+}
 
 /** The spoken words a channel already transcribed for us, or undefined when
  *  this text is not such an envelope.

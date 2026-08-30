@@ -25,7 +25,7 @@
 //
 // What remains is live, small, and the part that actually helps today.
 
-import { upstreamTranscript } from "./upstream-transcript";
+import { transcribesUpstream, upstreamTranscript } from "./upstream-transcript";
 
 /** The slice of Chat SDK's `Attachment` this module needs. */
 export interface AudioAttachment {
@@ -112,8 +112,10 @@ export async function textToDispatch(
   //
   // Gated on `note` so that text alone can never take this path: a sender who
   // types the envelope by hand, with nothing attached, is answered as the
-  // typist they are.
-  if (note) {
+  // typist they are. Gated on the CHANNEL too, because this funnel is shared
+  // by every adapter and the envelope belongs to exactly one of them — review
+  // found the parse running happily on a Telegram audio caption.
+  if (note && transcribesUpstream(thread.id)) {
     const spoken = upstreamTranscript(message.text);
     if (spoken) {
       log.warn(`[genesis-bot] ${thread.id}: answered a voice note transcribed upstream`);
