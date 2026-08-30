@@ -51,7 +51,9 @@ describe("everything else is left alone", () => {
 
   test("an envelope with no marker is not one", () => {
     expect(
-      upstreamTranscript("Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg"),
+      upstreamTranscript(
+        "Audio attached (a.ogg) [Size: 1 KB | Type: audio/ogg] URL: https://x/a.ogg",
+      ),
     ).toBeUndefined();
   });
 
@@ -171,9 +173,7 @@ describe("no wildcard is left for a human's words to fall into (P20 round 2)", (
 
   test("junk in the metadata slot is rejected", () => {
     expect(
-      upstreamTranscript(
-        "Audio attached (a.ogg) [whatever] URL: https://x/a.ogg\nTranscript: hi",
-      ),
+      upstreamTranscript("Audio attached (a.ogg) [whatever] URL: https://x/a.ogg\nTranscript: hi"),
     ).toBeUndefined();
   });
 });
@@ -236,7 +236,12 @@ describe("the header admits no whitespace-bearing free text (P20 round 3)", () =
   test("real Kapso filenames still pass", () => {
     // The other half of the bidirectional proof: tightening must not have
     // overshot into rejecting the vendor's actual values.
-    for (const name of ["audio_712bb19e4d77.ogg", "voice.ogg", "a-b.c.ogg", "AUDIO-2026.08.26.oga"]) {
+    for (const name of [
+      "audio_712bb19e4d77.ogg",
+      "voice.ogg",
+      "a-b.c.ogg",
+      "AUDIO-2026.08.26.oga",
+    ]) {
       expect(
         upstreamTranscript(
           `Audio attached (${name}) [Size: 12.5 KB | Type: audio/ogg] URL: https://x/${name}\nTranscript: heard`,

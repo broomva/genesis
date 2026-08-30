@@ -103,7 +103,9 @@
  *  This does NOT make text-shape inference sound. A provenance-bearing field
  *  from the adapter is still the right answer, and BRO-2393 keeps it open. */
 const FILENAME = /\([^\s)]{1,255}\)/.source;
-const METADATA = /\[Size:[ \t]*[\d.,]{1,15}[ \t]*[KMGT]?B[ \t]*\|[ \t]*Type:[ \t]*[\w.+-]{1,64}\/[\w.+-]{1,64}\]/.source;
+const METADATA =
+  /\[Size:[ \t]*[\d.,]{1,15}[ \t]*[KMGT]?B[ \t]*\|[ \t]*Type:[ \t]*[\w.+-]{1,64}\/[\w.+-]{1,64}\]/
+    .source;
 const URL_PART = /URL:[ \t]*\S{1,2048}/.source;
 
 const ENVELOPE_WITH_TRANSCRIPT = new RegExp(
