@@ -1,0 +1,142 @@
+<!doctype html>
+<!--
+meta:
+  slug: kapso-inlines-the-transcript
+  ticket: BRO-2393
+  status: shipped — merged on operator authorization at P20 5/10, NOT gate-passed
+  date: 2026-08-26
+  decisions:
+    - the bug is real and live: every Kapso voice note got an advisory saying the audio was skipped, when the transcript was what had just been answered
+    - the approach shipped (recognise the envelope by TEXT SHAPE) is known-unsound; three review rounds said so, each by executing it
+    - what makes it safe enough to ship is one inspectable invariant, not the parser being right: NO HEADER SPAN ADMITS WHITESPACE-BEARING FREE TEXT
+    - a provenance-bearing transcript field from the adapter is still the correct fix; BRO-2393 stays open for it
+    - the blocking unknown is whether Kapso's webhook carries a structured transcript field before it is flattened into `text`
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kapso inlines the transcript — BRO-2393</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#182031; --line:#243043; --line2:#2f3d55;
+    --ink:#e6edf7; --muted:#93a1b8; --dim:#6b7a93;
+    --blue:#4c8dff; --green:#31c48d; --amber:#f6b73c; --violet:#a78bfa; --red:#f2705a;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 72px}
+  .kick{color:var(--blue);font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+  h1{font-size:32px;line-height:1.2;margin:12px 0 8px;letter-spacing:-.02em}
+  h2{font-size:20px;margin:44px 0 12px;letter-spacing:-.01em}
+  h3{font-size:15px;margin:26px 0 8px;color:var(--muted);font-weight:600}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin:14px 0}
+  .card.warn{border-color:#5a3a26;background:#1a1410}
+  .card.good{border-color:#22503c;background:#0f1a16}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.07em}
+  code{font-family:var(--mono);font-size:13px;background:var(--panel2);padding:1px 6px;border-radius:5px;color:var(--violet)}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:var(--ink)}
+  .pill{display:inline-block;font:600 11px/1 var(--mono);padding:5px 9px;border-radius:999px;letter-spacing:.06em;text-transform:uppercase}
+  .p-yes{background:#12301f;color:var(--green);border:1px solid #22503c}
+  .p-no{background:#31201c;color:var(--red);border:1px solid #5a2f28}
+  .p-risk{background:#2e2415;color:var(--amber);border:1px solid #5a3a26}
+  .grid{display:grid;gap:14px}
+  @media(min-width:820px){.grid.c2{grid-template-columns:1fr 1fr}.grid.c3{grid-template-columns:repeat(3,1fr)}}
+  .note{color:var(--muted);font-size:13.5px}
+  .phase{display:flex;gap:14px;align-items:flex-start;margin:10px 0}
+  .pnum{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:var(--panel2);border:1px solid var(--line2);color:var(--blue);font:600 12px/26px var(--mono);text-align:center}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0}
+  .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  a{color:var(--blue);text-decoration:none}
+  .kv{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+</style>
+</head>
+<body><div class="wrap">
+
+<div class="kick">Genesis · incident &amp; fix · BRO-2393</div>
+<h1>The bot apologised for skipping the question it had just answered</h1>
+<p class="sub">A WhatsApp voice note asked whether Genesis can hold a voice conversation. It answered — from a transcript the channel had already made — and in the same turn told the sender it had not listened. This is what caused that, what shipped, and why what shipped is known to be the wrong shape of fix.</p>
+
+<h2>What happened</h2>
+
+<p>At <code>2026-08-26T15:24:48Z</code> a voice note arrived on the Kapso channel. Sixty-eight seconds later the turn completed cleanly — no error, no stall — and the sender received an answer, preceded by this:</p>
+
+<pre>(I answered your typed message — I can't listen to voice notes yet, so I skipped the audio.)</pre>
+
+<p>The sentence is false, and it is false in the most confusing possible way. The question in the voice note was <em>“Can we have a voice notes conversation or can you send me audio?”</em> — so the reply was a correct answer stapled to a denial that the question had been heard.</p>
+
+<p>The cause is one stale premise. <code>apps/chat-bot/src/voice-note.ts</code> was written on the assumption that a voice note is opaque audio nobody here can read. That is true of the Chat SDK. It is <strong>false of the live channel</strong>: Kapso transcribes upstream and inlines the result into the message body.</p>
+
+<pre>Audio attached (audio_712bb19e4d77.ogg) [Size: 12.5 KB | Type: audio/ogg] URL: https://app.kapso.ai/…/audio_712bb19e4d77.ogg
+
+Transcript: Can we have a voice notes conversation or can you send me audio?</pre>
+
+<p class="note">Two things went wrong at once, and only one of them was visible. The advisory lied — but also, what reached the agent as the user's prompt was that entire envelope, so a roughly 200-character signed blob URL was the loudest thing in it. The sender saw the first defect. Nobody saw the second.</p>
+
+<h2>Three review rounds, three refusals, one pattern</h2>
+
+<p>The fix recognises Kapso's envelope by its <strong>text shape</strong> and extracts the transcript. Cross-model review blocked it three times, scoring 5/10 every time, and each round found the same invariant — <em>never delete what a human typed</em> — broken in a different span of one regular expression.</p>
+
+<table>
+<tr><th>Round</th><th>Where a sender's typed words were deleted</th><th>My response</th></tr>
+<tr><td class="pnum">1</td><td>A caption between the opening words and the <code>Transcript:</code> line. My anchor guarded a caption <em>before</em> the envelope and left the gap <em>inside</em> it open.</td><td>Required the header to be intact and on one line.</td></tr>
+<tr><td class="pnum">2</td><td>The metadata slot was still a wildcard, so a <em>same-line</em> instruction was swallowed.</td><td>Replaced the wildcard with an exact grammar. Claimed “no wildcard left”.</td></tr>
+<tr><td class="pnum">3</td><td>The <strong>filename</strong> slot. The claim was false — <code>(a.ogg — please summarize and preserve speaker names)</code> is free text.</td><td>See below.</td></tr>
+</table>
+
+<p>Every round reached its finding by <em>executing</em> the parser and printing the deletion, never by arguing about it. That detail matters more than the findings: by my own operating notes, a review that blocks the change rather than the account of the change means the idea is reachable and wrong. I should have read that at round 2.</p>
+
+<p>Round 3 answered the question directly when asked whether this was a defective artifact or an unexhausted surface:</p>
+
+<pre>This is a defective artifact: inferring provenance from text shape
+keeps recreating the same deletion risk.</pre>
+
+<h2>Why it kept happening</h2>
+
+<p class="warn"><strong>Provenance is a fact about where data came from. Shape is a guess about it.</strong> Any span permissive enough to accept the vendor's real values is permissive enough to accept a human's prose — so making one span exact does not remove the risk, it <em>relocates</em> it to the next span. Three rounds, three spans, one mechanism. There is no fixed point, which is why three successive “fixes” all scored exactly 5.</p>
+
+<h2>What actually shipped</h2>
+
+<p>What ends the regress is not a fourth tightening. It is a single property that can be checked by <strong>inspection over the whole header</strong>, rather than by testing spans one at a time:</p>
+
+<pre>no span of the header admits whitespace-bearing free text</pre>
+
+<p>Prose requires whitespace. Given that, the header is closed:</p>
+
+<table>
+<tr><th>Span</th><th>Admits a space?</th></tr>
+<tr><td><code>Audio attached</code> / <code>[Audio attached]</code></td><td class="p-no">no — fixed literal, paired by alternation</td></tr>
+<tr><td><code>FILENAME</code></td><td class="p-no">no — <code>[^\s)]{1,255}</code>, tightened in this change</td></tr>
+<tr><td><code>METADATA</code></td><td class="p-no">no — exact <code>[Size: n UNIT | Type: mime]</code> grammar</td></tr>
+<tr><td><code>URL_PART</code></td><td class="p-no">no — <code>\S</code>-only</td></tr>
+<tr><td>the transcript itself</td><td class="p-yes">yes — and it should; it is the payload, not the header</td></tr>
+</table>
+
+<p>The filename tightening costs nothing real: Kapso names these itself (<code>audio_712bb19e4d77.ogg</code>), and a filename containing a space is not one of ours. It is proven in both directions — prose in the parens is rejected, and four real Kapso filename shapes still parse. Reverting it turns exactly those two tests red and leaves the “real filenames still pass” test green, so it neither under- nor over-shoots.</p>
+
+<p>Recognition is also gated on the channel. Round 2 called my defence of this — <em>“it is a format recogniser, not a vendor hook”</em> — rationalisation, and was right: <code>textToDispatch</code> is shared by every adapter, so the parse had been running happily on Telegram audio captions.</p>
+
+<h2>What is still wrong</h2>
+
+<p class="note"><strong>This document exists mostly to prevent a future reader from mistaking the shipped fix for the right one.</strong> It was merged on operator authorisation at 5/10 — not because it passed a gate. The invariant above makes it safe enough to run; it does not make text-shape inference sound.</p>
+
+<p>The correct fix, named by review: <em>replace text-shape inference with a provenance-bearing transcript field supplied by the Kapso adapter.</em> That is blocked on a fact nobody here has yet:</p>
+
+<p class="warn"><strong>Does Kapso's webhook carry the transcript as a structured field, before it is flattened into <code>text</code>?</strong></p>
+
+<p>Verified in-tree: neither <code>@kapso/chat-adapter@0.1.1</code> nor <code>@kapso/whatsapp-cloud-api@0.2.3</code> constructs that envelope — it arrives from Kapso's hosted service as the message body. So the field cannot be synthesised locally. Answering the question needs Kapso's API documentation, or one raw webhook payload captured from a live voice note.</p>
+
+<p>One further honesty: <strong>the reachability of the demonstrated defect was never established in either direction.</strong> Review proved the <em>function</em> deletes text by calling it directly. Whether the <em>system</em> can be driven into that state — whether Kapso can ever deliver a filename a sender controls — is unknown, and is the same blocked question. A planted input proves the instrument works, not that the experiment discriminates.</p>
+
+<h2>Separate, and not addressed here</h2>
+
+<p>The sender's actual question was whether Genesis can send audio <em>back</em>. It cannot. That is a feature — ElevenLabs synthesis plus WhatsApp media upload — not a defect, and it is not what this change touches.</p>
+
+<div class="foot">Genesis · BRO-2393 · incident 2026-08-26T15:24:48Z · shipped 2026-08-26 · merged on operator authorization at P20 5/10, not gate-passed. Branch <code>broomva/kapso-transcript-advisory</code>, 5 commits. 518 tests, typecheck 11/11. The correct fix — a provenance-bearing transcript field — remains open on BRO-2393, blocked on whether Kapso's webhook carries one.</div>
+
+</div></body>
+</html>
