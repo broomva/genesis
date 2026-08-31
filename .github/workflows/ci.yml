@@ -1,15 +1,130 @@
+# genesis CI.
+#
+# WHY THIS IS NO LONGER ONE SEQUENTIAL JOB. Steps inside a job carry an implicit
+# `success()` guard, so a failure at `bunx biome ci .` meant typecheck and test
+# NEVER RAN — "CI is red" localised to the first failing step and a formatting nit
+# hid whatever was behind it. That is not hypothetical: it happened twice in one
+# session on this repo, both times masking work that was in fact fine. Every gate
+# here runs and reports independently.
+#
+# `continue-on-error` was the obvious smaller change and is disqualified: at step
+# level it makes the JOB pass, inverting the polarity of the thing being built.
+#
+# The single required status check is `gates`. One aggregate rather than a list,
+# because a required-check LIST drifts — adding a gate and marking it required are
+# two separate acts and only the first appears in a diff. That every job is wired
+# into `needs:` is asserted by apps/api/src/workflow-gates.test.ts, NOT here: see
+# the note on the job itself for why it cannot be asserted here.
+#
+# Ported from broomva/walkie, which reasoned all of this through first (BRO-2385).
+# (BRO-2407.)
 name: ci
+
 on:
-  push: { branches: [main] }
+  push:
+    branches: [main]
   pull_request:
+
+# Nothing here writes to the repository. Unspecified scopes default to none, so
+# this is least privilege for free on a public repo that accepts pull_request.
+permissions:
+  contents: read
+
+# Harmless on hosted runners; it is the shape of the BRO-2398 self-hosted deadlock
+# if these ever move to a self-hosted pool, where a stacked run holds a slot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  lint:
+    name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.14 }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      # `--frozen-lockfile` installs from package.json and PASSES when no lockfile
+      # exists at all. genesis does commit bun.lock, so this is latent rather than
+      # live — but nothing asserted it, so deleting the lockfile turned the install
+      # into a no-op that still reported success.
+      - name: bun.lock must be committed
+        run: test -f bun.lock
       - run: bun install --frozen-lockfile
+      # MEASURED, not supposed: in a directory without @biomejs/biome installed,
+      # `bunx biome` fetches npm's unrelated `biome` package — version 0.3.3, which
+      # exits 0 on everything. Inside this repo after a good install it resolves
+      # correctly; the hazard is that if the binary is ever absent while install
+      # still exits 0, the lint gate becomes a green no-op with nothing to show it.
+      # Biome ships its binary via an optional platform dep whose postinstall bun
+      # blocks by default, so the resolution path is more fragile than it looks.
+      - name: the resolved biome is the pinned one
+        run: |
+          set -euo pipefail
+          v="$(bunx biome --version | sed 's/^Version: *//')"
+          echo "biome: $v"
+          case "$v" in
+            1.9.*) ;;
+            *) echo "::error::expected biome 1.9.x from the lockfile, resolved $v"; exit 1 ;;
+          esac
       - run: bunx biome ci .
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - name: bun.lock must be committed
+        run: test -f bun.lock
+      - run: bun install --frozen-lockfile
       - run: bun run typecheck
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - name: bun.lock must be committed
+        run: test -f bun.lock
+      - run: bun install --frozen-lockfile
+      # `bun test` (bun's own root discovery), NOT `bun run test` (turbo). They are
+      # different sets and the difference is not academic: apps/api and apps/web
+      # define no `test` script, so turbo NEVER RUNS their 30 test files — which is
+      # every walkie test in this repo. Turbo also caches, so `bun run test` can
+      # report success having executed nothing. Root discovery is the superset, and
+      # apps/api/src/test-coverage.test.ts asserts it stays one.
       - run: bun test
+
+  # Everything above asks "does the code pass the gates". This asks the question
+  # the gates exist to make answerable: would they notice if it didn't.
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, typecheck, test]
+    # Without this the job is SKIPPED when a dependency fails — and GitHub counts a
+    # skipped required check as PASSING, so the aggregate would go green precisely
+    # when a gate had failed. This line is what makes the gate a gate.
+    if: ${{ !cancelled() }}
+    steps:
+      # The predicate lives in a script so it can be given inputs and tested.
+      # Inline, walkie's equivalent was replaced wholesale with
+      # `echo "all gates succeeded"` during review and neither its suite nor its
+      # mutation sweep noticed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: every gate succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq .
+          ./scripts/assert-gates-succeeded.sh
