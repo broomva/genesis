@@ -43,7 +43,7 @@ SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=51
+EXPECTED_MUTANTS=56
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -208,7 +208,7 @@ mutate "an id is claimed before the thread filter, so one thread eats another's"
   "do not mask each other"
 mutate "options cast instead of validated" "$A" \
   '      ...(options.length > 0 ? { options } : {}),' \
-  '      ...(Array.isArray(a.options) ? { options: a.options as AskOption[] } : {}),' \
+  '      ...(Array.isArray(raw.options) ? { options: raw.options as AskOption[] } : {}),' \
   "malformed options"
 mutate "degraded overwrites instead of accumulating" "$A" \
   '    if (!problems.includes(m)) problems.push(m);' \
@@ -333,14 +333,19 @@ mutate "POST accepts an ambiguous id" "$S" \
   "ambiguous id is refused with 409"
 
 echo "the 12 findings a focused review reproduced against the real system"
-mutate "the ambiguity gate stops requiring a question — junk retracts decisions" "$A" \
+# RE-AIMED. Named for the retraction, it went red via "a row with no question is
+# not an ask" — because `hasThread` now stops `{"id":"a1"}` from voting whether or
+# not the question gate exists. The gate is still load-bearing, for a DIFFERENT
+# input: a record that names a thread but no question. Two guards, two inputs, two
+# tests; a mutant pointed at the wrong one reports a verdict about the wrong thing.
+mutate "a record with a thread but no question votes, and retracts a decision" "$A" \
   '    if (typeof a.question !== "string" || !a.question) {
       skipped++;
       continue;
     }
     parsed.push({' \
   '    parsed.push({' \
-  "junk id-only line must not retract"
+  "naming a THREAD but no question must not retract"
 mutate "ambiguity is no longer surfaced per entry" "$A" \
   '      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),' '' \
   "says so PER ENTRY"
@@ -402,6 +407,43 @@ mutate "GET stops exposing answers, which would make the 409 an escalation" "$S"
   '        asks: [],
         ...(truncated ? { truncated: true } : {}),' \
   "SAME credential can already read it"
+
+echo "the final round — four defects three review lenses found in the previous fix"
+mutate "a record naming no thread votes in the ambiguity election again" "$A" \
+  '    if (!a.hasThread) continue;' '' \
+  "with NO threadId must not retract"
+mutate "an explicit empty threadId stops counting as a thread" "$A" \
+  '      hasThread: typeof a.threadId === "string",' \
+  '      hasThread: typeof a.threadId === "string" && a.threadId.length > 0,' \
+  "EXPLICIT empty threadId still counts"
+mutate "an empty answer is accepted as a decision again" "$A" \
+  '    typeof e.answer === "string" &&
+    e.answer.length > 0 &&' \
+  '    typeof e.answer === "string" &&' \
+  "EMPTY answer is not a decision"
+mutate "?thread= silently widens to every thread again" "$S" \
+  '        ...(threadId !== undefined ? { threadId } : {}),' \
+  '        ...(threadId ? { threadId } : {}),' \
+  "narrows rather than silently widening"
+mutate "/voice/request goes back to buffering unbounded" "$S" \
+  '      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
+      try {
+        raw = JSON.parse(read.text);
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as {
+        callerId?: unknown;' \
+  '      const read = { ok: true as const, text: await c.req.raw.text() };
+      try {
+        raw = JSON.parse(read.text);
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as {
+        callerId?: unknown;' \
+  "voice routes BOUND the body"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

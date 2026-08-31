@@ -183,12 +183,7 @@ export interface BuildOpts {
  *  crossed, so the peak is bounded by `max` rather than by what the caller chose
  *  to send. Bytes, not characters: the cap has to hold for multi-byte input too.
  */
-/** Distinct from `null`. `null` means "too large" — a client error with a body it
- *  chose. TRANSPORT_FAULT means the bytes never arrived: the socket died, the
- *  chunk framing was malformed, the phone lost signal. Collapsing them is the
- *  failure this file already names once, at /voice/identify: "a transport fault
- *  would have looked like a stranger". They get different messages. */
-/** The three ways reading a request body can end.
+/** The two ways reading a request body can fail, and the one way it can succeed.
  *
  *  A DISCRIMINATED UNION rather than `string | null | symbol`, which is what this
  *  was first: the sentinel would not narrow across three call sites and every
@@ -598,10 +593,14 @@ export function build(opts: BuildOpts) {
     app.get("/walkie/asks", (c) => {
       noStore(c);
       if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // `!== undefined`, not truthiness. `?thread=` (present, empty) returns "",
+      // and treating that as absent silently WIDENED the read to every thread —
+      // the opposite of what the caller asked for, on the one parameter whose
+      // whole job is narrowing.
       const threadId = c.req.query("thread");
       const includeAnswered = c.req.query("answered") === "1";
       const { entries, degraded } = readAsks(askLogDir, {
-        ...(threadId ? { threadId } : {}),
+        ...(threadId !== undefined ? { threadId } : {}),
         includeAnswered,
       });
       // BOUNDED, like /admin/voice/queue. Both journals are append-only and

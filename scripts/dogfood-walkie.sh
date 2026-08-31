@@ -29,9 +29,15 @@ ASKDIR="$RUN/walkie"
 SECRET="dogfood-secret-$$"
 FAIL=0
 
+# THE SCRIPT COUNTS ITSELF. The commit that added it claimed "27 checks" from a
+# `grep -c PASS`, which also matched the summary line "ALL CHECKS PASSED" — the
+# real number was 26. A count taken with a pattern loose enough to match its own
+# summary is the same defect class this script exists to find, one level up. So
+# the number is emitted by the thing being counted.
+CHECKS=0
 say() { printf '\n== %s ==\n' "$1"; }
-ok()  { printf '  PASS  %s\n' "$1"; }
-bad() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
+ok()  { CHECKS=$((CHECKS + 1)); printf '  PASS  %s\n' "$1"; }
+bad() { CHECKS=$((CHECKS + 1)); printf '  FAIL  %s\n' "$1"; FAIL=1; }
 chk() { # chk <label> <expected> <actual>
   if [ "$2" = "$3" ]; then ok "$1 → $3"; else bad "$1 → expected [$2] got [$3]"; fi
 }
@@ -186,6 +192,9 @@ say "server log (stderr from the run)"
 grep -i 'error\|walkie\|degraded' "$LOG" | head -20
 
 say "RESULT"
-[ $FAIL -eq 0 ] && echo "  ALL CHECKS PASSED" || echo "  THERE WERE FAILURES"
+if [ $FAIL -eq 0 ]; then echo "  $CHECKS checks, all passed"; else echo "  $CHECKS checks, THERE WERE FAILURES"; fi
+# An empty run must not read as success: with every check deleted, FAIL stays 0
+# and the line above would happily report "0 checks, all passed".
+if [ "$CHECKS" -lt 20 ]; then echo "  REFUSING: only $CHECKS checks ran — the script has been gutted"; exit 2; fi
 echo "  artifacts: $RUN"
 exit $FAIL

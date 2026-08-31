@@ -705,4 +705,88 @@ describe("the four merge-risk findings", () => {
     const body = await (await get(app, "/walkie/asks?answered=1", H)).text();
     expect(body).toContain("ALICE-PRIVATE-DECISION");
   });
+
+  test("BLOCKER, one key up: {id,question} with NO threadId must not retract either", async () => {
+    // The first fix required id AND question, so `{"id":"a1"}` stopped voting in
+    // the ambiguity election — and `{"id":"a1","question":"x"}` still
+    // permanently retracted a recorded decision, because its ABSENT threadId
+    // coerced to "" and counted as a second thread. A record that names no
+    // thread cannot be attributed to one, so it cannot establish that an id
+    // spans two.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", question: "x" })}\n`);
+
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.status).toBe("answered");
+    expect(e?.answer).toBe("SHIP");
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+    ).toBe(200);
+  });
+
+  test("an EXPLICIT empty threadId still counts as a thread — the negative control", async () => {
+    // The rule is "no thread STATED", not "no thread name". A record that
+    // explicitly says threadId:"" has named a thread, and two asks sharing an id
+    // across "" and "t1" are genuinely ambiguous. Without this the fix above
+    // could have been "ignore empty thread names" and still passed.
+    const { app } = configured();
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t1", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    expect(await (await get(app, "/walkie/asks", H)).text()).toContain("more than one thread");
+  });
+
+  test("an EMPTY answer is not a decision and does not lock the ask", async () => {
+    // POST already refuses one with "answer must be a non-empty string", so a
+    // reader accepting it let the two halves disagree about what a decision is:
+    // the ask read back as ANSWERED, vanished from the pending list, and every
+    // later attempt got a 409 naming an empty standing decision.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    appendFileSync(
+      join(dir, ANSWER_FILE),
+      `${JSON.stringify({ id: "a1", answer: "", answeredAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const [e] = await asksOf(await get(app, "/walkie/asks", H));
+    expect(e?.status).toBe("pending");
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+    ).toBe(200);
+  });
+
+  test("`?thread=` (present, empty) narrows rather than silently widening", async () => {
+    // `c.req.query("thread")` returns "" for `?thread=`, and treating that as
+    // absent widened the read to EVERY thread — the opposite of what the caller
+    // asked, on the one parameter whose job is narrowing.
+    const { app, log } = configured();
+    log.append(ask({ id: "named", threadId: "t1" }));
+    const body = await (await get(app, "/walkie/asks?thread=", H)).text();
+    expect(body).not.toContain("named");
+  });
+
+  test("a record naming a THREAD but no question must not retract either", async () => {
+    // THE CASE ONLY THE QUESTION GATE CATCHES, and the reason it is a separate
+    // test. Two guards now stop a junk line from retracting a decision — the
+    // question gate and `hasThread` — and they cover different inputs.
+    // `{"id":"a1"}` is stopped by hasThread alone, so the mutant that removes the
+    // question gate went red via an unrelated test and its name no longer
+    // described what it tested. This is the input where the question gate is
+    // load-bearing: a thread IS named, so hasThread lets it vote, and only the
+    // missing question keeps it out.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", threadId: "t2" })}\n`);
+
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.status).toBe("answered");
+    expect(e?.answer).toBe("SHIP");
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+    ).toBe(200);
+  });
 });

@@ -188,7 +188,13 @@ function isAnswer(v: unknown): v is RawAnswer {
   return (
     typeof e.id === "string" &&
     e.id.length > 0 &&
+    // NON-EMPTY. POST /walkie/answer already refuses an empty answer with
+    // "answer must be a non-empty string", so a reader that accepts one lets the
+    // two halves disagree about what a decision is — and an empty answer read
+    // back marks the ask ANSWERED, hiding it from the pending list and locking
+    // every later attempt into a 409 that names an empty standing decision.
     typeof e.answer === "string" &&
+    e.answer.length > 0 &&
     (e.answeredAt === undefined || typeof e.answeredAt === "string")
   );
 }
@@ -312,6 +318,7 @@ export function readAsks(
   interface ParsedAsk {
     readonly id: string;
     readonly question: string;
+    readonly hasThread: boolean;
     readonly threadId: string;
     readonly raw: Record<string, unknown>;
   }
@@ -334,6 +341,16 @@ export function readAsks(
     parsed.push({
       id: a.id,
       question: a.question,
+      // WHETHER A THREAD WAS STATED AT ALL, kept separate from the coerced value
+      // below. A missing threadId becomes "" for serving, and treating that ""
+      // as a thread NAME is what left the retraction blocker one key short: the
+      // fix required id AND question, so `{"id":"a1"}` stopped voting — and
+      // `{"id":"a1","question":"x"}` still permanently retracted a recorded
+      // decision, because its absent thread coerced to "" and counted as a
+      // second one. A record that names no thread cannot be attributed to a
+      // thread, so it cannot establish that an id spans two. Same principle as
+      // the malformed records above, one field along.
+      hasThread: typeof a.threadId === "string",
       // Compared as the COERCED value, not the raw one: a non-string threadId is
       // emitted as "" below, so filtering on the raw value made an entry visible
       // in the unfiltered list yet unreachable by any ?thread= value.
@@ -344,6 +361,7 @@ export function readAsks(
 
   const threadsById = new Map<string, Set<string>>();
   for (const a of parsed) {
+    if (!a.hasThread) continue;
     const set = threadsById.get(a.id);
     if (set) set.add(a.threadId);
     else threadsById.set(a.id, new Set([a.threadId]));
@@ -387,6 +405,17 @@ export function readAsks(
     // Served, but ACCOUNTED FOR. Dropping the record would turn a partial write
     // into an absent ask, which is the worse of the two failures; coercing in
     // silence tells the client the ask is fine. So: serve it, and say so.
+
+    // Ambiguous ids get NO answer. Not the first and not the last: either choice
+    // is a guess, and a guess here is disclosure.
+    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);
+    if (ans && opts?.includeAnswered !== true) continue;
+
+    // COUNTED HERE, below the answered filter, so the number describes what was
+    // actually SERVED — which is what the comment always claimed and the code
+    // did not. Counted above, an answered malformed record put a permanent
+    // "some rows may be wrong" banner over a pending list in which every row was
+    // right, on an append-only journal that never clears.
     if (
       typeof raw.sessionId !== "string" ||
       !raw.sessionId ||
@@ -395,11 +424,6 @@ export function readAsks(
     ) {
       incomplete++;
     }
-
-    // Ambiguous ids get NO answer. Not the first and not the last: either choice
-    // is a guess, and a guess here is disclosure.
-    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);
-    if (ans && opts?.includeAnswered !== true) continue;
 
     entries.push({
       id: a.id,
