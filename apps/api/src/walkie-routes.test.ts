@@ -816,4 +816,92 @@ describe("the four merge-risk findings", () => {
     const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
     expect(e?.answer).toBe("ANSWER-0");
   });
+
+  describe("paging past the hard cap", () => {
+    /** 250 asks — beyond the 200 cap — with the interesting one LAST, since the
+     *  page is oldest-first and the newest fall off the end. */
+    const overCap = (log: ReturnType<typeof createAskLog>) => {
+      for (let i = 0; i < 250; i++) {
+        log.append(
+          ask({
+            id: `a${i}`,
+            question: `Q${i}`,
+            createdAt: `2026-08-31T12:00:${String(i % 60).padStart(2, "0")}.000Z`,
+          }),
+        );
+      }
+    };
+
+    test("without an offset the tail is UNREACHABLE by any request", async () => {
+      // The measurement that motivated this: `?limit=1000` is clamped to the 200
+      // hard cap, so before `offset` existed the newest 50 could not be retrieved
+      // at all — on an append-only journal, so the set only grows.
+      const { app, log } = configured();
+      overCap(log);
+      const { asks, total } = (await (await get(app, "/walkie/asks?limit=1000", H)).json()) as {
+        asks: { id: string }[];
+        total: number;
+      };
+      expect(total).toBe(250);
+      expect(asks).toHaveLength(200);
+      expect(asks.some((a) => a.id === "a249")).toBe(false);
+    });
+
+    test("with an offset it is reachable", async () => {
+      const { app, log } = configured();
+      overCap(log);
+      const { asks } = (await (await get(app, "/walkie/asks?limit=200&offset=200", H)).json()) as {
+        asks: { id: string }[];
+      };
+      expect(asks).toHaveLength(50);
+      expect(asks.some((a) => a.id === "a249")).toBe(true);
+    });
+
+    test("`truncated` means 'more after THIS page', so a paging client terminates", async () => {
+      // `entries.length > page.length` stayed true on the final page, so a client
+      // paging until `truncated` disappeared would never stop.
+      const { app, log } = configured();
+      overCap(log);
+      const last = (await (await get(app, "/walkie/asks?limit=200&offset=200", H)).json()) as {
+        truncated?: boolean;
+      };
+      expect(last.truncated).toBeUndefined();
+      const first = (await (await get(app, "/walkie/asks?limit=200", H)).json()) as {
+        truncated?: boolean;
+      };
+      expect(first.truncated).toBe(true);
+    });
+
+    test("THE THREAT MODEL, restated past the cap: GET still reaches what the 409 names", async () => {
+      // The 409 on POST /walkie/answer names the standing decision, and the only
+      // reason that is not a disclosure is that the same credential can already
+      // read it with GET. Past the cap it could NOT, so the 409 was the sole
+      // channel for exactly the asks a client could not otherwise see — a bound
+      // added for response size silently invalidating a security argument made
+      // elsewhere. This is the assertion that keeps the two in step.
+      const { app, log } = configured();
+      overCap(log);
+      log.answer({ id: "a249", answer: "BEYOND-THE-CAP", answeredAt: "2026-08-31T13:00:00.000Z" });
+      const viaGet = await (
+        await get(app, "/walkie/asks?answered=1&limit=200&offset=200", H)
+      ).text();
+      expect(viaGet).toContain("BEYOND-THE-CAP");
+      const via409 = await post(
+        app,
+        "/walkie/answer",
+        JSON.stringify({ id: "a249", answer: "x" }),
+        H,
+      );
+      expect(via409.status).toBe(409);
+      expect(await via409.text()).toContain("BEYOND-THE-CAP");
+    });
+
+    test("an offset past the end is an empty page, not an error", async () => {
+      const { app, log } = configured();
+      log.append(ask({ id: "only" }));
+      const res = await get(app, "/walkie/asks?offset=9999", H);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { asks: unknown[] }).toMatchObject({ asks: [], total: 1 });
+    });
+  });
 });

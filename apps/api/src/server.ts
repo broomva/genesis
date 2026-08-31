@@ -610,8 +610,26 @@ export function build(opts: BuildOpts) {
       // questions rather than an arbitrary window. (P20 MAJOR.)
       const rawLimit = Number(c.req.query("limit"));
       const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
-      const page = entries.slice(0, limit);
-      const truncated = entries.length > page.length;
+      // OFFSET, because a cap without one makes the tail UNREACHABLE — not merely
+      // paged. Measured: with 250 asks, `?limit=1000` returned 200 (the hard cap)
+      // and the newest 50 could not be retrieved by any request. The journal is
+      // append-only, so that set only grows.
+      //
+      // It is also what makes the 409 on POST /walkie/answer defensible. That
+      // response names the standing answer, and the argument for it is that the
+      // same credential can already read it with GET — verified, and TRUE only if
+      // GET can actually reach every ask. Past the cap it could not, so the 409
+      // was the sole disclosure channel for exactly the asks a client could not
+      // otherwise see. A bound added for response size had silently invalidated a
+      // security argument made three hundred lines away. Found by paging past the
+      // cap and looking, not by reading either site.
+      const rawOffset = Number(c.req.query("offset"));
+      const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+      const page = entries.slice(offset, offset + limit);
+      // "IS THERE MORE AFTER THIS PAGE", not "is the log bigger than one page" —
+      // the old form stayed true on the final page, so a client paging until
+      // `truncated` disappeared would never stop.
+      const truncated = offset + page.length < entries.length;
       // `degraded` travels rather than being swallowed: a read that could not see
       // a file must not look like a repo with nothing pending.
       // `total` and `truncated` travel so a client can tell "nothing pending" from
@@ -619,6 +637,9 @@ export function build(opts: BuildOpts) {
       return c.json({
         asks: page,
         total: entries.length,
+        // The offset travels back so a client paging a growing journal can tell
+        // which window it received without tracking the request it sent.
+        ...(offset > 0 ? { offset } : {}),
         ...(truncated ? { truncated: true } : {}),
         ...(degraded ? { degraded } : {}),
       });
