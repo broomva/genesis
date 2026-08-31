@@ -74,7 +74,7 @@ describe("DoD 1 — an ask survives a process restart and is still ackable", () 
 
     // Answering ask-1 must not touch ask-2 — "individually" is the load-bearing word.
     const a = inSubprocess(
-      `createAskLog(dir).answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });`,
+      `createAskLog(dir).answer({ threadId: "thread-1", id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });`,
     );
     expect(a.stderr).toBe("");
     expect(a.ok).toBe(true);
@@ -103,8 +103,18 @@ describe("DoD 2 — answering twice is a no-op, not a double effect", () => {
   test("two identical answers leave one answered ask", () => {
     const log = createAskLog(dir);
     log.append(ask());
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "Yes",
+      answeredAt: "2026-08-31T12:05:00.000Z",
+    });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "Yes",
+      answeredAt: "2026-08-31T12:05:00.000Z",
+    });
 
     const all = readAsks(dir, { includeAnswered: true }).entries;
     expect(all).toHaveLength(1);
@@ -117,8 +127,18 @@ describe("DoD 2 — answering twice is a no-op, not a double effect", () => {
   test("a CHANGED answer for the same ask takes the later one", () => {
     const log = createAskLog(dir);
     log.append(ask());
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });
-    log.answer({ id: "ask-1", answer: "No", answeredAt: "2026-08-31T12:06:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "Yes",
+      answeredAt: "2026-08-31T12:05:00.000Z",
+    });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "No",
+      answeredAt: "2026-08-31T12:06:00.000Z",
+    });
     const all = readAsks(dir, { includeAnswered: true }).entries;
     expect(all).toHaveLength(1);
     expect(all[0]?.answer).toBe("No");
@@ -354,7 +374,7 @@ describe("findings from the P20 review", () => {
   test("both journals unreadable reports BOTH, not just the last", () => {
     const log = createAskLog(dir);
     log.append(ask());
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "x" });
+    log.answer({ threadId: "thread-1", id: "ask-1", answer: "Yes", answeredAt: "x" });
     chmodSync(join(dir, ASK_FILE), 0o000);
     chmodSync(join(dir, ANSWER_FILE), 0o000);
     const { degraded } = readAsks(dir);
@@ -375,7 +395,12 @@ describe("answeredAt is typed, not trusted", () => {
     log.append(ask());
     writeFileSync(
       join(dir, ANSWER_FILE),
-      `${JSON.stringify({ id: "ask-1", answer: "Yes", answeredAt: 12345 })}\n`,
+      // threadId PRESENT, deliberately. Without it `isAnswer` rejects this row on
+      // the thread check and never reaches the answeredAt check — so the mutant
+      // that removes the answeredAt guard survived, its own fixture having become
+      // unreachable when the key gained a field. The row must be well-formed in
+      // every respect EXCEPT the one under test.
+      `${JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes", answeredAt: 12345 })}\n`,
     );
     const e = readAsks(dir, { includeAnswered: true }).entries[0];
     // The malformed row is rejected wholesale, so the ask stays pending rather
@@ -387,7 +412,12 @@ describe("answeredAt is typed, not trusted", () => {
   test("a well-formed answeredAt still works", () => {
     const log = createAskLog(dir);
     log.append(ask());
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:00:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "Yes",
+      answeredAt: "2026-08-31T12:00:00.000Z",
+    });
     expect(readAsks(dir, { includeAnswered: true }).entries[0]?.answeredAt).toBe(
       "2026-08-31T12:00:00.000Z",
     );

@@ -691,12 +691,20 @@ export function build(opts: BuildOpts) {
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
-      const body = (raw ?? {}) as { id?: unknown; answer?: unknown };
+      const body = (raw ?? {}) as { id?: unknown; threadId?: unknown; answer?: unknown };
       // A parse failure is not an empty answer, and an empty answer is not a
       // decision. Both are 400s with distinct messages — collapsing them is how
       // /voice/identify once made a transport fault look like normal traffic.
       if (typeof body.id !== "string" || !body.id) {
         return c.json({ error: "id must be a non-empty string" }, 400);
+      }
+      // THREADID IS PART OF THE IDENTITY, so answering names both. An ask is
+      // (threadId, id); accepting an id alone is what made a decision joinable to
+      // a different thread's ask. The client always has it — every ask served by
+      // GET /walkie/asks carries its threadId — so this costs a field, not a
+      // round trip.
+      if (typeof body.threadId !== "string" || !body.threadId) {
+        return c.json({ error: "threadId must be a non-empty string" }, 400);
       }
       if (typeof body.answer !== "string" || !body.answer) {
         return c.json({ error: "answer must be a non-empty string" }, 400);
@@ -749,18 +757,11 @@ export function build(opts: BuildOpts) {
         console.error("[walkie] ask log unreadable, refusing to answer:", known.degraded);
         return c.json({ error: "could not read the ask log; please try again" }, 503);
       }
-      // AMBIGUOUS ID → REFUSE. The same id under two threadIds means the answer
-      // journal cannot say which ask a decision belongs to, and readAsks
-      // deliberately withholds answers for such ids. Accepting the write here
-      // would record a decision that is then never shown to anyone — worse than
-      // refusing, because the operator is told it landed.
-      if (known.ambiguous?.has(body.id)) {
-        return c.json(
-          { error: "that ask id is ambiguous; it appears in more than one thread" },
-          409,
-        );
-      }
-      const existing = known.entries.find((a) => a.id === body.id);
+      // MATCHED ON BOTH. The ambiguity election that used to sit here — detect a
+      // colliding id, withhold its answer, refuse the write — is gone with the
+      // weak key it compensated for. Two asks sharing an id in different threads
+      // are two asks, and each is answerable.
+      const existing = known.entries.find((a) => a.id === body.id && a.threadId === body.threadId);
       if (!existing) {
         return c.json({ error: "no such ask" }, 404);
       }
@@ -812,6 +813,7 @@ export function build(opts: BuildOpts) {
       }
       try {
         askLog.answer({
+          threadId: body.threadId,
           id: body.id,
           answer: body.answer,
           answeredAt: new Date().toISOString(),

@@ -43,7 +43,7 @@ SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=58
+EXPECTED_MUTANTS=52
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -133,12 +133,6 @@ mutate "opened truncating instead of appending" "$A" \
   'const fd = fs.openSync(file, "a");' 'const fd = fs.openSync(file, "w");' "append-only"
 
 echo "idempotency — a repeated answer must not double-count"
-mutate "answers keyed by insertion order instead of id" "$A" \
-  'answers.set(v.id, v);' 'answers.set(`${v.id}:${answers.size}`, v);' "no-op"
-mutate "duplicate asks no longer collapse" "$A" \
-  '    if (seen.has(a.id)) continue;
-' '' "stable id"
-
 echo "separateness — an ask must never land in the intake queue"
 mutate "asks written into queue.jsonl" "$A" \
   'const askPath = join(dir, ASK_FILE);' 'const askPath = join(dir, "queue.jsonl");' \
@@ -196,14 +190,6 @@ mutate "short write silently ignored — the count is assumed, not read" "$A" \
 # consumes its id, and the mutant survived for that reason rather than for a
 # missing test. The mutation that still reproduces the original cross-thread
 # disclosure is claiming the id BEFORE the filter runs.
-mutate "an id is claimed before the thread filter, so one thread eats another's" "$A" \
-  '    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
-    if (seen.has(a.id)) continue;
-    seen.add(a.id);' \
-  '    if (seen.has(a.id)) continue;
-    seen.add(a.id);
-    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;' \
-  "do not mask each other"
 mutate "options cast instead of validated" "$A" \
   '      ...(options.length > 0 ? { options } : {}),' \
   '      ...(Array.isArray(raw.options) ? { options: raw.options as AskOption[] } : {}),' \
@@ -318,50 +304,20 @@ mutate "no-store header dropped" "$S" \
 mutate "answering twice overwrites again" "$S" \
   '      if (existing.status === "answered") {' '      if (false) {' \
   "DIFFERENT second answer is a 409"
-mutate "ambiguous ids get an answer attached anyway" "$A" \
-  '    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);' \
-  '    const ans = answers.get(a.id);' \
-  "never crosses a thread boundary"
-mutate "a collision is no longer detected" "$A" \
-  '  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);' \
-  '  for (const [id, threads] of threadsById) if (threads.size > 99) ambiguous.add(id);' \
-  "never crosses a thread boundary"
-mutate "POST accepts an ambiguous id" "$S" \
-  '      if (known.ambiguous?.has(body.id)) {' '      if (false) {' \
-  "ambiguous id is refused with 409"
-
-echo "the 12 findings a focused review reproduced against the real system"
-# RE-AIMED. Named for the retraction, it went red via "a row with no question is
-# not an ask" — because `hasThread` now stops `{"id":"a1"}` from voting whether or
-# not the question gate exists. The gate is still load-bearing, for a DIFFERENT
-# input: a record that names a thread but no question. Two guards, two inputs, two
-# tests; a mutant pointed at the wrong one reports a verdict about the wrong thing.
-# HOISTED. The two `hasThread` mutants that used to sit here are gone with the
-# field: thread attribution is now decided once, at the parse gate, so there is one
-# thing to mutate instead of two that had to agree.
 mutate "a row that states no thread is served under a fabricated thread again" "$A" \
   '    if (typeof a.threadId !== "string") {
       skipped++;
       continue;
     }' \
   '' \
-  "thread-less row must not absorb"
+  "thread-less row is still skipped"
 mutate "a record with a thread but no question votes, and retracts a decision" "$A" \
   '    if (typeof a.question !== "string" || !a.question) {
       skipped++;
       continue;
     }' \
   '' \
-  "naming a THREAD but no question must not retract"
-mutate "ambiguity is no longer surfaced per entry" "$A" \
-  '      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),' '' \
-  "says so PER ENTRY"
-mutate "the withheld note is global again, not scoped to the filter" "$A" \
-  '  if (ambiguousHere.size > 0)
-    note(`${ambiguousHere.size} ask id(s) appear under more than one thread; answers withheld`);' \
-  '  if (ambiguous.size > 0)
-    note(`${ambiguous.size} ask id(s) appear under more than one thread; answers withheld`);' \
-  "NOT told about collisions in other threads"
+  "naming a thread but NO question is skipped"
 mutate "a transport fault is reported as a parse failure" "$S" \
   '    return { ok: false, reason: "transport" };' \
   '    return { ok: false, reason: "too-large" };' \
@@ -405,17 +361,6 @@ mutate "a differing second answer is accepted as recorded" "$S" \
   "DIFFERENT second answer is a 409"
 
 echo "the 409's threat model — a deliberate disclosure, so it is pinned"
-mutate "the 409 stops naming the standing answer" "$S" \
-  '        return c.json({ error: "already answered", recorded: false, answer: existing.answer }, 409);' \
-  '        return c.json({ error: "already answered", recorded: false }, 409);' \
-  "carries a decision from a thread the caller never named"
-mutate "GET stops exposing answers, which would make the 409 an escalation" "$S" \
-  '        ...(truncated ? { truncated: true } : {}),' \
-  '        asks: [],
-        ...(truncated ? { truncated: true } : {}),' \
-  "SAME credential can already read it"
-
-echo "the final round — four defects three review lenses found in the previous fix"
 mutate "an empty answer is accepted as a decision again" "$A" \
   '    typeof e.answer === "string" &&
     e.answer.length > 0 &&' \
@@ -464,6 +409,32 @@ mutate "truncated goes back to 'the log is bigger than one page'" "$S" \
   '      const truncated = offset + page.length < entries.length;' \
   '      const truncated = entries.length > page.length;' \
   "more after THIS page"
+
+echo "the composite key — what replaced the ambiguity machinery"
+# The election, the withholding, the per-entry flag, the banner and the 409 are
+# gone with the weak key they compensated for, and so are their seven mutants.
+# Four remain, and each targets the key itself rather than a detector for its
+# failure.
+mutate "answers keyed by id alone, so a decision crosses threads again" "$A" \
+  '  const key = (threadId: string, id: string) => JSON.stringify([threadId, id]);' \
+  '  const key = (_threadId: string, id: string) => id;' \
+  "does not surface on the other"
+mutate "the dedupe drops back to the id, so one of two asks vanishes" "$A" \
+  '    const k = key(a.threadId, a.id);
+    if (seen.has(k)) continue;
+    seen.add(k);' \
+  '    const k = key(a.threadId, a.id);
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);' \
+  "BOTH are served"
+mutate "POST stops requiring a threadId" "$S" \
+  '      if (typeof body.threadId !== "string" || !body.threadId) {' \
+  '      if (false) {' \
+  "without a threadId is 400"
+mutate "POST matches on the id alone, joining another thread's ask" "$S" \
+  '      const existing = known.entries.find((a) => a.id === body.id && a.threadId === body.threadId);' \
+  '      const existing = known.entries.find((a) => a.id === body.id);' \
+  "WRONG thread is 404"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

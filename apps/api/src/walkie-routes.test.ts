@@ -66,7 +66,11 @@ function unconfigured(): App {
 }
 
 const asksOf = async (r: Response) =>
-  ((await r.json()) as { asks: { id: string; status: string; answer?: string }[] }).asks;
+  (
+    (await r.json()) as {
+      asks: { id: string; status: string; answer?: string; question?: string; threadId?: string }[];
+    }
+  ).asks;
 
 describe("DoD 4 — a configured secret without a store fails at BUILD", () => {
   test("walkieSecret with no askLog throws, naming the sink", () => {
@@ -103,7 +107,7 @@ describe("DoD 3 — unconfigured, the routes do not exist", () => {
     const r = await post(
       unconfigured(),
       "/walkie/answer",
-      JSON.stringify({ id: "ask-1", answer: "Yes" }),
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
       H,
     );
     expect(r.status).toBe(404);
@@ -137,7 +141,12 @@ describe("GET /walkie/asks", () => {
   test("an answered ask drops out unless asked for", async () => {
     const { app, log } = configured();
     log.append(ask());
-    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "ask-1",
+      answer: "Yes",
+      answeredAt: "2026-08-31T12:05:00.000Z",
+    });
     expect(await asksOf(await get(app, "/walkie/asks", H))).toEqual([]);
     expect(
       (await asksOf(await get(app, "/walkie/asks?answered=1", H))).map((a) => a.status),
@@ -158,7 +167,12 @@ describe("POST /walkie/answer", () => {
   test("records an answer, and the ask becomes answered", async () => {
     const { app, log } = configured();
     log.append(ask());
-    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    const r = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+      H,
+    );
     expect(r.status).toBe(200);
     const after = await asksOf(await get(app, "/walkie/asks?answered=1", H));
     expect(after[0]?.status).toBe("answered");
@@ -169,7 +183,12 @@ describe("POST /walkie/answer", () => {
     const { app, log } = configured();
     log.append(ask());
     const send = () =>
-      post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+      post(
+        app,
+        "/walkie/answer",
+        JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+        H,
+      );
     expect((await send()).status).toBe(200);
     expect((await send()).status).toBe(200);
     expect(await asksOf(await get(app, "/walkie/asks?answered=1", H))).toHaveLength(1);
@@ -179,16 +198,26 @@ describe("POST /walkie/answer", () => {
     // Otherwise a typo'd id sits in answers.jsonl forever matching nothing,
     // while the operator believes they answered.
     const { app } = configured();
-    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "nope", answer: "Yes" }), H);
+    const r = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "nope", answer: "Yes" }),
+      H,
+    );
     expect(r.status).toBe(404);
   });
 
   test("unauthenticated cannot answer", async () => {
     const { app, log } = configured();
     log.append(ask());
-    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), {
-      "x-genesis-walkie-secret": "wrong",
-    });
+    const r = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+      {
+        "x-genesis-walkie-secret": "wrong",
+      },
+    );
     expect(r.status).toBe(401);
     // and nothing was recorded
     expect((await asksOf(await get(app, "/walkie/asks", H)))[0]?.status).toBe("pending");
@@ -197,9 +226,9 @@ describe("POST /walkie/answer", () => {
   test.each([
     ["not json", "a non-JSON body"],
     [JSON.stringify({ answer: "Yes" }), "no id"],
-    [JSON.stringify({ id: "ask-1" }), "no answer"],
-    [JSON.stringify({ id: "ask-1", answer: "" }), "an empty answer"],
-    [JSON.stringify({ id: 42, answer: "Yes" }), "a non-string id"],
+    [JSON.stringify({ threadId: "thread-1", id: "ask-1" }), "no answer"],
+    [JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "" }), "an empty answer"],
+    [JSON.stringify({ threadId: "thread-1", id: 42, answer: "Yes" }), "a non-string id"],
   ])("rejects %#: %s", async (body, _why) => {
     const { app, log } = configured();
     log.append(ask());
@@ -233,7 +262,12 @@ describe("the two stores stay separate", () => {
   test("answering never writes into the voice intake queue", async () => {
     const { app, log } = configured();
     log.append(ask());
-    await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+      H,
+    );
     expect(existsSync(join(dir, "queue.jsonl"))).toBe(false);
     expect(existsSync(join(dir, "asks.jsonl"))).toBe(true);
     expect(existsSync(join(dir, "answers.jsonl"))).toBe(true);
@@ -272,7 +306,12 @@ describe("findings from the P20 review", () => {
     const { app, log } = configured();
     log.append(ask());
     const huge = "x".repeat(5000);
-    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: huge }), H);
+    const r = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: huge }),
+      H,
+    );
     expect(r.status).toBe(413);
     // and it stayed pending
     expect((await asksOf(await get(app, "/walkie/asks", H)))[0]?.status).toBe("pending");
@@ -286,7 +325,12 @@ describe("findings from the P20 review", () => {
     log.append(ask());
     const { chmodSync } = await import("node:fs");
     chmodSync(join(dir, "asks.jsonl"), 0o000);
-    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    const r = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+      H,
+    );
     chmodSync(join(dir, "asks.jsonl"), 0o644);
     expect(r.status).toBe(503);
     expect(r.status).not.toBe(404);
@@ -303,7 +347,7 @@ describe("the body is bounded before it is parsed", () => {
       new Request("http://x/walkie/answer", {
         method: "POST",
         headers: { ...H, "content-type": "application/json", "content-length": "999999" },
-        body: JSON.stringify({ id: "ask-1", answer: "Yes" }),
+        body: JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
       }),
     );
     expect(r.status).toBe(413);
@@ -316,7 +360,14 @@ describe("the body is bounded before it is parsed", () => {
     const { app, log } = configured();
     log.append(ask());
     expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H)).status,
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "thread-1", id: "ask-1", answer: "Yes" }),
+          H,
+        )
+      ).status,
     ).toBe(200);
   });
 });
@@ -335,7 +386,7 @@ describe("a malformed record must not block answering a good ask", () => {
     // different message and a different test.
     appendFileSync(
       join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "bad", threadId: "t", question: "Q?" })}\n`,
+      `${JSON.stringify({ threadId: "t", id: "bad", question: "Q?" })}\n`,
     );
 
     const body = (await (await get(app, "/walkie/asks", H)).json()) as { degraded?: string };
@@ -343,7 +394,12 @@ describe("a malformed record must not block answering a good ask", () => {
     expect(body.degraded).toContain("missing sessionId or createdAt");
 
     // ...and the answer still lands. 503 here is the regression.
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "good", answer: "yes" }),
+      H,
+    );
     expect(res.status).toBe(200);
   });
 
@@ -356,13 +412,23 @@ describe("a malformed record must not block answering a good ask", () => {
     // plausible-looking backlog, which is the worse of the two read failures.
     const { app, log } = configured();
     log.append(ask({ id: "good" }));
-    log.answer({ id: "other", answer: "x", answeredAt: "2026-08-31T12:00:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "other",
+      answer: "x",
+      answeredAt: "2026-08-31T12:00:00.000Z",
+    });
     // WRITE-ONLY (0o222), not 0o000. With no write bit the append itself throws
     // and the route 503s from its catch, so the assertion passes without the
     // read check ever mattering — the mutation sweep caught exactly that: the
     // first version of this test SURVIVED the mutant it was written to kill.
     chmodSync(join(dir, ANSWER_FILE), 0o222);
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "good", answer: "yes" }),
+      H,
+    );
     chmodSync(join(dir, ANSWER_FILE), 0o644);
     expect(res.status).toBe(503);
   });
@@ -373,7 +439,12 @@ describe("a malformed record must not block answering a good ask", () => {
     const { app, log } = configured();
     log.append(ask({ id: "good" }));
     chmodSync(join(dir, ASK_FILE), 0o000);
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "good", answer: "yes" }),
+      H,
+    );
     chmodSync(join(dir, ASK_FILE), 0o644);
     expect(res.status).toBe(503);
   });
@@ -430,9 +501,9 @@ describe("the four merge-risk findings", () => {
     // the safe direction, which is exactly how it stops discriminating.
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
-    const envelope = JSON.stringify({ id: "a1", answer: "" }).length;
+    const envelope = JSON.stringify({ threadId: "thread-1", id: "a1", answer: "" }).length;
     const answer = "y".repeat(64 * 1024 - envelope);
-    const body = JSON.stringify({ id: "a1", answer });
+    const body = JSON.stringify({ threadId: "thread-1", id: "a1", answer });
     expect(new TextEncoder().encode(body).byteLength).toBe(64 * 1024);
     const res = await post(app, "/walkie/answer", body, H);
     // 413 for the ANSWER cap (4096 chars) is the right answer here — what must
@@ -482,7 +553,12 @@ describe("the four merge-risk findings", () => {
     const { app } = configured();
     const g = await get(app, "/walkie/asks", H);
     expect(g.headers.get("cache-control")).toBe("no-store");
-    const p = await post(app, "/walkie/answer", JSON.stringify({ id: "x", answer: "y" }), H);
+    const p = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "x", answer: "y" }),
+      H,
+    );
     expect(p.headers.get("cache-control")).toBe("no-store");
   });
 
@@ -498,12 +574,19 @@ describe("the four merge-risk findings", () => {
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
     expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
+          H,
+        )
+      ).status,
     ).toBe(200);
     const second = await post(
       app,
       "/walkie/answer",
-      JSON.stringify({ id: "a1", answer: "HOLD" }),
+      JSON.stringify({ threadId: "thread-1", id: "a1", answer: "HOLD" }),
       H,
     );
     expect(second.status).toBe(409);
@@ -523,11 +606,16 @@ describe("the four merge-risk findings", () => {
     // not look like a conflict. Same text, same outcome, 200.
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
-    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
+      H,
+    );
     const again = await post(
       app,
       "/walkie/answer",
-      JSON.stringify({ id: "a1", answer: "SHIP" }),
+      JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
       H,
     );
     expect(again.status).toBe(200);
@@ -536,37 +624,20 @@ describe("the four merge-risk findings", () => {
   test("the repeat does not append a second line to answers.jsonl", async () => {
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
-    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
-    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
+      H,
+    );
+    await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
+      H,
+    );
     const lines = readFileSync(join(dir, ANSWER_FILE), "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
-  });
-
-  test("an ambiguous id is refused with 409, not silently recorded", async () => {
-    // Measured: two asks sharing an id in different threads, and ?thread=OTHER
-    // returned OTHER's ask carrying the OTHER thread's answer.
-    const { app } = configured();
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "dup", answer: "x" }), H);
-    expect(res.status).toBe(409);
-  });
-
-  test("an answer never crosses a thread boundary via a shared id", async () => {
-    const { app, log } = configured();
-    // A pre-existing answer for id "dup", written before the collision appeared.
-    log.answer({ id: "dup", answer: "LEAK-CANARY", answeredAt: "2026-08-31T12:00:00.000Z" });
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    const body = await (await get(app, "/walkie/asks?thread=t-b&answered=1", H)).text();
-    expect(body).not.toContain("LEAK-CANARY");
-    expect(body).toContain("ask id(s) appear under more than one thread");
   });
 
   test("a NON-colliding id still gets its answer — the negative control", async () => {
@@ -574,79 +645,14 @@ describe("the four merge-risk findings", () => {
     // the above would still pass.
     const { app, log } = configured();
     log.append(ask({ id: "solo" }));
-    log.answer({ id: "solo", answer: "KEPT", answeredAt: "2026-08-31T12:00:00.000Z" });
+    log.answer({
+      threadId: "thread-1",
+      id: "solo",
+      answer: "KEPT",
+      answeredAt: "2026-08-31T12:00:00.000Z",
+    });
     const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
     expect(e?.answer).toBe("KEPT");
-  });
-
-  test("BLOCKER: a junk id-only line must not retract an already-recorded decision", async () => {
-    // The ambiguity pass gated only on `id` while the entry loop also requires a
-    // `question`, so a line this module itself reports as "skipped: no usable id
-    // or question" — and never serves to anyone — still voted in the ambiguity
-    // election, its absent threadId coerced to "" and counted as a second thread.
-    // One appended `{"id":"a1"}` permanently retracted a recorded decision: GET
-    // showed pending with the answer withheld, POST 409'd forever, and both
-    // journals are append-only so it never cleared.
-    const { app, log } = configured();
-    log.append(ask({ id: "a1", threadId: "t1" }));
-    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
-    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1" })}\n`);
-
-    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
-    expect(e?.status).toBe("answered");
-    expect(e?.answer).toBe("SHIP");
-    // And the ask is still answerable — same text is a no-op, not a 409.
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
-    expect(res.status).toBe(200);
-  });
-
-  test("a REAL collision still withholds — the negative control", async () => {
-    // Without this the ambiguity rule could have been deleted outright and the
-    // test above would pass.
-    const { app, log } = configured();
-    log.answer({ id: "dup", answer: "LEAK", answeredAt: "2026-08-31T12:00:00.000Z" });
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    const body = await (await get(app, "/walkie/asks?answered=1", H)).text();
-    expect(body).not.toContain("LEAK");
-    expect(body).toContain("more than one thread");
-  });
-
-  test("an ambiguous ask says so PER ENTRY, not only as a count", async () => {
-    // GET used to report status:"pending" while POST 409'd forever for the same
-    // id — two endpoints of one API contradicting each other, with no way for a
-    // client to tell which ask was affected.
-    const { app } = configured();
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    const { asks } = (await (await get(app, "/walkie/asks", H)).json()) as {
-      asks: { ambiguous?: boolean }[];
-    };
-    expect(asks[0]?.ambiguous).toBe(true);
-  });
-
-  test("a thread-scoped read is NOT told about collisions in other threads", async () => {
-    // The banner is the one signal that would reveal a genuinely withheld
-    // decision. Firing it for a collision the caller cannot see makes it ambient
-    // noise, permanently, because the journal is append-only.
-    const { app } = configured();
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "mine", sessionId: "s", threadId: "t-alice", question: "Mine?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-bob", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-carol", question: "C?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    const alice = await (await get(app, "/walkie/asks?thread=t-alice", H)).text();
-    expect(alice).toContain("Mine?");
-    expect(alice).not.toContain("more than one thread");
-    // ...and an unfiltered read still hears about it.
-    expect(await (await get(app, "/walkie/asks", H)).text()).toContain("more than one thread");
   });
 
   test("a body that never fully arrives is 400 'not fully received', not 500", async () => {
@@ -674,77 +680,6 @@ describe("the four merge-risk findings", () => {
     expect((await res.json()) as object).toEqual({ error: "body was not fully received" });
   });
 
-  test("the 409 carries a decision from a thread the caller never named", async () => {
-    // Verified behaviour, kept deliberately — see the note at the 409. Pinned so
-    // it is a decision rather than an accident.
-    const { app, log } = configured();
-    log.append(ask({ id: "secret-ask", threadId: "t-alice" }));
-    log.answer({
-      id: "secret-ask",
-      answer: "ALICE-PRIVATE-DECISION",
-      answeredAt: "2026-08-31T12:01:00.000Z",
-    });
-    const res = await post(
-      app,
-      "/walkie/answer",
-      JSON.stringify({ id: "secret-ask", answer: "someone-else-tries" }),
-      H,
-    );
-    expect(res.status).toBe(409);
-    expect(await res.text()).toContain("ALICE-PRIVATE-DECISION");
-  });
-
-  test("...and the SAME credential can already read it, which is why that is safe", async () => {
-    // THE LOAD-BEARING HALF. The 409 above is acceptable only because
-    // `walkieSecret` is one shared secret with no per-thread scoping, so it
-    // discloses nothing a plain GET does not. If per-thread credentials are ever
-    // added and GET is scoped without scoping the 409, THIS test fails and points
-    // at the one above. The reason is the assertion, not a comment.
-    const { app, log } = configured();
-    log.append(ask({ id: "secret-ask", threadId: "t-alice" }));
-    log.answer({
-      id: "secret-ask",
-      answer: "ALICE-PRIVATE-DECISION",
-      answeredAt: "2026-08-31T12:01:00.000Z",
-    });
-    const body = await (await get(app, "/walkie/asks?answered=1", H)).text();
-    expect(body).toContain("ALICE-PRIVATE-DECISION");
-  });
-
-  test("BLOCKER, one key up: {id,question} with NO threadId must not retract either", async () => {
-    // The first fix required id AND question, so `{"id":"a1"}` stopped voting in
-    // the ambiguity election — and `{"id":"a1","question":"x"}` still
-    // permanently retracted a recorded decision, because its ABSENT threadId
-    // coerced to "" and counted as a second thread. A record that names no
-    // thread cannot be attributed to one, so it cannot establish that an id
-    // spans two.
-    const { app, log } = configured();
-    log.append(ask({ id: "a1", threadId: "t1" }));
-    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
-    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", question: "x" })}\n`);
-
-    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
-    expect(e?.status).toBe("answered");
-    expect(e?.answer).toBe("SHIP");
-    expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
-    ).toBe(200);
-  });
-
-  test("an EXPLICIT empty threadId still counts as a thread — the negative control", async () => {
-    // The rule is "no thread STATED", not "no thread name". A record that
-    // explicitly says threadId:"" has named a thread, and two asks sharing an id
-    // across "" and "t1" are genuinely ambiguous. Without this the fix above
-    // could have been "ignore empty thread names" and still passed.
-    const { app } = configured();
-    appendFileSync(
-      join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
-        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t1", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
-    );
-    expect(await (await get(app, "/walkie/asks", H)).text()).toContain("more than one thread");
-  });
-
   test("an EMPTY answer is not a decision and does not lock the ask", async () => {
     // POST already refuses one with "answer must be a non-empty string", so a
     // reader accepting it let the two halves disagree about what a decision is:
@@ -754,12 +689,19 @@ describe("the four merge-risk findings", () => {
     log.append(ask({ id: "a1" }));
     appendFileSync(
       join(dir, ANSWER_FILE),
-      `${JSON.stringify({ id: "a1", answer: "", answeredAt: "2026-08-31T12:00:00.000Z" })}\n`,
+      `${JSON.stringify({ threadId: "thread-1", id: "a1", answer: "", answeredAt: "2026-08-31T12:00:00.000Z" })}\n`,
     );
     const [e] = await asksOf(await get(app, "/walkie/asks", H));
     expect(e?.status).toBe("pending");
     expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "thread-1", id: "a1", answer: "SHIP" }),
+          H,
+        )
+      ).status,
     ).toBe(200);
   });
 
@@ -773,28 +715,6 @@ describe("the four merge-risk findings", () => {
     expect(body).not.toContain("named");
   });
 
-  test("a record naming a THREAD but no question must not retract either", async () => {
-    // THE CASE ONLY THE QUESTION GATE CATCHES, and the reason it is a separate
-    // test. Two guards now stop a junk line from retracting a decision — the
-    // question gate and `hasThread` — and they cover different inputs.
-    // `{"id":"a1"}` is stopped by hasThread alone, so the mutant that removes the
-    // question gate went red via an unrelated test and its name no longer
-    // described what it tested. This is the input where the question gate is
-    // load-bearing: a thread IS named, so hasThread lets it vote, and only the
-    // missing question keeps it out.
-    const { app, log } = configured();
-    log.append(ask({ id: "a1", threadId: "t1" }));
-    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
-    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", threadId: "t2" })}\n`);
-
-    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
-    expect(e?.status).toBe("answered");
-    expect(e?.answer).toBe("SHIP");
-    expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
-    ).toBe(200);
-  });
-
   test("concurrent conflicting answers: exactly one wins, and it is the first", async () => {
     // CodeRabbit returned "merge risk: HIGH" on the claim that concurrent
     // conflicting answers can overwrite the decision that should win. Measured
@@ -806,7 +726,12 @@ describe("the four merge-risk findings", () => {
     log.append(ask({ id: "a1" }));
     const results = await Promise.all(
       Array.from({ length: 20 }, (_, i) =>
-        post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: `ANSWER-${i}` }), H),
+        post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "thread-1", id: "a1", answer: `ANSWER-${i}` }),
+          H,
+        ),
       ),
     );
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
@@ -886,7 +811,12 @@ describe("the four merge-risk findings", () => {
       // elsewhere. This is the assertion that keeps the two in step.
       const { app, log } = configured();
       overCap(log);
-      log.answer({ id: "a249", answer: "BEYOND-THE-CAP", answeredAt: "2026-08-31T13:00:00.000Z" });
+      log.answer({
+        threadId: "thread-1",
+        id: "a249",
+        answer: "BEYOND-THE-CAP",
+        answeredAt: "2026-08-31T13:00:00.000Z",
+      });
       const viaGet = await (
         await get(app, "/walkie/asks?answered=1&limit=200&offset=200", H)
       ).text();
@@ -894,7 +824,7 @@ describe("the four merge-risk findings", () => {
       const via409 = await post(
         app,
         "/walkie/answer",
-        JSON.stringify({ id: "a249", answer: "x" }),
+        JSON.stringify({ threadId: "thread-1", id: "a249", answer: "x" }),
         H,
       );
       expect(via409.status).toBe(409);
@@ -909,46 +839,161 @@ describe("the four merge-risk findings", () => {
       expect((await res.json()) as { asks: unknown[] }).toMatchObject({ asks: [], total: 1 });
     });
   });
+});
 
-  test("BLOCKER: a thread-less row must not absorb another thread's answer", async () => {
-    // THE REPRODUCTION, kept verbatim as a test so the regression is a failure
-    // rather than a rediscovery. Measured against the previous commit through
-    // these same routes:
-    //
-    //   asks.jsonl line 1: {"id":"tc-9","threadId":"t-alice",
-    //                       "question":"Wire $40,000 to vendor X?"}
-    //   asks.jsonl line 2: {"id":"tc-9","question":"Approve the staging rebuild?"}
-    //
-    //   GET  /walkie/asks?thread=            -> the REBUILD question, no ambiguous flag
-    //   POST {"id":"tc-9","answer":"APPROVED"} -> 200 recorded   (not 409)
-    //   GET  /walkie/asks?thread=t-alice     -> "Wire $40,000..." answer: "APPROVED"
-    //
-    // The operator approved a staging rebuild and authorised a $40,000 wire. The
-    // record was exempt from the ambiguity election by `hasThread` yet still
-    // served under a fabricated thread "" — two answers to "which thread is this
-    // record in". There is one answer now: a row that states no thread is
-    // malformed and is not served at all.
+describe("an ask is (threadId, id) — the key that replaced the ambiguity machinery", () => {
+  /** Two asks sharing an id in different threads. Under the old id-only key this
+   *  was the hazard the election existed to detect; now it is just two asks. */
+  const collide = () => {
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "Wire $40,000 to vendor X?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "Approve the staging rebuild?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+  };
+
+  test("BOTH are served — the old key made one of them vanish", async () => {
+    const { app } = configured();
+    collide();
+    const asks = await asksOf(await get(app, "/walkie/asks", H));
+    expect(asks).toHaveLength(2);
+    expect(asks.map((a) => a.threadId).sort()).toEqual(["t-a", "t-b"]);
+  });
+
+  test("each is answerable independently, and neither answer reaches the other", async () => {
+    // THE DEFECT THAT TOOK FOUR ROUNDS, now impossible rather than detected. The
+    // election used to withhold BOTH answers and 409 both writes; before that it
+    // joined one thread's decision to the other's question — the $40,000 wire.
+    const { app } = configured();
+    collide();
+    expect(
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "t-a", id: "dup", answer: "WIRE-APPROVED" }),
+          H,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "t-b", id: "dup", answer: "REBUILD-OK" }),
+          H,
+        )
+      ).status,
+    ).toBe(200);
+
+    const a = await asksOf(await get(app, "/walkie/asks?thread=t-a&answered=1", H));
+    const b = await asksOf(await get(app, "/walkie/asks?thread=t-b&answered=1", H));
+    expect(a[0]?.question).toBe("Wire $40,000 to vendor X?");
+    expect(a[0]?.answer).toBe("WIRE-APPROVED");
+    expect(b[0]?.question).toBe("Approve the staging rebuild?");
+    expect(b[0]?.answer).toBe("REBUILD-OK");
+  });
+
+  test("an answer written for one thread does not surface on the other", async () => {
+    // The read-side half, asserted separately: the join key, not the write path,
+    // is what keeps them apart.
+    const { app, log } = configured();
+    collide();
+    log.answer({
+      threadId: "t-a",
+      id: "dup",
+      answer: "ALICE-ONLY",
+      answeredAt: "2026-08-31T12:01:00.000Z",
+    });
+    const b = await (await get(app, "/walkie/asks?thread=t-b&answered=1", H)).text();
+    expect(b).not.toContain("ALICE-ONLY");
+    const a = await (await get(app, "/walkie/asks?thread=t-a&answered=1", H)).text();
+    expect(a).toContain("ALICE-ONLY");
+  });
+
+  test("answering with the WRONG thread is 404, not a join to someone else's ask", async () => {
+    const { app, log } = configured();
+    log.append(ask({ id: "only", threadId: "t-a" }));
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "t-b", id: "only", answer: "x" }),
+      H,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("answering without a threadId is 400", async () => {
+    const { app, log } = configured();
+    log.append(ask({ id: "only" }));
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "only", answer: "x" }), H);
+    expect(res.status).toBe(400);
+    expect((await res.json()) as object).toEqual({ error: "threadId must be a non-empty string" });
+  });
+
+  test("the 409 can no longer name another thread's decision", async () => {
+    // Strictly better than the behaviour it replaces. The old 409 returned the
+    // standing answer for a bare id, so a caller who knew an id learned a
+    // decision from a thread they never named — defensible only because a plain
+    // GET exposed it too. Scoped to (threadId, id), the question does not arise.
+    const { app, log } = configured();
+    collide();
+    log.answer({
+      threadId: "t-a",
+      id: "dup",
+      answer: "ALICE-PRIVATE",
+      answeredAt: "2026-08-31T12:01:00.000Z",
+    });
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ threadId: "t-b", id: "dup", answer: "x" }),
+      H,
+    );
+    expect(res.status).toBe(200); // t-b's ask is unanswered; this is its answer
+    expect(await (await get(app, "/walkie/asks?thread=t-b&answered=1", H)).text()).not.toContain(
+      "ALICE-PRIVATE",
+    );
+  });
+
+  test("BLOCKER kept: a thread-less row is still skipped, so it absorbs nothing", async () => {
+    // The $40,000 reproduction. The gate that skips a row stating no thread stays
+    // — the composite key removes the ELECTION, not the attribution rule.
     const { app, log } = configured();
     log.append(ask({ id: "tc-9", threadId: "t-alice", question: "Wire $40,000 to vendor X?" }));
     appendFileSync(
       join(dir, ASK_FILE),
       `${JSON.stringify({ id: "tc-9", question: "Approve the staging rebuild?" })}\n`,
     );
-
-    // The thread-less row is served to nobody, under any filter.
-    for (const q of ["", "?thread=", "?thread=t-alice"]) {
-      const body = await (await get(app, `/walkie/asks${q}`, H)).text();
-      expect(`${q}:${body.includes("staging rebuild")}`).toBe(`${q}:false`);
-    }
-
-    // Answering tc-9 reaches alice's ask — the only tc-9 that exists — and the
-    // question it lands against is the one the operator was shown.
+    expect(await (await get(app, "/walkie/asks", H)).text()).not.toContain("staging rebuild");
     expect(
-      (await post(app, "/walkie/answer", JSON.stringify({ id: "tc-9", answer: "APPROVED" }), H))
-        .status,
+      (
+        await post(
+          app,
+          "/walkie/answer",
+          JSON.stringify({ threadId: "t-alice", id: "tc-9", answer: "APPROVED" }),
+          H,
+        )
+      ).status,
     ).toBe(200);
     const [e] = await asksOf(await get(app, "/walkie/asks?thread=t-alice&answered=1", H));
     expect(e?.question).toBe("Wire $40,000 to vendor X?");
-    expect(e?.answer).toBe("APPROVED");
+  });
+
+  test("a row naming a thread but NO question is skipped, not served", async () => {
+    // The question gate's own input, restored. It was covered by a test the
+    // rekey deleted along with the ambiguity block, which left its mutant with
+    // no killer — a coverage cut hidden inside a refactor. The gate is still
+    // load-bearing: this row states a thread, so the attribution gate lets it
+    // through, and only the missing question keeps it out.
+    const { app, log } = configured();
+    log.append(ask({ id: "real", threadId: "t-a", question: "The real question?" }));
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "junk", threadId: "t-a" })}\n`);
+    const asks = await asksOf(await get(app, "/walkie/asks?thread=t-a", H));
+    expect(asks).toHaveLength(1);
+    expect(asks[0]?.id).toBe("real");
+    const body = await (await get(app, "/walkie/asks?thread=t-a", H)).text();
+    expect(body).toContain("skipped");
   });
 });

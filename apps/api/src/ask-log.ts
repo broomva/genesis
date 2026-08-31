@@ -77,6 +77,12 @@ export interface Ask {
 
 /** The decision coming back. */
 export interface AskAnswer {
+  /** The thread the answered ask belongs to. An ask is identified by (threadId,
+   *  id), not by id alone — see the join in readAsks. Carrying only the id is
+   *  what made an answer joinable to the wrong ask, and the detect-and-withhold
+   *  machinery that compensated for it produced a blocker in four consecutive
+   *  review rounds. A key that cannot collide needs no machinery. */
+  readonly threadId: string;
   readonly id: string;
   readonly answer: string;
   readonly answeredAt: string;
@@ -86,11 +92,6 @@ export type AskStatus = "pending" | "answered";
 
 /** An ask joined with what became of it. */
 export interface AskEntry extends Ask {
-  /** The id appears under more than one threadId, so no answer can be attached to
-   *  it without guessing which ask a decision belonged to. Present ONLY when
-   *  true, so a client can disable its answer control and say why, rather than
-   *  discovering it as a 409 after the operator has already decided. */
-  readonly ambiguous?: true;
   readonly status: AskStatus;
   readonly answer?: string;
   readonly answeredAt?: string;
@@ -196,6 +197,7 @@ export function createAskLog(
 }
 
 interface RawAnswer {
+  threadId: string;
   id: string;
   answer: string;
   answeredAt?: string;
@@ -210,6 +212,7 @@ function isAnswer(v: unknown): v is RawAnswer {
   return (
     typeof e.id === "string" &&
     e.id.length > 0 &&
+    typeof e.threadId === "string" &&
     // NON-EMPTY. POST /walkie/answer already refuses an empty answer with
     // "answer must be a non-empty string", so a reader that accepts one lets the
     // two halves disagree about what a decision is — and an empty answer read
@@ -280,7 +283,6 @@ export function readAsks(
   entries: AskEntry[];
   degraded?: string;
   unreadable?: true;
-  ambiguous?: ReadonlySet<string>;
 } {
   // ACCUMULATED, not overwritten. `degraded = m` kept only the last failure, and
   // answers.jsonl is read first — so with both journals unreadable the ANSWERS
@@ -310,9 +312,24 @@ export function readAsks(
     note(m);
   };
 
+  // KEYED BY (threadId, id), NOT BY id. An ask IS a thread and an id; treating
+  // the id alone as the identity is what let an answer join to a different
+  // thread's ask, and every attempt to detect that collision after the fact
+  // relocated the hole by one field instead of closing it — id, then
+  // id+question, then id+question+hasThread, four rounds and four blockers.
+  //
+  // With a key that cannot collide there is nothing to detect: two asks sharing
+  // an id in different threads are simply two asks, each independently
+  // answerable, which is what they always were. The election, the withholding,
+  // the per-entry flag, the operator-facing banner and the 409 all go with it.
+  //
+  // JSON.stringify of a pair rather than a separator string: a thread id or an
+  // ask id may contain any character including NUL, so no delimiter is safe by
+  // inspection and one that is safe today is a defect waiting for the producer.
+  const key = (threadId: string, id: string) => JSON.stringify([threadId, id]);
   const answers = new Map<string, RawAnswer>();
   for (const v of readLines(dir, ANSWER_FILE, noteUnreadable))
-    if (isAnswer(v)) answers.set(v.id, v);
+    if (isAnswer(v)) answers.set(key(v.threadId, v.id), v);
 
   const askLines = readLines(dir, ASK_FILE, noteUnreadable);
 
@@ -395,15 +412,6 @@ export function readAsks(
     });
   }
 
-  const threadsById = new Map<string, Set<string>>();
-  for (const a of parsed) {
-    const set = threadsById.get(a.id);
-    if (set) set.add(a.threadId);
-    else threadsById.set(a.id, new Set([a.threadId]));
-  }
-  const ambiguous = new Set<string>();
-  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);
-
   const seen = new Set<string>();
   const entries: AskEntry[] = [];
   // Records that are SERVED but incomplete. Counted, not coerced in silence —
@@ -411,17 +419,14 @@ export function readAsks(
   // "nothing pending", and a record served with its identity fields blanked is
   // that failure one size down.
   let incomplete = 0;
-  // Which ambiguous ids were actually REACHABLE under this read's filter. A
-  // thread-scoped reader told "answers withheld" about a collision living
-  // entirely in other threads learns nothing and loses the signal to noise: on a
-  // busy deployment the banner would be permanently on for everyone, because the
-  // journal is append-only. So the note is scoped to what this caller can see.
-  const ambiguousHere = new Set<string>();
   for (const a of parsed) {
     if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
-    if (seen.has(a.id)) continue;
-    seen.add(a.id);
-    if (ambiguous.has(a.id)) ambiguousHere.add(a.id);
+    // Deduped on the COMPOSITE too: two asks sharing an id in different threads
+    // are distinct asks and both must be served. Deduping on the id alone was
+    // what made one of them disappear.
+    const k = key(a.threadId, a.id);
+    if (seen.has(k)) continue;
+    seen.add(k);
     const raw = a.raw;
 
     const options: AskOption[] = Array.isArray(raw.options)
@@ -443,7 +448,7 @@ export function readAsks(
 
     // Ambiguous ids get NO answer. Not the first and not the last: either choice
     // is a guess, and a guess here is disclosure.
-    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);
+    const ans = answers.get(k);
     if (ans && opts?.includeAnswered !== true) continue;
 
     // COUNTED HERE, below the answered filter, so the number describes what was
@@ -475,25 +480,15 @@ export function readAsks(
       ...(typeof raw.multiSelect === "boolean" ? { multiSelect: raw.multiSelect } : {}),
       createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
       status: ans ? "answered" : "pending",
-      // SURFACED PER ENTRY, not just as an aggregate count. The server computes
-      // this inside the very call the GET makes and used to discard it, so GET
-      // said `pending` while POST returned 409 forever for the same id — two
-      // endpoints of one API contradicting each other about one resource, with
-      // no way for a client to tell which ask was affected. A client can now
-      // disable the control and say why.
-      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),
       ...(ans ? { answer: ans.answer } : {}),
       ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
     });
   }
-  if (ambiguousHere.size > 0)
-    note(`${ambiguousHere.size} ask id(s) appear under more than one thread; answers withheld`);
   if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);
   if (incomplete > 0) note(`${incomplete} ask record(s) missing sessionId or createdAt`);
   return {
     entries,
     ...(problems.length > 0 ? { degraded: problems.join("; ") } : {}),
     ...(unreadable ? { unreadable } : {}),
-    ...(ambiguous.size > 0 ? { ambiguous } : {}),
   };
 }

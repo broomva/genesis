@@ -107,12 +107,12 @@ say "answer validation"
 chk "POST no secret"          401 "$(code -X POST -H 'content-type: application/json' -d '{}' "$B/walkie/answer")"
 chk "POST non-JSON body"      400 "$(code -X POST -H "$S" -H 'content-type: application/json' -d 'not json' "$B/walkie/answer")"
 chk "POST missing id"         400 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"answer":"yes"}' "$B/walkie/answer")"
-chk "POST empty answer"       400 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"a1","answer":""}' "$B/walkie/answer")"
-chk "POST unknown id → 404"   404 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"nope","answer":"yes"}' "$B/walkie/answer")"
+chk "POST empty answer"       400 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t","id":"a1","answer":""}' "$B/walkie/answer")"
+chk "POST unknown id → 404"   404 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t","id":"nope","answer":"yes"}' "$B/walkie/answer")"
 LONG=$(python3 -c 'print("x"*5000)')
-chk "POST 5000-char answer"   413 "$(code -X POST -H "$S" -H 'content-type: application/json' -d "{\"id\":\"a1\",\"answer\":\"$LONG\"}" "$B/walkie/answer")"
+chk "POST 5000-char answer"   413 "$(code -X POST -H "$S" -H 'content-type: application/json' -d "{\"threadId\":\"t\",\"id\":\"a1\",\"answer\":\"$LONG\"}" "$B/walkie/answer")"
 HUGE=$(python3 -c 'print("y"*70000)')
-chk "POST 70KB body"          413 "$(code -X POST -H "$S" -H 'content-type: application/json' -d "{\"id\":\"a1\",\"answer\":\"$HUGE\"}" "$B/walkie/answer")"
+chk "POST 70KB body"          413 "$(code -X POST -H "$S" -H 'content-type: application/json' -d "{\"threadId\":\"t\",\"id\":\"a1\",\"answer\":\"$HUGE\"}" "$B/walkie/answer")"
 
 # --- 5. hand-write an ask, because nothing else can --------------------------
 say "round trip (ask hand-written — there is no producer)"
@@ -141,16 +141,16 @@ else
 fi
 
 say "answering"
-chk "POST valid answer" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
+chk "POST valid answer" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t-alpha","id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
 code -H "$S" "$B/walkie/asks" >/dev/null
 if grep -q 'ask-1' "$RUN/body"; then bad "answered ask still listed as pending"; else ok "answered ask drops out of the pending list"; fi
-chk "re-posting the SAME answer is a 200 no-op" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
+chk "re-posting the SAME answer is a 200 no-op" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t-alpha","id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
 # THE DISCRIMINATOR. The check above posts identical text and compares only the
 # status code, which is 200 under first-answer-wins AND under the last-write-wins
 # it replaced — so with the guard deleted this script stayed fully green and the
 # P11 receipt rested on a unit test. Posting a DIFFERENT answer is what separates
 # the two builds.
-chk "a DIFFERENT second answer is refused" 409 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"HOLD-INSTEAD"}' "$B/walkie/answer")"
+chk "a DIFFERENT second answer is refused" 409 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t-alpha","id":"ask-1","answer":"HOLD-INSTEAD"}' "$B/walkie/answer")"
 code -H "$S" "$B/walkie/asks?answered=1" >/dev/null
 if grep -q 'HOLD-INSTEAD' "$RUN/body"; then
   bad "the second answer replaced the first — last write won"
@@ -185,7 +185,7 @@ else
   # asks from a log that cannot be read, say. Unexpected is not the same as fine.
   bad "GET on unreadable log → unexpected $GOT $BODY"
 fi
-chk "POST refuses while degraded" 503 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-2","answer":"x"}' "$B/walkie/answer")"
+chk "POST refuses while degraded" 503 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t-beta","id":"ask-2","answer":"x"}' "$B/walkie/answer")"
 chmod 644 "$ASKDIR/asks.jsonl"
 
 say "server log (stderr from the run)"

@@ -93,6 +93,7 @@ describe("every append reaches the platter, not just the page cache", () => {
 
   test("answer gets the same guarantee — a vanished ack is worse than none", () => {
     createAskLog(dir, spy()).answer({
+      threadId: "thread-1",
       id: "a1",
       answer: "Yes",
       answeredAt: "2026-08-31T00:01:00.000Z",
