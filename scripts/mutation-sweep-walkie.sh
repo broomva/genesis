@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.." || exit 2
 SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=23
+EXPECTED_MUTANTS=26
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -63,6 +63,12 @@ total=0
 survivors=0
 
 # mutate <label> <file> <anchor> <replacement> <expected-failing-test-substring>
+#
+# The last argument is matched against the (fail) LINES, which carry TEST NAMES —
+# not assertion messages, not error strings. Writing an error message there is a
+# mistake I made three times: the mutant IS killed, the script reports SURVIVED
+# "red, but not via <want>", and the verdict looks like a missing test when it is
+# a mistyped expectation. If you see that, check the want string before the code.
 mutate() {
   local label="$1" file="$2" anchor="$3" repl="$4" want="$5"
   total=$((total + 1))
@@ -211,6 +217,19 @@ mutate "answer length cap removed" "$S" \
 mutate "degraded dropped on POST, unreadable log becomes 404" "$S" \
   '      if (known.degraded) {' '      if (false) {' \
   "never .no such ask"
+
+mutate "answeredAt type check removed" "$A" \
+  '    (e.answeredAt === undefined || typeof e.answeredAt === "string")' \
+  '    true' \
+  "answeredAt"
+mutate "pre-parse body guard removed" "$S" \
+  '      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {' \
+  '      if (false) {' \
+  "Content-Length is 413"
+mutate "the producer-gap caveat removed from the boot line" "$I" \
+  '      "(routes live; no producer yet — asks are not written by anything)",' \
+  '      "",' \
+  "no producer"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

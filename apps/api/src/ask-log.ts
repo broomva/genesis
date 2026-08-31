@@ -6,6 +6,20 @@
 // is a view, not a record. Nothing in Genesis can tell you what an agent is
 // currently blocked on across a restart.
 //
+// NOTHING WRITES AN ASK YET, and that has to be said here rather than discovered.
+// `append` has zero non-test callers: no engine hook, no supervisor callback, no
+// tool-call interception produces an Ask. So in a real deploy asks.jsonl stays
+// empty, GET /walkie/asks returns {"asks":[]} forever and POST /walkie/answer
+// 404s forever. The store, the routes and their gate are real and tested; the
+// PRODUCER is not built.
+//
+// That is the ticket's scope — step 1 is the durable object and its two verbs,
+// and the engine integration comes later — but a surface that answers 200 while
+// being permanently empty reads as "working" to anyone who does not know, and
+// the boot log line saying where the ask log lives reinforces that. The gap is
+// named here, in the PR, and in the ticket rather than left for the first person
+// who wonders why the list is always empty. (P20 MAJOR.)
+//
 // NOT queue.jsonl. That file holds VoiceTicket: caller-originated intake, keyed by
 // an explicitly untrusted phone number. An ask is agent-originated and keyed by
 // session and thread. Writing agent-originated asks into a caller-id-keyed intake
@@ -163,7 +177,15 @@ interface RawAnswer {
 function isAnswer(v: unknown): v is RawAnswer {
   if (!v || typeof v !== "object") return false;
   const e = v as Record<string, unknown>;
-  return typeof e.id === "string" && e.id.length > 0 && typeof e.answer === "string";
+  // answeredAt included: it was the ONE unchecked field here, so `answeredAt:
+  // 12345` round-tripped as a number under a declared `answeredAt?: string`.
+  // Every other field on the ask side is guarded three lines away. (P20 MAJOR.)
+  return (
+    typeof e.id === "string" &&
+    e.id.length > 0 &&
+    typeof e.answer === "string" &&
+    (e.answeredAt === undefined || typeof e.answeredAt === "string")
+  );
 }
 
 /** Read a JSONL file, tolerantly.

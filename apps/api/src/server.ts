@@ -442,6 +442,9 @@ export function build(opts: BuildOpts) {
     // A decision, not a document. Generous enough for a free-text answer with
     // reasoning; far below anything that makes the journal expensive to re-read.
     const MAX_ANSWER_CHARS = 4096;
+    // Generous multiple of the answer cap: the body carries an id and JSON
+    // framing too, and this is a cheap pre-filter rather than the real bound.
+    const MAX_BODY_BYTES = 64 * 1024;
     const walkieDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
       !secretMatches(c.req.header("x-genesis-walkie-secret"), opts.walkieSecret ?? "");
 
@@ -481,6 +484,19 @@ export function build(opts: BuildOpts) {
     // The decision coming back.
     app.post("/walkie/answer", async (c) => {
       if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // BEFORE parsing. `c.req.json()` buffers the entire body, and there is no
+      // body-size limit anywhere in this server (`app.use` appears zero times),
+      // so an authenticated caller could spend our RSS on a request that was
+      // going to 400 anyway. voice.ts:98-105 names this same bug as one it
+      // already fixed: "an authenticated webhook could send a 100 MB
+      // conversationId and have it buffered and appended verbatim". Declared
+      // length is advisory — a chunked body carries none — so the parsed answer
+      // is still length-checked below; this only refuses the obvious case
+      // cheaply. (P20 MAJOR.)
+      const declared = Number(c.req.header("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+        return c.json({ error: "body too large" }, 413);
+      }
       let raw: unknown;
       try {
         raw = await c.req.json();

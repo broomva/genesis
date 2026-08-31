@@ -25,6 +25,25 @@ import { join } from "node:path";
  *  walkie options from the call left one assertion passing, because the comment
  *  above them says "gates on walkieSecret being present". An assertion a
  *  sentence can satisfy is not pinning a binding. */
+/**
+ * RESIDUAL, stated rather than papered over. This is still a text match over
+ * source, and a text match is a claim about a FILE. The review's proposed fix —
+ * export a `buildOpts()` factory and assert `Object.hasOwn` on the returned
+ * object — is categorically better, and it was tried and reverted: importing
+ * anything from index.ts BOOTS THE SERVER (measured: 1227 ms, a listener, and a
+ * pglite store constructed at import time). Dragging that into the shared
+ * `bun test` process is the same hazard that took this suite from 0 to 126
+ * failures when a module mock leaked across files.
+ *
+ * The correct fix is an `import.meta.main` guard on the entrypoint so importing
+ * is side-effect-free. That changes the boot model and belongs in its own change
+ * rather than smuggled into this ticket — tracked separately.
+ *
+ * Until then: comments AND string/template literals are stripped, which defeats
+ * both bypasses found so far, and `scripts/mutation-sweep-walkie.sh` carries a
+ * `walkie unwired from build()` mutant. Neither makes this airtight, and saying
+ * so is better than implying it is.
+ */
 function withoutComments(src: string): string {
   return (
     src
@@ -131,5 +150,40 @@ describe("index.ts wires walkie into build() (BRO-2387)", () => {
     // to — the same rule the voice queue follows one line above it.
     const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
     expect(src).toMatch(/const\s+askLog\s*=\s*walkieSecret\s*\?/);
+  });
+});
+
+describe("the ask producer gap is declared, not silent (BRO-2387)", () => {
+  test("the boot line says there is no producer", () => {
+    // A surface that answers 200 while being permanently empty reads as working.
+    // If someone lands the producer, this test fails and they remove the caveat
+    // deliberately rather than leaving a stale disclaimer behind.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toContain("no producer yet");
+  });
+
+  test("nothing outside tests calls askLog.append", () => {
+    // The claim the caveat rests on, checked rather than asserted. When a
+    // producer lands, this goes red and the caveat comes out with it.
+    const dir = join(import.meta.dir, "..", "..", "..");
+    const out = Bun.spawnSync(
+      [
+        "grep",
+        "-rn",
+        "--include=*.ts",
+        "-e",
+        "askLog.append",
+        "-e",
+        "createAskLog(",
+        join(dir, "apps"),
+        join(dir, "packages"),
+      ],
+      { cwd: dir },
+    ).stdout.toString();
+    const callers = out
+      .split("\n")
+      .filter((l) => l.trim() && !l.includes(".test.ts") && !l.includes("/node_modules/"));
+    // index.ts constructs the store; server.ts holds it. Neither appends.
+    expect(callers.filter((l) => l.includes("askLog.append"))).toEqual([]);
   });
 });

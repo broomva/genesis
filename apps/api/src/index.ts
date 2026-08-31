@@ -327,7 +327,12 @@ const askLogDir = process.env.GENESIS_ASK_LOG_DIR ?? join(defaultDataDir(), "wal
 // directory nothing will ever write to.
 const askLog = walkieSecret ? createAskLog(askLogDir) : undefined;
 if (walkieSecret) {
-  console.log(`[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")}`);
+  // Says "no producer" out loud: the routes answer, but nothing writes an ask
+  // yet, so an operator seeing this line must not read it as a live channel.
+  console.log(
+    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} ` +
+      "(routes live; no producer yet — asks are not written by anything)",
+  );
 }
 if (voiceSecret) {
   // An enabled channel with no principals still ANSWERS — every caller resolves

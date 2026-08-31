@@ -310,3 +310,30 @@ describe("findings from the P20 review", () => {
     expect(degraded).toContain(ASK_FILE);
   });
 });
+
+describe("answeredAt is typed, not trusted", () => {
+  test("a numeric answeredAt does not round-trip as a string field", () => {
+    // The ONE unchecked field: `answeredAt: 12345` was emitted under a declared
+    // `answeredAt?: string`. Every other field is guarded three lines away.
+    const log = createAskLog(dir);
+    log.append(ask());
+    writeFileSync(
+      join(dir, ANSWER_FILE),
+      `${JSON.stringify({ id: "ask-1", answer: "Yes", answeredAt: 12345 })}\n`,
+    );
+    const e = readAsks(dir, { includeAnswered: true }).entries[0];
+    // The malformed row is rejected wholesale, so the ask stays pending rather
+    // than becoming "answered" with a number where a timestamp belongs.
+    expect(e?.status).toBe("pending");
+    expect(e?.answeredAt).toBeUndefined();
+  });
+
+  test("a well-formed answeredAt still works", () => {
+    const log = createAskLog(dir);
+    log.append(ask());
+    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:00:00.000Z" });
+    expect(readAsks(dir, { includeAnswered: true }).entries[0]?.answeredAt).toBe(
+      "2026-08-31T12:00:00.000Z",
+    );
+  });
+});

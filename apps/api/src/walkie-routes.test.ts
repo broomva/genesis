@@ -292,3 +292,31 @@ describe("findings from the P20 review", () => {
     expect(r.status).not.toBe(404);
   });
 });
+
+describe("the body is bounded before it is parsed", () => {
+  test("a declared oversize Content-Length is 413 without parsing", async () => {
+    // c.req.json() buffers the WHOLE body before any check, and this server has
+    // no body-size limit anywhere (`app.use` appears zero times), so an
+    // authenticated caller could spend RSS on a request that was going to 400.
+    const { app } = configured();
+    const r = await app.fetch(
+      new Request("http://x/walkie/answer", {
+        method: "POST",
+        headers: { ...H, "content-type": "application/json", "content-length": "999999" },
+        body: JSON.stringify({ id: "ask-1", answer: "Yes" }),
+      }),
+    );
+    expect(r.status).toBe(413);
+    expect((await r.json()) as { error: string }).toEqual({ error: "body too large" });
+  });
+
+  test("a normal request is unaffected by the guard", async () => {
+    // The negative control: a guard that rejected everything would satisfy the
+    // assertion above.
+    const { app, log } = configured();
+    log.append(ask());
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H)).status,
+    ).toBe(200);
+  });
+});
