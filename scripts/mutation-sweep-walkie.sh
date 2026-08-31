@@ -43,7 +43,7 @@ SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=56
+EXPECTED_MUTANTS=57
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -444,6 +444,16 @@ mutate "/voice/request goes back to buffering unbounded" "$S" \
       const body = (raw ?? {}) as {
         callerId?: unknown;' \
   "voice routes BOUND the body"
+
+echo "atomicity — the property CodeRabbit called high-risk, measured instead"
+# THE MUTATION IS AN `await`, not a deleted branch. The read-check-write span is
+# atomic only because nothing suspends inside it; the way this breaks in real life
+# is somebody making a call in that span asynchronous, not somebody deleting a
+# guard. So the mutant is the realistic edit.
+mutate "an await between the read and the write reopens the race" "$S" \
+  '      const known = readAsks(askLogDir, { includeAnswered: true });' \
+  '      const known = await Promise.resolve(readAsks(askLogDir, { includeAnswered: true }));' \
+  "exactly one wins"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

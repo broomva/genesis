@@ -691,6 +691,25 @@ export function build(opts: BuildOpts) {
       // Answering an id that is not in the log is a 404, not a silent accept:
       // otherwise a typo'd id is written to answers.jsonl forever, matching
       // nothing, and the operator believes they answered.
+      // ATOMIC BY CONSTRUCTION, AND FRAGILE. From this read through the
+      // `askLog.answer` write below there is NO `await`, so the whole
+      // read-check-write is one synchronous span and JS's single thread makes it
+      // atomic. Measured: 20 concurrent POSTs each carrying a DIFFERENT answer
+      // produce exactly one 200, nineteen 409s, and one line in answers.jsonl.
+      //
+      // The fragility is worth naming because nothing enforces it. Insert a
+      // single `await` anywhere in that span — make readAsks async, add a hook,
+      // await a metric — and two requests interleave between the status check
+      // and the append, both see `pending`, both write, and the LAST one wins:
+      // exactly the overwrite first-answer-wins exists to prevent.
+      // walkie-routes.test.ts pins the property and the sweep has a mutant that
+      // inserts an await, so the fragility is measured rather than trusted.
+      //
+      // ACROSS PROCESSES IT DOES NOT HOLD AT ALL. Two genesis instances sharing
+      // an ask-log directory would race, because the atomicity is a property of
+      // one event loop, not of the file. The deployment is a single process
+      // today; making it more than one requires a lock here, and this comment is
+      // the notice.
       const known = readAsks(askLogDir, { includeAnswered: true });
       // A DEGRADED READ IS NOT AN ABSENT ASK. Dropping `degraded` here collapsed
       // an unreadable asks.jsonl to an empty list, so every answer to a real

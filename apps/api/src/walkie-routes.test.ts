@@ -789,4 +789,31 @@ describe("the four merge-risk findings", () => {
       (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
     ).toBe(200);
   });
+
+  test("concurrent conflicting answers: exactly one wins, and it is the first", async () => {
+    // CodeRabbit returned "merge risk: HIGH" on the claim that concurrent
+    // conflicting answers can overwrite the decision that should win. Measured
+    // rather than argued: they cannot, in-process. The read-check-write span in
+    // POST /walkie/answer contains no `await`, so JS's single thread makes it
+    // atomic — and this test is what keeps that true, because inserting one
+    // `await` anywhere in that span silently reintroduces the race.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: `ANSWER-${i}` }), H),
+      ),
+    );
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 409)).toHaveLength(19);
+
+    // ONE line on disk, not twenty. The status codes alone would pass if every
+    // request appended and only the responses differed.
+    const lines = readFileSync(join(dir, ANSWER_FILE), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+
+    // And it is the FIRST answer that stands, not the last.
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.answer).toBe("ANSWER-0");
+  });
 });
