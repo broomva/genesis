@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
+#   Every mutation anchor below is LITERAL TypeScript, so `${...}` and backticks
+#   must NOT expand — the single quotes are the mechanism, not an oversight. A
+#   file-level directive because it applies to fifteen call sites; scoped to one
+#   assignment (where it was first put) it silently applied to nothing.
 # Mutation sweep for the ask log and the walkie routes (BRO-2387).
 #
 # WHY THIS IS COMMITTED. The PR that added these tests claimed "15 mutants, 0
@@ -100,9 +105,6 @@ p.write_text(p.read_text().replace(sys.argv[2], sys.argv[3]))' "$file" "$anchor"
   fi
 }
 
-# shellcheck disable=SC2016
-# The mutation anchors below are LITERAL TypeScript, so `${...}` and backticks must
-# not expand — single quotes are the point, not an oversight.
 A=apps/api/src/ask-log.ts
 S=apps/api/src/server.ts
 I=apps/api/src/index.ts
