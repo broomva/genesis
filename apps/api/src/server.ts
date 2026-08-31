@@ -11,6 +11,7 @@ import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { type Context, Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
+import { type Ask, type AskAnswer, readAsks } from "./ask-log";
 import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
@@ -107,6 +108,27 @@ export interface BuildOpts {
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
+  /** Shared secret the walkie client presents on /walkie/* (BRO-2387).
+   *  OMITTED → the walkie routes are NOT REGISTERED AT ALL, same rule as
+   *  voiceSecret: an unconfigured deploy must 404, not answer.
+   *
+   *  NOT the same secret as voiceSecret, deliberately. /voice is reachable from
+   *  the public internet through the Tailscale Funnel; /walkie is not. Sharing
+   *  one secret would make a leak of the internet-facing credential a leak of
+   *  the operator's pending decisions too. */
+  walkieSecret?: string;
+  /** The ask log's write half. REQUIRED whenever walkieSecret is set; build()
+   *  throws otherwise — a configured surface with no store would acknowledge an
+   *  answer and discard it, which is the exact shape voiceSecret/enqueueVoice
+   *  already failed in once. */
+  askLog?: {
+    append(ask: Ask): void;
+    answer(answer: AskAnswer): void;
+  };
+  /** Where the ask log lives, for the READ half. Separate from voiceQueueDir on
+   *  purpose: the two stores must not share a directory, so that an ask can
+   *  never be mistaken for caller-originated intake. */
+  askLogDir?: string;
   // NO voiceDelivery OPTION. Three designs failed here and the third failed most
   // instructively: an env string was an operator assertion, so it became a
   // {channel, deliver} object — and `deliver` had zero call sites, so passing
@@ -151,6 +173,88 @@ export interface BuildOpts {
   projectsRoot?: string;
   /** Per-event observability trace (print-engine parity, BRO-1524). */
   trace?: (sessionId: string, event: AgentEvent) => void;
+}
+
+/** Read a request body with a HARD byte cap, returning null past it.
+ *
+ *  `Request.json()`/`.text()` buffer without limit, and the only guard this
+ *  server had was the declared content-length — which a chunked request does not
+ *  send. This reads incrementally and cancels the stream the moment the cap is
+ *  crossed, so the peak is bounded by `max` rather than by what the caller chose
+ *  to send. Bytes, not characters: the cap has to hold for multi-byte input too.
+ */
+/** The two ways reading a request body can fail, and the one way it can succeed.
+ *
+ *  A DISCRIMINATED UNION rather than `string | null | symbol`, which is what this
+ *  was first: the sentinel would not narrow across three call sites and every
+ *  later use of the body became a type error. More importantly the union names
+ *  the cases, and the cases are genuinely different — "too large" is a client
+ *  sending more than it may, "transport" is bytes that never arrived. This file
+ *  already learned that distinction once, at /voice/identify: "a transport fault
+ *  would have looked like a stranger". */
+type BodyRead = { ok: true; text: string } | { ok: false; reason: "too-large" | "transport" };
+
+/** Shared body cap. Module scope because the voice routes need it too, and a
+ *  second copy is a second thing to forget. */
+const MAX_BODY_BYTES = 64 * 1024;
+
+/** Read a body with the cap, turning both failure modes into values.
+ *
+ *  `readBounded` REJECTS when the stream errors, and awaiting it outside a try
+ *  let that escape the handler: measured over a real socket, a malformed
+ *  chunk-size line, an RST mid-body and a clean FIN mid-body each produced an
+ *  uncaught AbortException, 32 lines of stderr, and a 500 where the previous
+ *  shape answered 400. Wrapping it here rather than at each call site is what
+ *  stops the next route from forgetting. */
+async function readBody(req: Request): Promise<BodyRead> {
+  let text: string | null;
+  try {
+    text = await readBounded(req, MAX_BODY_BYTES);
+  } catch {
+    return { ok: false, reason: "transport" };
+  }
+  return text === null ? { ok: false, reason: "too-large" } : { ok: true, text };
+}
+
+/** The one place the two failures become responses, so three routes cannot drift. */
+const bodyReadError = (r: { reason: "too-large" | "transport" }) =>
+  r.reason === "too-large"
+    ? ({ error: "body too large" } as const)
+    : ({ error: "body was not fully received" } as const);
+
+export async function readBounded(req: Request, max: number): Promise<string | null> {
+  const body = req.body;
+  // No stream at all (an empty body) is not an error here — the JSON parse below
+  // is what rejects it, with a message that says so.
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > max) {
+        // CANCEL, don't just stop reading: leaving the stream open keeps the
+        // connection and its buffers alive, which is the resource this is
+        // protecting.
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const ch of chunks) {
+    joined.set(ch, at);
+    at += ch.byteLength;
+  }
+  return new TextDecoder().decode(joined);
 }
 
 export function build(opts: BuildOpts) {
@@ -279,9 +383,19 @@ export function build(opts: BuildOpts) {
       //
       // `?? {}` is still right for a literal `null` body, which is VALID json, so
       // .catch() never fires and the dereference below was a 500 on both routes.
+      // BOUNDED. This is the prefix that is actually published to the public
+      // internet — `tailscale serve` maps /voice and nothing else — so it is the
+      // one place an unbounded body read matters most, and it was the one place
+      // the first version of this bound did not reach. Measured against a live
+      // process: a 64 MB chunked POST here drove RSS +109 MB while the guarded
+      // sibling took the same body at +7 MB. `c.req.json()` buffers without
+      // limit and a chunked request sends no content-length, so nothing stopped
+      // it. Same helper, same cap, and now the harder-to-reach route has it too.
       let raw: unknown;
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
       try {
-        raw = await c.req.json();
+        raw = JSON.parse(read.text);
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
@@ -334,9 +448,19 @@ export function build(opts: BuildOpts) {
       // transport fault, not a request with missing fields. Fixing identify alone
       // would leave the sibling route converting a truncated body into whatever
       // buildTicket makes of `{}`.
+      // BOUNDED. This is the prefix that is actually published to the public
+      // internet — `tailscale serve` maps /voice and nothing else — so it is the
+      // one place an unbounded body read matters most, and it was the one place
+      // the first version of this bound did not reach. Measured against a live
+      // process: a 64 MB chunked POST here drove RSS +109 MB while the guarded
+      // sibling took the same body at +7 MB. `c.req.json()` buffers without
+      // limit and a chunked request sends no content-length, so nothing stopped
+      // it. Same helper, same cap, and now the harder-to-reach route has it too.
       let raw: unknown;
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
       try {
-        raw = await c.req.json();
+        raw = JSON.parse(read.text);
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
@@ -371,6 +495,339 @@ export function build(opts: BuildOpts) {
         // blocked on #107.)
         followUp: "none",
       });
+    });
+  }
+
+  // Walkie — the operator's pending decisions (BRO-2387). Registered ONLY with a
+  // configured secret, same rule and same reason as the voice channel above.
+  //
+  // REACHABILITY — MEASURED, after being asserted twice in opposite directions.
+  //
+  // It was first claimed here that /walkie/* is not internet-reachable, on the
+  // strength of the comment at server.ts:100-103. Unverified. It was then
+  // "corrected" to the opposite — assume it IS reachable — on the strength of
+  // integrations/elevenlabs/README.md:46-49 and
+  // scripts/elevenlabs-provision.sh:31-32, which say to FUNNEL THE ROOT. Also
+  // unverified. Two confident claims, neither measured, pointing opposite ways.
+  //
+  // Measured through the PUBLIC ingress: curl --resolve to the funnel's public
+  // address, with %{remote_ip} confirming the request did not quietly take the
+  // tailnet path instead (the first attempt did). The two servers are
+  // distinguishable by their 404 bodies — Hono returns 13 bytes
+  // ("404 Not Found"), tailscaled's Go http.NotFound returns 19
+  // ("404 page not found"):
+  //
+  //   /voice/identify  -> 13 bytes  — reaches Genesis
+  //   /walkie/asks     -> 19 bytes  — never leaves tailscaled
+  //   /health          -> 19 bytes  — never leaves tailscaled
+  //
+  // /voice/identify reaching a DIFFERENT server than /health is the positive
+  // control: the funnel demonstrably works, and demonstrably publishes only the
+  // /voice path segment. As deployed today this surface is NOT reachable from
+  // the public internet, and server.ts:100-103 is correct.
+  //
+  // The hazard is a CONFIGURATION one, not a current exposure: this repo's own
+  // shipped instruction says to funnel the root, and following it publishes this
+  // surface with only the header check below in front of it. That is why the
+  // check is dedicated rather than the shared helper, why the secret is separate
+  // from voiceSecret, and why these responses are no-store — defence in depth
+  // against an instruction the repo already gives. (BRO-2412 states this
+  // backwards and needs correcting.)
+  //
+  // TRANSPORT NOTE, because it constrains the client and must not be discovered
+  // later: authorization is a REQUEST HEADER. `EventSource` cannot set headers —
+  // its EventSourceInit has exactly one member, withCredentials — so a browser
+  // client reads these with `fetch`, not EventSource. That is a deliberate cost.
+  // The alternative is a credential in the query string, which this server's
+  // shared `unauthorized()` helper does accept, and which would land the secret
+  // in access logs, Referer headers and browser history. Paying a little client
+  // complexity to keep a credential out of a URL is the right trade.
+  if (opts.walkieSecret) {
+    // Same failure this exact shape already shipped once for voice: a configured
+    // surface whose sink was optional-chained away answered 200 and stored
+    // nothing. A misconfiguration, not a runtime condition — so it fails at
+    // BUILD.
+    if (!opts.askLog) {
+      throw new Error(
+        "walkieSecret is set but askLog is not: the walkie routes would " +
+          "acknowledge answers and discard them. Pass a store (createAskLog).",
+      );
+    }
+    if (!opts.askLogDir) {
+      throw new Error(
+        "walkieSecret is set but askLogDir is not: GET /walkie/asks would have " +
+          "nothing to read. Pass the same directory createAskLog was given.",
+      );
+    }
+    const askLog = opts.askLog;
+    const askLogDir = opts.askLogDir;
+    // NOT the shared unauthorized(): that helper opens with
+    // `if (!opts.token) return false`, so an unset token authorizes everyone,
+    // and it accepts the credential from the query string. Neither is acceptable
+    // for a surface that lists what an operator has been asked to decide.
+    // A decision, not a document. Generous enough for a free-text answer with
+    // reasoning; far below anything that makes the journal expensive to re-read.
+    const MAX_ANSWER_CHARS = 4096;
+    const walkieDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
+      !secretMatches(c.req.header("x-genesis-walkie-secret"), opts.walkieSecret ?? "");
+
+    // What is waiting on a person. A plain JSON read — the client renders from
+    // this. GET /walkie/stream is a later addition on top, not a prerequisite:
+    // a client that can poll this can render, and a streaming endpoint carries
+    // hazards a read verb does not.
+    // NO-STORE ON BOTH WALKIE ROUTES. The body is the operator's pending
+    // decisions, and nothing here set a cache directive — so a shared cache, a
+    // service worker or the browser's bfcache may retain it. That matters more
+    // than it would for most JSON: the PWA client is the intended consumer, so
+    // the response is held by a browser rather than by a server process. It is
+    // NOT justified by internet exposure — measured, this surface is not
+    // published (see the reachability note above) — but the directive costs
+    // nothing and the repo's own funnel instruction would publish it. Applied to
+    // the answer route too, because its body confirms which decision was
+    // recorded.
+    const noStore = (c: Context) => {
+      c.header("Cache-Control", "no-store");
+      c.header("Pragma", "no-cache");
+    };
+
+    app.get("/walkie/asks", (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // `!== undefined`, not truthiness. `?thread=` (present, empty) returns "",
+      // and treating that as absent silently WIDENED the read to every thread —
+      // the opposite of what the caller asked for, on the one parameter whose
+      // whole job is narrowing.
+      const threadId = c.req.query("thread");
+      const includeAnswered = c.req.query("answered") === "1";
+      const { entries, degraded } = readAsks(askLogDir, {
+        ...(threadId !== undefined ? { threadId } : {}),
+        includeAnswered,
+      });
+      // BOUNDED, like /admin/voice/queue. Both journals are append-only and
+      // nothing compacts them, so an unbounded response grows without limit —
+      // measured at 16.2 MB for 100k asks, against the sibling route's 50 over
+      // the same record count. Oldest first, so the cap keeps the longest-waiting
+      // questions rather than an arbitrary window. (P20 MAJOR.)
+      const rawLimit = Number(c.req.query("limit"));
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      // OFFSET, because a cap without one makes the tail UNREACHABLE — not merely
+      // paged. Measured: with 250 asks, `?limit=1000` returned 200 (the hard cap)
+      // and the newest 50 could not be retrieved by any request. The journal is
+      // append-only, so that set only grows.
+      //
+      // It is also what makes the 409 on POST /walkie/answer defensible. That
+      // response names the standing answer, and the argument for it is that the
+      // same credential can already read it with GET — verified, and TRUE only if
+      // GET can actually reach every ask. Past the cap it could not, so the 409
+      // was the sole disclosure channel for exactly the asks a client could not
+      // otherwise see. A bound added for response size had silently invalidated a
+      // security argument made three hundred lines away. Found by paging past the
+      // cap and looking, not by reading either site.
+      const rawOffset = Number(c.req.query("offset"));
+      const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+      const page = entries.slice(offset, offset + limit);
+      // "IS THERE MORE AFTER THIS PAGE", not "is the log bigger than one page" —
+      // the old form stayed true on the final page, so a client paging until
+      // `truncated` disappeared would never stop.
+      const truncated = offset + page.length < entries.length;
+      // `degraded` travels rather than being swallowed: a read that could not see
+      // a file must not look like a repo with nothing pending.
+      // `total` and `truncated` travel so a client can tell "nothing pending" from
+      // "the first 50 of 4000" — the same reason `degraded` travels.
+      return c.json({
+        asks: page,
+        total: entries.length,
+        // The offset travels back so a client paging a growing journal can tell
+        // which window it received without tracking the request it sent.
+        ...(offset > 0 ? { offset } : {}),
+        ...(truncated ? { truncated: true } : {}),
+        ...(degraded ? { degraded } : {}),
+      });
+    });
+
+    // The decision coming back.
+    app.post("/walkie/answer", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      // BEFORE parsing. `c.req.json()` buffers the entire body, and there is no
+      // body-size limit anywhere in this server (`app.use` appears zero times),
+      // so an authenticated caller could spend our RSS on a request that was
+      // going to 400 anyway. voice.ts:98-105 names this same bug as one it
+      // already fixed: "an authenticated webhook could send a 100 MB
+      // conversationId and have it buffered and appended verbatim". Declared
+      // length is advisory — a chunked body carries none — so the parsed answer
+      // is still length-checked below; this only refuses the obvious case
+      // cheaply. (P20 MAJOR.)
+      const declared = Number(c.req.header("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+        return c.json({ error: "body too large" }, 413);
+      }
+      // THE HEADER CHECK ABOVE IS NOT THE BOUND, and until this was measured the
+      // comment claimed it was enough because "the parsed answer is still
+      // length-checked below". That is a CORRECTNESS mitigation; the guard was
+      // sold as an AVAILABILITY one. A chunked request carries no
+      // content-length, so it skips the check entirely — a 64 MB chunked body
+      // took the server's RSS from 124 MB to 245 MB before the length cap
+      // rejected it. Measured against a live process. So the read itself is
+      // bounded, and the header check is kept only as the cheap early exit it
+      // actually is.
+      // ITS OWN CATCH, and deliberately not the JSON one below. `readBounded`
+      // propagates a rejection from `reader.read()`, and awaiting it outside a
+      // try let a body-transport fault escape the handler entirely: measured over
+      // a real socket, a malformed chunk-size line, an RST mid-body and a clean
+      // FIN mid-body each produced an uncaught AbortException, 32 lines of stderr
+      // and a 500 where the previous shape answered 400. This route was the only
+      // POST in the server whose body read could throw out of its handler.
+      //
+      // Merging it into the JSON catch would have been the smaller diff and the
+      // wrong one: this file says so three hundred lines up, at /voice/identify —
+      // "a transport fault would have looked like a stranger". A body that never
+      // arrived is not a body that failed to parse, so it gets its own message.
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
+      let raw: unknown;
+      try {
+        raw = JSON.parse(read.text);
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { id?: unknown; threadId?: unknown; answer?: unknown };
+      // A parse failure is not an empty answer, and an empty answer is not a
+      // decision. Both are 400s with distinct messages — collapsing them is how
+      // /voice/identify once made a transport fault look like normal traffic.
+      if (typeof body.id !== "string" || !body.id) {
+        return c.json({ error: "id must be a non-empty string" }, 400);
+      }
+      // THREADID IS PART OF THE IDENTITY, so answering names both. An ask is
+      // (threadId, id); accepting an id alone is what made a decision joinable to
+      // a different thread's ask. The client always has it — every ask served by
+      // GET /walkie/asks carries its threadId — so this costs a field, not a
+      // round trip.
+      if (typeof body.threadId !== "string" || !body.threadId) {
+        return c.json({ error: "threadId must be a non-empty string" }, 400);
+      }
+      if (typeof body.answer !== "string" || !body.answer) {
+        return c.json({ error: "answer must be a non-empty string" }, 400);
+      }
+      // CAPPED. There is no body-size limit anywhere in this server (`app.use`
+      // appears zero times), so an unbounded answer is appended verbatim to a
+      // journal every later request re-reads: a 50 MB answer returned 200 in
+      // 90 ms and left every subsequent GET and POST re-parsing 50 MB. An answer
+      // is a decision, not a document. (P20 MAJOR.)
+      if (body.answer.length > MAX_ANSWER_CHARS) {
+        return c.json({ error: `answer must be at most ${MAX_ANSWER_CHARS} characters` }, 413);
+      }
+      // Answering an id that is not in the log is a 404, not a silent accept:
+      // otherwise a typo'd id is written to answers.jsonl forever, matching
+      // nothing, and the operator believes they answered.
+      // ATOMIC BY CONSTRUCTION, AND FRAGILE. From this read through the
+      // `askLog.answer` write below there is NO `await`, so the whole
+      // read-check-write is one synchronous span and JS's single thread makes it
+      // atomic. Measured: 20 concurrent POSTs each carrying a DIFFERENT answer
+      // produce exactly one 200, nineteen 409s, and one line in answers.jsonl.
+      //
+      // The fragility is worth naming because nothing enforces it. Insert a
+      // single `await` anywhere in that span — make readAsks async, add a hook,
+      // await a metric — and two requests interleave between the status check
+      // and the append, both see `pending`, both write, and the LAST one wins:
+      // exactly the overwrite first-answer-wins exists to prevent.
+      // walkie-routes.test.ts pins the property and the sweep has a mutant that
+      // inserts an await, so the fragility is measured rather than trusted.
+      //
+      // ACROSS PROCESSES IT DOES NOT HOLD AT ALL. Two genesis instances sharing
+      // an ask-log directory would race, because the atomicity is a property of
+      // one event loop, not of the file. The deployment is a single process
+      // today; making it more than one requires a lock here, and this comment is
+      // the notice.
+      const known = readAsks(askLogDir, { includeAnswered: true });
+      // A DEGRADED READ IS NOT AN ABSENT ASK. Dropping `degraded` here collapsed
+      // an unreadable asks.jsonl to an empty list, so every answer to a real
+      // pending ask 404'd "no such ask" — telling the operator their question
+      // does not exist when the truth is that the log could not be opened. The
+      // GET route propagates this deliberately; the POST route must not
+      // contradict it. (P20 MAJOR.)
+      // `unreadable`, NOT `degraded`. A FILE that could not be opened means the
+      // id lookup below cannot tell "no such ask" from "could not look", so it
+      // must refuse. A malformed RECORD does not: it was read, and the lookup is
+      // as reliable as ever. Gating on the broader flag made a single bad line
+      // refuse every answer to every other ask permanently — this journal is
+      // append-only and nothing compacts it, so that state never clears. Found
+      // by dogfooding, after the unit suite and the mutation sweep both passed.
+      if (known.unreadable) {
+        console.error("[walkie] ask log unreadable, refusing to answer:", known.degraded);
+        return c.json({ error: "could not read the ask log; please try again" }, 503);
+      }
+      // MATCHED ON BOTH. The ambiguity election that used to sit here — detect a
+      // colliding id, withhold its answer, refuse the write — is gone with the
+      // weak key it compensated for. Two asks sharing an id in different threads
+      // are two asks, and each is answerable.
+      const existing = known.entries.find((a) => a.id === body.id && a.threadId === body.threadId);
+      if (!existing) {
+        return c.json({ error: "no such ask" }, 404);
+      }
+      // FIRST ANSWER WINS, and this is the line that makes DoD item 2 true
+      // rather than nearly true. The read-time Map made a repeat "not
+      // double-count", which is not the same as a no-op: a live probe answered
+      // SHIP and then HOLD, and the second silently replaced the first — so a
+      // retried stale request could flip a decision the operator had already
+      // made. It also grew answers.jsonl once per retry, in a journal nothing
+      // compacts. There is no verb for changing an answer; if one is ever
+      // wanted it should be explicit, not an accident of retry semantics.
+      if (existing.status === "answered") {
+        // A REPEAT IS NOT A REPLACEMENT, and `recorded: true` must not mean both.
+        // Returning it for a body that was discarded made the primary field
+        // change meaning between two branches of one handler: on the success path
+        // it asserts "your answer was recorded", here it asserted "an answer
+        // exists". A PWA doing the natural `if (body.recorded)` renders
+        // "recorded" while the store still serves the old decision — the operator
+        // believes HOLD is in force and the agent ships.
+        //
+        // So: an identical answer is a genuine no-op and stays 200. A DIFFERENT
+        // answer is a conflict, gets 409, and the response names the decision
+        // that actually stands so the client can show it rather than guess.
+        if (existing.answer === body.answer) {
+          return c.json({ recorded: true, alreadyAnswered: true });
+        }
+        // THE STANDING ANSWER TRAVELS, and the threat model is why that is safe
+        // rather than a leak. `readAsks` is called here WITHOUT a thread filter,
+        // so this body can carry a decision from a thread the caller never named
+        // — verified by running it, it does. It is not an escalation:
+        // `walkieSecret` is ONE shared secret with no per-thread scoping (see
+        // BuildOpts.walkieSecret), so the same credential can already read every
+        // thread's answers via GET /walkie/asks?answered=1. Also verified.
+        //
+        // The thread filter is a VIEW, not an authorization boundary. Stated here
+        // because the ambiguity rule above is framed as "cross-thread
+        // disclosure", and that is a violation of the FILTER'S CONTRACT — a
+        // response containing what the filter said it excluded — not a privilege
+        // boundary being crossed. Conflating the two would leave the next reader
+        // either treating `?thread=` as auth or "fixing" this 409 into
+        // uselessness.
+        //
+        // THE DAY THIS STOPS BEING TRUE is the day walkie gets per-thread
+        // credentials. walkie-routes.test.ts pins both halves — that the 409
+        // carries the answer, AND that a plain GET already exposes it — so
+        // scoping GET without scoping this breaks the second half and points
+        // straight at the first.
+        return c.json({ error: "already answered", recorded: false, answer: existing.answer }, 409);
+      }
+      try {
+        askLog.answer({
+          threadId: body.threadId,
+          id: body.id,
+          answer: body.answer,
+          answeredAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        // The ask log's failure policy is the voice queue's: propagate. An answer
+        // the operator was told was recorded, which then vanished, is worse than
+        // a visible failure they can retry.
+        console.error("[walkie] could not record answer:", e);
+        return c.json({ error: "could not record the answer; please try again" }, 503);
+      }
+      // Answering twice is a no-op by construction — readAsks keys answers by id
+      // in a Map, so the second write overwrites rather than double-counting.
+      return c.json({ recorded: true });
     });
   }
 

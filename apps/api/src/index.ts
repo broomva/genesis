@@ -17,6 +17,7 @@ import {
   createInteractiveEngine,
   runCodex,
 } from "@genesis/runner";
+import { createAskLog } from "./ask-log";
 import { build } from "./server";
 import { createVoiceQueue, parseVoicePrincipals } from "./voice-queue";
 import { purgeCloneTmp } from "./workspace-provision";
@@ -311,6 +312,27 @@ const voicePrincipals = voiceSecret
   ? parseVoicePrincipals(process.env.GENESIS_VOICE_PRINCIPALS)
   : [];
 const enqueueVoice = voiceSecret ? createVoiceQueue(voiceQueueDir) : undefined;
+
+// Walkie (BRO-2387). Same switch, same reason, and the reason is not hypothetical
+// for this repo: without these lines `if (opts.walkieSecret)` never runs and the
+// routes do not exist in any real deploy, however green their tests are. That is
+// exactly how the voice surface shipped unreachable with 25 passing tests, which
+// is why index-wiring.test.ts exists and why this block has one too.
+const walkieSecret = process.env.GENESIS_WALKIE_SECRET;
+// Its OWN directory, never the voice queue's. The two stores must not share a
+// directory, so an agent-originated ask can never be mistaken for — or land
+// beside — caller-originated intake keyed by an untrusted phone number.
+const askLogDir = process.env.GENESIS_ASK_LOG_DIR ?? join(defaultDataDir(), "walkie");
+// Built only when the channel is on: an unconfigured deploy must not create a
+// directory nothing will ever write to.
+const askLog = walkieSecret ? createAskLog(askLogDir) : undefined;
+if (walkieSecret) {
+  // Says "no producer" out loud: the routes answer, but nothing writes an ask
+  // yet, so an operator seeing this line must not read it as a live channel.
+  console.log(
+    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} (routes live; no producer yet — asks are not written by anything)`,
+  );
+}
 if (voiceSecret) {
   // An enabled channel with no principals still ANSWERS — every caller resolves
   // unknown and can leave a message. That is a legitimate configuration, so this
@@ -358,6 +380,12 @@ const { app, websocket } = build({
   projectsRoot: process.env.GENESIS_PROJECTS_ROOT,
   extraArgs: process.env.GENESIS_AGENT_ARGS?.split(" ").filter(Boolean),
   token: process.env.GENESIS_TOKEN,
+  // Walkie (BRO-2387) — see the switch above. Passed unconditionally; server.ts
+  // gates on walkieSecret being present, and throws at build if it is set
+  // without its store.
+  walkieSecret,
+  askLog,
+  askLogDir,
   store,
   hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,

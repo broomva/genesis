@@ -18,6 +18,49 @@ import { join } from "node:path";
 // the deploy smoke rather than a unit suite — that boot was exercised by hand
 // (both polarities: routes answer with the secret set, 404 without it).
 
+/** The build({...}) argument object with COMMENTS STRIPPED.
+ *
+ *  Without the strip, `toContain("walkieSecret")` is satisfied by a comment that
+ *  merely mentions the option — which is what happened: deleting all three
+ *  walkie options from the call left one assertion passing, because the comment
+ *  above them says "gates on walkieSecret being present". An assertion a
+ *  sentence can satisfy is not pinning a binding. */
+/**
+ * RESIDUAL, stated rather than papered over. This is still a text match over
+ * source, and a text match is a claim about a FILE. The review's proposed fix —
+ * export a `buildOpts()` factory and assert `Object.hasOwn` on the returned
+ * object — is categorically better, and it was tried and reverted: importing
+ * anything from index.ts BOOTS THE SERVER (measured: 1227 ms, a listener, and a
+ * pglite store constructed at import time). Dragging that into the shared
+ * `bun test` process is the same hazard that took this suite from 0 to 126
+ * failures when a module mock leaked across files.
+ *
+ * The correct fix is an `import.meta.main` guard on the entrypoint so importing
+ * is side-effect-free. That changes the boot model and belongs in its own change
+ * rather than smuggled into this ticket — tracked separately.
+ *
+ * Until then: comments AND string/template literals are stripped, which defeats
+ * both bypasses found so far, and `scripts/mutation-sweep-walkie.sh` carries a
+ * `walkie unwired from build()` mutant. Neither makes this airtight, and saying
+ * so is better than implying it is.
+ */
+function withoutComments(src: string): string {
+  return (
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      // AND string/template literals. Stripping comments alone was not enough: the
+      // assertion is a text match over source, so ANY literal inside the call
+      // satisfies it. Demonstrated by a reviewer with
+      // `workspaceName: \`walkie wired: walkieSecret, askLog, askLogDir\`` and all
+      // three real options deleted — green. Third time in this ticket that a
+      // matcher was satisfied by prose rather than by code. (P20 MAJOR.)
+      .replace(/`(?:[^`\\]|\\.)*`/g, "``")
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+  );
+}
+
 /** The literal argument object of the single build({...}) call in index.ts. */
 function buildCallSource(): string {
   const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
@@ -62,5 +105,85 @@ describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
     // The option itself must not exist on BuildOpts: a caller that can pass it
     // can claim the channel, which is exactly how the last design failed.
     expect(server).not.toMatch(/^\s*voiceDelivery\??:/m);
+  });
+});
+
+// ── walkie (BRO-2387) ──────────────────────────────────────────────────────
+//
+// The same hole, and I dug it: build() accepted walkieSecret / askLog /
+// askLogDir while index.ts passed none of them, so `if (opts.walkieSecret)`
+// could never run and /walkie/asks and /walkie/answer did not exist in any real
+// deploy — with 21 route tests green, because every one of them injects the
+// options by hand. Exactly the shape the block above exists to prevent,
+// reproduced two years of lessons later. So it gets the same source-level guard.
+
+describe("index.ts wires walkie into build() (BRO-2387)", () => {
+  const call = withoutComments(buildCallSource());
+
+  test.each(["walkieSecret", "askLog", "askLogDir"])("build() receives %s", (option) => {
+    // Comment-stripped, and matched as a property rather than a substring: the
+    // first version of this passed on a comment mentioning the option name.
+    expect(call).toMatch(new RegExp(`(^|[\\s,{])${option}\\s*[,:]`));
+  });
+
+  test("the store is the durable ask log, not an inline throwaway", () => {
+    // The BINDING, not the identifier: "contains createAskLog" would pass on an
+    // unused import, which round 2 of the voice work established does not pin
+    // anything.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toMatch(/const\s+askLog\s*=[^;]*createAskLog\(/);
+  });
+
+  test("the ask log has its OWN directory, never the voice queue's", () => {
+    // The two stores must not share a directory. If askLogDir were derived from
+    // voiceQueueDir, an agent-originated ask would land beside caller-originated
+    // intake keyed by an untrusted phone number — the merge AGENTS.md forbids.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    const m = src.match(/const\s+askLogDir\s*=([^;]*);/);
+    expect(m).not.toBeNull();
+    expect(m?.[1]).not.toContain("voiceQueueDir");
+    expect(m?.[1]).not.toContain("GENESIS_VOICE_QUEUE_DIR");
+  });
+
+  test("the store is built ONLY when the channel is configured", () => {
+    // An unconfigured deploy must not create a directory nothing will ever write
+    // to — the same rule the voice queue follows one line above it.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toMatch(/const\s+askLog\s*=\s*walkieSecret\s*\?/);
+  });
+});
+
+describe("the ask producer gap is declared, not silent (BRO-2387)", () => {
+  test("the boot line says there is no producer", () => {
+    // A surface that answers 200 while being permanently empty reads as working.
+    // If someone lands the producer, this test fails and they remove the caveat
+    // deliberately rather than leaving a stale disclaimer behind.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toContain("no producer yet");
+  });
+
+  test("nothing outside tests calls askLog.append", () => {
+    // The claim the caveat rests on, checked rather than asserted. When a
+    // producer lands, this goes red and the caveat comes out with it.
+    const dir = join(import.meta.dir, "..", "..", "..");
+    const out = Bun.spawnSync(
+      [
+        "grep",
+        "-rn",
+        "--include=*.ts",
+        "-e",
+        "askLog.append",
+        "-e",
+        "createAskLog(",
+        join(dir, "apps"),
+        join(dir, "packages"),
+      ],
+      { cwd: dir },
+    ).stdout.toString();
+    const callers = out
+      .split("\n")
+      .filter((l) => l.trim() && !l.includes(".test.ts") && !l.includes("/node_modules/"));
+    // index.ts constructs the store; server.ts holds it. Neither appends.
+    expect(callers.filter((l) => l.includes("askLog.append"))).toEqual([]);
   });
 });
