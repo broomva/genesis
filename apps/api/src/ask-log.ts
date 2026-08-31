@@ -1,0 +1,240 @@
+// The ask log (BRO-2387) — the one durable object walkie genuinely owns.
+//
+// WHY THIS FILE EXISTS. Genesis has no ask log. `pendingQuestion`
+// (packages/projection/src/reducer.ts:210) is projection state: absent from every
+// table, cleared on tool result, and — verified — with zero production readers. It
+// is a view, not a record. Nothing in Genesis can tell you what an agent is
+// currently blocked on across a restart.
+//
+// NOT queue.jsonl. That file holds VoiceTicket: caller-originated intake, keyed by
+// an explicitly untrusted phone number. An ask is agent-originated and keyed by
+// session and thread. Writing agent-originated asks into a caller-id-keyed intake
+// file is the failure AGENTS.md:181-185 forbids by name, so these are separate
+// stores in separate files and a test asserts an ask never lands in the queue.
+//
+// SHAPE BORROWED FROM voice-queue.ts, DELIBERATELY. Two append-only JSONL files
+// joined at read time — asks.jsonl is the record, answers.jsonl is what became of
+// each. That is exactly readQueueStatus's queue/delivered join, and it is worth
+// copying for a reason beyond familiarity: the join gives idempotency for free.
+// `answers` is a Map keyed by ask id, so answering the same ask twice overwrites
+// rather than double-counts. The write path stays append-only and dumb; the read
+// path is where "acking twice is a no-op" actually lives.
+//
+// DURABILITY IS NOT BEST-EFFORT HERE, and that is the one place this deliberately
+// departs from voice-queue.ts. That file's comment (voice-queue.ts:61-71) states
+// the rule: "The change that adds a queue-draining consumer — the moment a caller
+// is told an answer IS coming — is the change that must add an fsync or a real
+// queue." An ask is precisely that: someone is told a question is pending and an
+// answer is expected back. So every append here fsyncs.
+//
+// The cost argument that makes fsync contentious for the voice queue does not
+// apply. /voice/request runs with a caller on the line, so an fsync sits in a
+// human-perceptible hot path. An ask is written by an agent mid-turn, inside a
+// 9-30s round trip, where a page-cache flush is noise. Same rule, different
+// price.
+
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
+
+/** Where asks land. Append-only JSONL, one ask per line. */
+export const ASK_FILE = "asks.jsonl";
+
+/** What became of each ask. Append-only; latest entry per id wins at read time. */
+export const ANSWER_FILE = "answers.jsonl";
+
+/** One option offered by an AskUserQuestion invocation. */
+export interface AskOption {
+  readonly label: string;
+  readonly description?: string;
+}
+
+/** An agent, mid-run, blocked on a decision only a person can make. */
+export interface Ask {
+  /** Stable across retries of the same tool call — the id the answer refers to. */
+  readonly id: string;
+  readonly sessionId: string;
+  readonly threadId: string;
+  readonly question: string;
+  readonly header?: string;
+  readonly options?: readonly AskOption[];
+  readonly multiSelect?: boolean;
+  readonly createdAt: string;
+}
+
+/** The decision coming back. */
+export interface AskAnswer {
+  readonly id: string;
+  readonly answer: string;
+  readonly answeredAt: string;
+}
+
+export type AskStatus = "pending" | "answered";
+
+/** An ask joined with what became of it. */
+export interface AskEntry extends Ask {
+  readonly status: AskStatus;
+  readonly answer?: string;
+  readonly answeredAt?: string;
+}
+
+/** Append one JSON line and flush it to the platter before returning.
+ *
+ *  openSync/writeSync/fsyncSync/closeSync rather than appendFileSync, because
+ *  appendFileSync returns once the bytes reach the page cache — which is the exact
+ *  gap voice-queue.ts:61-71 documents and this file exists on the other side of.
+ *  The fd is opened per append rather than held for the process lifetime: holding
+ *  it would make this module stateful, and a stale fd across a log rotation fails
+ *  silently by writing into an unlinked inode.
+ *
+ *  No try/catch. Failure policy is voice-queue.ts's, for the same reason: a
+ *  dropped ask is a question the operator was told was pending and which then
+ *  vanished. The throw becomes the route's 503. */
+export interface DurableFs {
+  openSync(path: string, flags: string): number;
+  writeSync(fd: number, s: string): number;
+  fsyncSync(fd: number): void;
+  closeSync(fd: number): void;
+}
+
+const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync, closeSync };
+
+function durableAppend(file: string, record: unknown, fs: DurableFs): void {
+  const fd = fs.openSync(file, "a");
+  try {
+    fs.writeSync(fd, `${JSON.stringify(record)}\n`);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** The write half. Directory created ONCE at construction, never per append —
+ *  voice-queue.ts:93-95's reason applies unchanged. */
+export function createAskLog(
+  dir: string,
+  /** Injectable ONLY so a test can observe the syscall sequence. Defaults to the
+   *  real thing; production never passes this.
+   *
+   *  The alternative was `mock.module("node:fs")`, and it does not work here:
+   *  `bun test` runs every file in ONE process, so a module mock leaks into every
+   *  file loaded after it. That took the full suite from 0 to 126 failures, and
+   *  the two-file check written to prove isolation passed vacuously — two files
+   *  is a favourable ordering. */
+  fs: DurableFs = REAL_FS,
+): {
+  append(ask: Ask): void;
+  answer(answer: AskAnswer): void;
+} {
+  mkdirSync(dir, { recursive: true });
+  const askPath = join(dir, ASK_FILE);
+  const answerPath = join(dir, ANSWER_FILE);
+  return {
+    append: (ask: Ask) => durableAppend(askPath, ask, fs),
+    answer: (answer: AskAnswer) => durableAppend(answerPath, answer, fs),
+  };
+}
+
+interface RawAnswer {
+  id: string;
+  answer: string;
+  answeredAt?: string;
+}
+
+function isAnswer(v: unknown): v is RawAnswer {
+  if (!v || typeof v !== "object") return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.id === "string" && e.id.length > 0 && typeof e.answer === "string";
+}
+
+/** Read a JSONL file, tolerantly.
+ *
+ *  Reads FIRST rather than existsSync-then-read: existsSync answers false for a
+ *  path it cannot stat — an unreadable parent directory, say — so gating on it
+ *  turns "I am not allowed to look" into "there is nothing here". That is the
+ *  silent lie `degraded` exists to prevent, and the reasoning is voice-queue.ts's
+ *  (:159-163) rather than mine.
+ *
+ *  ENOENT is the only healthy absence. The message names the FILE and never the
+ *  path, because it reaches a browser and the absolute location is not the
+ *  client's business. */
+function readLines(dir: string, name: string, onDegraded: (msg: string) => void): unknown[] {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, name), "utf8");
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    if (code === "ENOENT") return [];
+    onDegraded(`${name} could not be read (${code ?? "unknown error"})`);
+    return [];
+  }
+  const out: unknown[] = [];
+  for (const line of raw.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      out.push(JSON.parse(s));
+    } catch {
+      // A torn final line is expected while another process appends. Skipped,
+      // never fatal — same tolerance as parseQueue.
+    }
+  }
+  return out;
+}
+
+/** Join asks.jsonl with answers.jsonl. Oldest first: an operator working through
+ *  a backlog answers the longest-waiting question first, which is the opposite of
+ *  readQueueStatus's "what just happened" ordering and deliberately so.
+ *
+ *  Idempotency lives here. `answers` is a Map, so a repeated answer for one id
+ *  overwrites instead of appending an effect — which is what makes acking twice a
+ *  no-op without the write path needing to know anything. Duplicate ASKS collapse
+ *  the same way: a retried tool call yields a stable id, and the ask is shown once.
+ *
+ *  `principal` filters to one thread. The ask log is per-principal in the sense
+ *  that a reader is scoped to their own thread, not in the sense that the file is
+ *  partitioned — there is no principal partition anywhere in this repo, and
+ *  inventing one here would be a second answer to a question the codebase has
+ *  already answered differently. */
+export function readAsks(
+  dir: string,
+  opts?: { threadId?: string; includeAnswered?: boolean },
+): { entries: AskEntry[]; degraded?: string } {
+  let degraded: string | undefined;
+  const note = (m: string) => {
+    degraded = m;
+  };
+
+  const answers = new Map<string, RawAnswer>();
+  for (const v of readLines(dir, ANSWER_FILE, note)) if (isAnswer(v)) answers.set(v.id, v);
+
+  const seen = new Set<string>();
+  const entries: AskEntry[] = [];
+  for (const v of readLines(dir, ASK_FILE, note)) {
+    if (!v || typeof v !== "object") continue;
+    const a = v as Record<string, unknown>;
+    if (typeof a.id !== "string" || !a.id) continue;
+    if (typeof a.question !== "string" || !a.question) continue;
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+
+    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
+
+    const ans = answers.get(a.id);
+    if (ans && opts?.includeAnswered !== true) continue;
+
+    entries.push({
+      id: a.id,
+      sessionId: typeof a.sessionId === "string" ? a.sessionId : "",
+      threadId: typeof a.threadId === "string" ? a.threadId : "",
+      question: a.question,
+      ...(typeof a.header === "string" ? { header: a.header } : {}),
+      ...(Array.isArray(a.options) ? { options: a.options as AskOption[] } : {}),
+      ...(typeof a.multiSelect === "boolean" ? { multiSelect: a.multiSelect } : {}),
+      createdAt: typeof a.createdAt === "string" ? a.createdAt : "",
+      status: ans ? "answered" : "pending",
+      ...(ans ? { answer: ans.answer } : {}),
+      ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
+    });
+  }
+  return degraded ? { entries, degraded } : { entries };
+}
