@@ -21,8 +21,27 @@ Read through the store's public API (`listSessions` + `turnsForSession`), so the
 same script measures pglite and Postgres without a second code path.
 
 Source: the production store, `pglite:/home/agent/.config/genesis-bot/data`, read
-from a **snapshot copy** so the live process was never touched. The script never
-writes; it can be pointed at production directly.
+from a **snapshot copy** so the live process was never touched.
+
+**On "read-only", precisely.** The first version of this script used
+`createPgliteStore` and claimed it never wrote. That was false: both factories run
+`MIGRATE_SQL` on open (`packages/db/src/factory.ts:13`, `:24`) — `CREATE TABLE IF
+NOT EXISTS` plus seven `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
+(`packages/db/src/schema.ts:97-124`). On Postgres an `ALTER` takes an
+`ACCESS EXCLUSIVE` lock even when the column already exists, so pointing it at a
+live database would have briefly blocked every reader and writer of `sessions` and
+`turns`. Caught in review before it was ever aimed at production.
+
+It now opens through `packages/db/src/readonly.ts`, which cannot reach
+`MIGRATE_SQL` — asserted by `scripts/measure-readonly.test.ts`, including
+behaviourally: pointed at a store without the schema it reports
+`relation "turns" does not exist` rather than creating it.
+
+**Residual, stated rather than papered over:** for pglite, *opening* a data
+directory is itself a write — it is a Postgres data dir and the engine runs initdb
+and recovery regardless of what SQL follows. There is no read-only open. So for
+pglite: snapshot the directory and point this at the copy, which is what was done
+here. For Postgres, a `SELECT` over the wire genuinely touches nothing.
 
 ## The distribution
 

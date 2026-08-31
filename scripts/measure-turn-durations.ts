@@ -8,29 +8,44 @@
 // distribution, and either name D with its percentile and the count of
 // observations above it, or say "insufficient data" and name nothing.
 //
-// IT READS THROUGH THE STORE'S PUBLIC API, not raw SQL. listSessions() +
-// turnsForSession() work identically against pglite and Postgres, so the same
-// script measures a laptop and production without a second code path — and
-// without this script needing to know the schema, which is the thing most likely
-// to drift under it.
+// IT DOES NOT GO THROUGH createPgliteStore/createPostgresStore, and that is the
+// whole reason this file opens its own client.
+//
+// The first version used the store factory and its header said "It NEVER writes.
+// Point it at production if you like." That was FALSE, and false in the dangerous
+// direction: both factories run MIGRATE_SQL on open
+// (packages/db/src/factory.ts:13 and :24) — CREATE TABLE IF NOT EXISTS plus seven
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS (packages/db/src/schema.ts:97-124).
+// That is DDL. On Postgres an ALTER takes an ACCESS EXCLUSIVE lock even when the
+// column already exists, so "just measuring production" would have briefly
+// blocked every reader and writer of `sessions` and `turns`. The measurement in
+// this change was taken against a snapshot copy, so nothing happened — but the
+// header invited exactly the thing it promised was safe.
+//
+// So: one SELECT, no DDL, no migration, no lock. If the table is absent the query
+// errors, which is the correct behaviour for a read-only tool — creating what it
+// came to measure is how a reader becomes a writer.
+//
+// RESIDUAL, stated rather than papered over: for pglite, OPENING a data directory
+// is itself a write — it is a Postgres data dir and the engine will run recovery
+// and touch WAL regardless of what SQL follows. There is no read-only open. So
+// for pglite, snapshot the directory and point this at the copy. For Postgres,
+// a plain SELECT over the wire genuinely touches nothing.
 //
 // Usage:
 //   bun scripts/measure-turn-durations.ts            # DATABASE_URL, else pglite
 //   bun scripts/measure-turn-durations.ts --json     # machine-readable
-//   GENESIS_DATA_DIR=/path bun scripts/measure-turn-durations.ts
-//
-// It NEVER writes. Point it at production if you like.
+//   GENESIS_DATA_DIR=/path/to/SNAPSHOT bun scripts/measure-turn-durations.ts
 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-// RELATIVE, not "@genesis/db", and that is forced rather than chosen. The
-// workspace links live under apps/api/node_modules — the repo root has no
-// @genesis/* — so a script here cannot resolve the package specifier. Every other
-// file in scripts/ imports only node builtins and its own siblings, so there is
-// no precedent to copy either. Reaching into the package source keeps the
-// dependency visible in the import path instead of hiding it behind a manifest
-// change to the root, which would touch bun.lock for one script.
-import { createPgliteStore, createPostgresStore } from "../packages/db/src/index";
+// The read-only opener, NOT the factory. It lives in packages/db beside the
+// factory it avoids, because that is where the drivers resolve: this repo has no
+// node_modules at the root, so a script here cannot import @electric-sql/pglite
+// or postgres directly — discovered by running it, which failed with "Cannot find
+// module". scripts/measure-readonly.test.ts asserts neither this file nor that
+// one can reach MIGRATE_SQL.
+import { openReadOnly } from "../packages/db/src/readonly";
 import { chooseD, fractionUnder, implausiblyFast, summarize } from "./duration-stats";
 
 /** The percentile D is taken at, stated here rather than buried in a call.
@@ -46,28 +61,28 @@ import { chooseD, fractionUnder, implausiblyFast, summarize } from "./duration-s
  *  measurement tool: --percentile 0.95. */
 const DEFAULT_P = 0.9;
 
-async function selectStore(): Promise<{
-  store: {
-    listSessions: () => Promise<{ id: string }[]>;
-    turnsForSession: (id: string) => Promise<{ role: string; durationMs?: number }[]>;
-    close: () => Promise<void>;
-  };
-  label: string;
-}> {
-  const url = process.env.DATABASE_URL;
-  if (url) {
-    // Host only — a connection string carries credentials and this prints.
-    const host = (() => {
-      try {
-        return new URL(url).host;
-      } catch {
-        return "(unparseable)";
-      }
-    })();
-    return { store: (await createPostgresStore(url)) as never, label: `postgres:${host}` };
+/** One SELECT each. No factory, no MIGRATE_SQL, no DDL, no lock. */
+async function readDurations(): Promise<{ label: string; sessions: number; durations: number[] }> {
+  // `role <> 'user'` because a user turn carries no server-measured run time, and
+  // counting its absent value as anything would be inventing data.
+  const SQL =
+    "SELECT duration_ms FROM turns WHERE duration_ms IS NOT NULL AND duration_ms >= 0 AND role <> 'user'";
+  const COUNT = "SELECT count(*)::int AS n FROM sessions";
+  const { client, label } = await openReadOnly({
+    databaseUrl: process.env.DATABASE_URL,
+    dataDir: process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data"),
+  });
+  try {
+    const rows = await client.query<{ duration_ms: number }>(SQL);
+    const counted = await client.query<{ n: number }>(COUNT);
+    return {
+      label,
+      sessions: Number(counted[0]?.n ?? 0),
+      durations: rows.map((r) => Number(r.duration_ms)),
+    };
+  } finally {
+    await client.close();
   }
-  const dir = process.env.GENESIS_DATA_DIR ?? join(homedir() || tmpdir(), ".genesis", "data");
-  return { store: (await createPgliteStore(dir)) as never, label: `pglite:${dir}` };
 }
 
 const args = process.argv.slice(2);
@@ -79,19 +94,7 @@ if (!(p >= 0 && p <= 1)) {
   process.exit(2);
 }
 
-const { store, label } = await selectStore();
-const sessions = await store.listSessions();
-const durations: number[] = [];
-for (const s of sessions) {
-  for (const t of await store.turnsForSession(s.id)) {
-    // Agent turns only. A user turn has no server-measured run time, and
-    // counting its absent duration as anything would be inventing data.
-    if (t.role !== "user" && typeof t.durationMs === "number" && t.durationMs >= 0) {
-      durations.push(t.durationMs);
-    }
-  }
-}
-await store.close();
+const { label, sessions: sessionCount, durations } = await readDurations();
 
 const summary = summarize(durations);
 const verdict = chooseD(durations, p);
@@ -102,7 +105,7 @@ const HOLDS_MS = [5_000, 10_000, 15_000, 20_000, 30_000, 45_000, 60_000];
 const coverage = HOLDS_MS.map((ms) => ({ holdMs: ms, fraction: fractionUnder(durations, ms) }));
 const report = {
   store: label,
-  sessions: sessions.length,
+  sessions: sessionCount,
   ...summary,
   underOneSecond: implausiblyFast(durations),
   coverage,
@@ -114,7 +117,7 @@ if (asJson) {
 } else {
   const ms = (v?: number) => (v === undefined ? "—" : `${(v / 1000).toFixed(1)}s`);
   console.log(`store    ${label}`);
-  console.log(`sessions ${sessions.length}`);
+  console.log(`sessions ${sessionCount}`);
   console.log(`n        ${summary.n} agent turns carrying a durationMs`);
   console.log(`distinct ${summary.distinct}`);
   console.log(
