@@ -20,6 +20,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ANSWER_FILE, ASK_FILE, type Ask, type DurableFs, createAskLog, readAsks } from "./ask-log";
+import { readBounded } from "./server";
 
 const MODULE = new URL("./ask-log.ts", import.meta.url).pathname;
 
@@ -461,5 +462,67 @@ describe("readAsks accounts for malformed records", () => {
     const r = readAsks(dir, { threadId: "t-alpha" });
     expect(r.entries).toHaveLength(1);
     expect(r.degraded).toContain("1 ask record(s) skipped");
+  });
+});
+
+// readBounded is the actual body cap. Its unit is BYTES, and the distinction is
+// not academic: an answer of multi-byte characters is under the character cap
+// while being several times over the byte budget the guard exists to protect.
+describe("readBounded", () => {
+  const reqOf = (bytes: Uint8Array) =>
+    new Request("http://x", {
+      method: "POST",
+      body: bytes,
+    });
+
+  test("a body at exactly the cap is returned", async () => {
+    const r = await readBounded(reqOf(new Uint8Array(100).fill(0x61)), 100);
+    expect(r).toHaveLength(100);
+  });
+
+  test("one byte over the cap returns null", async () => {
+    // Off-by-one in the other direction is the failure that makes the cap a
+    // rounding error rather than a bound.
+    expect(await readBounded(reqOf(new Uint8Array(101).fill(0x61)), 100)).toBeNull();
+  });
+
+  test("the cap counts BYTES, not characters", async () => {
+    // 40 three-byte characters = 120 bytes. Under a 100-CHARACTER cap, over a
+    // 100-BYTE one. A `.length` check on the decoded string would pass this.
+    const body = new TextEncoder().encode("€".repeat(40));
+    expect(body.byteLength).toBe(120);
+    expect(await readBounded(reqOf(body), 100)).toBeNull();
+  });
+
+  test("an empty body is an empty string, not null", async () => {
+    // null means "too large" and must not double as "absent" — the route turns
+    // one into a 413 and the other into a 400.
+    expect(await readBounded(new Request("http://x", { method: "POST" }), 100)).toBe("");
+  });
+
+  test("the stream is CANCELLED past the cap, not merely abandoned", async () => {
+    // Returning early without cancelling leaves the producer and its buffers
+    // alive — the exact resource the cap exists to protect. The mutation sweep
+    // found this: removing `await reader.cancel()` survived every other test
+    // here, because they all check the RETURN VALUE and none checks the stream.
+    let cancelled = false;
+    // FINITE, and that is not incidental. An endless stream makes the
+    // "cap never trips" mutant loop forever, which hangs the whole sweep
+    // rather than reporting a verdict — a mutation harness that can hang is
+    // one that stops producing verdicts. Five 64-byte chunks: past the cap on
+    // the second, and terminating even with the cap disabled.
+    let pulls = 0;
+    const stream = new ReadableStream({
+      pull(ctrl) {
+        if (++pulls > 5) return ctrl.close();
+        ctrl.enqueue(new Uint8Array(64).fill(0x61));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const r = await readBounded({ body: stream } as unknown as Request, 100);
+    expect(r).toBeNull();
+    expect(cancelled).toBe(true);
   });
 });

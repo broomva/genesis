@@ -243,7 +243,12 @@ function readLines(dir: string, name: string, onDegraded: (msg: string) => void)
 export function readAsks(
   dir: string,
   opts?: { threadId?: string; includeAnswered?: boolean },
-): { entries: AskEntry[]; degraded?: string; unreadable?: true } {
+): {
+  entries: AskEntry[];
+  degraded?: string;
+  unreadable?: true;
+  ambiguous?: ReadonlySet<string>;
+} {
   // ACCUMULATED, not overwritten. `degraded = m` kept only the last failure, and
   // answers.jsonl is read first — so with both journals unreadable the ANSWERS
   // message was the one lost, which is the wrong one to drop: an unreadable
@@ -276,6 +281,33 @@ export function readAsks(
   for (const v of readLines(dir, ANSWER_FILE, noteUnreadable))
     if (isAnswer(v)) answers.set(v.id, v);
 
+  const askLines = readLines(dir, ASK_FILE, noteUnreadable);
+
+  // AN ANSWER CARRIES ONLY AN ID, so an id must identify an ask GLOBALLY. If the
+  // same id appears under two different threadIds the join is ambiguous, and
+  // attaching the answer to both shows one thread's DECISION inside the other's
+  // view. Measured against a live server, not reasoned about: `?thread=OTHER`
+  // returned OTHER's ask carrying thread `t`'s answer.
+  //
+  // This is the SAME defect the thread-filter-before-dedupe fix addressed, at
+  // the site that fix could not reach. That one stopped the QUESTION text
+  // bleeding across threads; the answer join is keyed by id alone and kept
+  // bleeding. A rule spelled per-site is forgotten once per site, so it is
+  // stated generally here: a colliding id is AMBIGUOUS, an ambiguous ask gets no
+  // answer attached, and the read says so.
+  const threadsById = new Map<string, Set<string>>();
+  for (const v of askLines) {
+    if (!v || typeof v !== "object") continue;
+    const a = v as Record<string, unknown>;
+    if (typeof a.id !== "string" || !a.id) continue;
+    const t = typeof a.threadId === "string" ? a.threadId : "";
+    const set = threadsById.get(a.id);
+    if (set) set.add(t);
+    else threadsById.set(a.id, new Set([t]));
+  }
+  const ambiguous = new Set<string>();
+  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);
+
   const seen = new Set<string>();
   const entries: AskEntry[] = [];
   // MALFORMED RECORDS ARE COUNTED, NOT SILENTLY DROPPED. `degraded` exists so a
@@ -293,7 +325,7 @@ export function readAsks(
   // collapse to one anyway and lose the magnitude.
   let skipped = 0;
   let incomplete = 0;
-  for (const v of readLines(dir, ASK_FILE, noteUnreadable)) {
+  for (const v of askLines) {
     if (!v || typeof v !== "object") {
       skipped++;
       continue;
@@ -350,7 +382,9 @@ export function readAsks(
       incomplete++;
     }
 
-    const ans = answers.get(a.id);
+    // Ambiguous ids get NO answer. Not the first and not the last: either choice
+    // is a guess, and a guess here is disclosure.
+    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);
     if (ans && opts?.includeAnswered !== true) continue;
 
     entries.push({
@@ -372,11 +406,14 @@ export function readAsks(
       ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
     });
   }
+  if (ambiguous.size > 0)
+    note(`${ambiguous.size} ask id(s) appear under more than one thread; answers withheld`);
   if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);
   if (incomplete > 0) note(`${incomplete} ask record(s) missing sessionId or createdAt`);
   return {
     entries,
     ...(problems.length > 0 ? { degraded: problems.join("; ") } : {}),
     ...(unreadable ? { unreadable } : {}),
+    ...(ambiguous.size > 0 ? { ambiguous } : {}),
   };
 }

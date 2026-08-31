@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.." || exit 2
 SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=34
+EXPECTED_MUTANTS=42
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -165,7 +165,7 @@ mutate "auth check inverted to fail open" "$S" \
 
 echo "answer semantics"
 mutate "unknown id silently accepted" "$S" \
-  '      if (!known.entries.some((a) => a.id === body.id)) {' '      if (false) {' "unknown id"
+  '      if (!existing) {' '      if (false) {' "unknown id"
 mutate "degraded flag swallowed on GET" "$S" \
   '        asks: page,
         total: entries.length,
@@ -288,6 +288,37 @@ mutate "a non-object line goes back to a bare continue" "$A" \
       continue;
     }' \
   "not an object"
+
+echo "the four merge-risk findings — each MEASURED against a live server first"
+mutate "the body cap never trips" "$S" \
+  '      if (total > max) {' '      if (false) {' \
+  "one byte over the cap returns null"
+mutate "the route buffers the body unbounded again" "$S" \
+  '      const text = await readBounded(c.req.raw, MAX_BODY_BYTES);' \
+  '      const text = await c.req.raw.text();' \
+  "CHUNKED oversized body is refused"
+mutate "the stream is never cancelled past the cap" "$S" \
+  '        await reader.cancel();
+        return null;' \
+  '        return null;' \
+  "stream is CANCELLED past the cap"
+mutate "no-store header dropped" "$S" \
+  '      c.header("Cache-Control", "no-store");' '      void c;' \
+  "Cache-Control: no-store"
+mutate "answering twice overwrites again" "$S" \
+  '      if (existing.status === "answered") {' '      if (false) {' \
+  "does NOT change the recorded decision"
+mutate "ambiguous ids get an answer attached anyway" "$A" \
+  '    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);' \
+  '    const ans = answers.get(a.id);' \
+  "never crosses a thread boundary"
+mutate "a collision is no longer detected" "$A" \
+  '  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);' \
+  '  for (const [id, threads] of threadsById) if (threads.size > 99) ambiguous.add(id);' \
+  "never crosses a thread boundary"
+mutate "POST accepts an ambiguous id" "$S" \
+  '      if (known.ambiguous?.has(body.id)) {' '      if (false) {' \
+  "ambiguous id is refused with 409"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

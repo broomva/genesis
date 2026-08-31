@@ -9,7 +9,7 @@
 // this app returns for every unknown path.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ANSWER_FILE, ASK_FILE, type Ask, createAskLog } from "./ask-log";
@@ -371,5 +371,129 @@ describe("a malformed record must not block answering a good ask", () => {
     const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
     chmodSync(join(dir, ASK_FILE), 0o644);
     expect(res.status).toBe(503);
+  });
+});
+
+// Four defects CodeRabbit flagged as "merge risk: high" on a PR whose own checks
+// were green. Each was then MEASURED against a live server before being fixed —
+// the claims arrived as prose with no line citations, so the probe is what turned
+// them into findings. (BRO-2387, P11.)
+describe("the four merge-risk findings", () => {
+  const streamOf = (bytes: number) => {
+    const chunk = new Uint8Array(64 * 1024).fill(0x7a); // 'z'
+    let sent = 0;
+    return new ReadableStream({
+      pull(ctrl) {
+        if (sent >= bytes) return ctrl.close();
+        const n = Math.min(chunk.length, bytes - sent);
+        ctrl.enqueue(chunk.subarray(0, n));
+        sent += n;
+      },
+    });
+  };
+
+  test("a CHUNKED oversized body is refused without being buffered", async () => {
+    // The measured defect: a 64MB chunked body took the server's RSS from 124MB
+    // to 245MB. A chunked request sends no content-length, so the header guard
+    // never fired and only the post-parse length cap rejected it — by which
+    // point the bytes were already resident.
+    const { app } = configured();
+    const req = new Request("http://x/walkie/answer", {
+      method: "POST",
+      headers: { ...H, "content-type": "application/json" },
+      body: streamOf(1024 * 1024),
+      // `duplex` is required whenever the body is a stream. Bun's lib types it,
+      // so no ts-expect-error here — tsc rejects an unused one, which is how the
+      // gate caught that this suppression had stopped suppressing anything.
+      duplex: "half",
+    });
+    const res = await app.fetch(req);
+    expect(res.status).toBe(413);
+    expect((await res.json()) as { error: string }).toEqual({ error: "body too large" });
+  });
+
+  test("a body at exactly the cap is NOT refused", async () => {
+    // The negative control. Without it, `readBounded` could return null always
+    // and the test above would still pass.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    const answer = "y".repeat(100);
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer }), H);
+    expect(res.status).toBe(200);
+  });
+
+  test("responses carry Cache-Control: no-store", async () => {
+    const { app } = configured();
+    const g = await get(app, "/walkie/asks", H);
+    expect(g.headers.get("cache-control")).toBe("no-store");
+    const p = await post(app, "/walkie/answer", JSON.stringify({ id: "x", answer: "y" }), H);
+    expect(p.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("answering twice does NOT change the recorded decision", async () => {
+    // Measured: POST SHIP then POST HOLD, and the live route served HOLD. The
+    // DoD says "acking twice is a no-op"; last-write-wins is not that, and it
+    // means a retried stale request can silently flip a decision.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H)).status,
+    ).toBe(200);
+    const second = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ id: "a1", answer: "HOLD" }),
+      H,
+    );
+    expect(second.status).toBe(200);
+    expect((await second.json()) as object).toEqual({ recorded: true, alreadyAnswered: true });
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.answer).toBe("SHIP");
+  });
+
+  test("the repeat does not append a second line to answers.jsonl", async () => {
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    const lines = readFileSync(join(dir, ANSWER_FILE), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+  });
+
+  test("an ambiguous id is refused with 409, not silently recorded", async () => {
+    // Measured: two asks sharing an id in different threads, and ?thread=OTHER
+    // returned OTHER's ask carrying the OTHER thread's answer.
+    const { app } = configured();
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "dup", answer: "x" }), H);
+    expect(res.status).toBe(409);
+  });
+
+  test("an answer never crosses a thread boundary via a shared id", async () => {
+    const { app, log } = configured();
+    // A pre-existing answer for id "dup", written before the collision appeared.
+    log.answer({ id: "dup", answer: "LEAK-CANARY", answeredAt: "2026-08-31T12:00:00.000Z" });
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const body = await (await get(app, "/walkie/asks?thread=t-b&answered=1", H)).text();
+    expect(body).not.toContain("LEAK-CANARY");
+    expect(body).toContain("ask id(s) appear under more than one thread");
+  });
+
+  test("a NON-colliding id still gets its answer — the negative control", async () => {
+    // Without this the ambiguity check could withhold every answer and all of
+    // the above would still pass.
+    const { app, log } = configured();
+    log.append(ask({ id: "solo" }));
+    log.answer({ id: "solo", answer: "KEPT", answeredAt: "2026-08-31T12:00:00.000Z" });
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.answer).toBe("KEPT");
   });
 });

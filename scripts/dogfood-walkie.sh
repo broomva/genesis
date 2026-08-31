@@ -162,7 +162,10 @@ if [ "$GOT" = 200 ] && echo "$BODY" | grep -q 'degraded'; then
 elif [ "$GOT" = 200 ] && [ "$BODY" = '{"asks":[],"total":0}' ]; then
   bad "unreadable log served as 'nothing pending' — the exact failure the code claims to prevent"
 else
-  ok "GET on unreadable log → $GOT $BODY"
+  # NOT `ok`. A trailing else that passes is a branch that cannot fail, and the
+  # only outcomes it can catch now are ones nobody predicted — a 200 carrying
+  # asks from a log that cannot be read, say. Unexpected is not the same as fine.
+  bad "GET on unreadable log → unexpected $GOT $BODY"
 fi
 chk "POST refuses while degraded" 503 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-2","answer":"x"}' "$B/walkie/answer")"
 chmod 644 "$ASKDIR/asks.jsonl"
