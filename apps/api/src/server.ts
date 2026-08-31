@@ -183,6 +183,50 @@ export interface BuildOpts {
  *  crossed, so the peak is bounded by `max` rather than by what the caller chose
  *  to send. Bytes, not characters: the cap has to hold for multi-byte input too.
  */
+/** Distinct from `null`. `null` means "too large" — a client error with a body it
+ *  chose. TRANSPORT_FAULT means the bytes never arrived: the socket died, the
+ *  chunk framing was malformed, the phone lost signal. Collapsing them is the
+ *  failure this file already names once, at /voice/identify: "a transport fault
+ *  would have looked like a stranger". They get different messages. */
+/** The three ways reading a request body can end.
+ *
+ *  A DISCRIMINATED UNION rather than `string | null | symbol`, which is what this
+ *  was first: the sentinel would not narrow across three call sites and every
+ *  later use of the body became a type error. More importantly the union names
+ *  the cases, and the cases are genuinely different — "too large" is a client
+ *  sending more than it may, "transport" is bytes that never arrived. This file
+ *  already learned that distinction once, at /voice/identify: "a transport fault
+ *  would have looked like a stranger". */
+type BodyRead = { ok: true; text: string } | { ok: false; reason: "too-large" | "transport" };
+
+/** Shared body cap. Module scope because the voice routes need it too, and a
+ *  second copy is a second thing to forget. */
+const MAX_BODY_BYTES = 64 * 1024;
+
+/** Read a body with the cap, turning both failure modes into values.
+ *
+ *  `readBounded` REJECTS when the stream errors, and awaiting it outside a try
+ *  let that escape the handler: measured over a real socket, a malformed
+ *  chunk-size line, an RST mid-body and a clean FIN mid-body each produced an
+ *  uncaught AbortException, 32 lines of stderr, and a 500 where the previous
+ *  shape answered 400. Wrapping it here rather than at each call site is what
+ *  stops the next route from forgetting. */
+async function readBody(req: Request): Promise<BodyRead> {
+  let text: string | null;
+  try {
+    text = await readBounded(req, MAX_BODY_BYTES);
+  } catch {
+    return { ok: false, reason: "transport" };
+  }
+  return text === null ? { ok: false, reason: "too-large" } : { ok: true, text };
+}
+
+/** The one place the two failures become responses, so three routes cannot drift. */
+const bodyReadError = (r: { reason: "too-large" | "transport" }) =>
+  r.reason === "too-large"
+    ? ({ error: "body too large" } as const)
+    : ({ error: "body was not fully received" } as const);
+
 export async function readBounded(req: Request, max: number): Promise<string | null> {
   const body = req.body;
   // No stream at all (an empty body) is not an error here — the JSON parse below
@@ -344,9 +388,19 @@ export function build(opts: BuildOpts) {
       //
       // `?? {}` is still right for a literal `null` body, which is VALID json, so
       // .catch() never fires and the dereference below was a 500 on both routes.
+      // BOUNDED. This is the prefix that is actually published to the public
+      // internet — `tailscale serve` maps /voice and nothing else — so it is the
+      // one place an unbounded body read matters most, and it was the one place
+      // the first version of this bound did not reach. Measured against a live
+      // process: a 64 MB chunked POST here drove RSS +109 MB while the guarded
+      // sibling took the same body at +7 MB. `c.req.json()` buffers without
+      // limit and a chunked request sends no content-length, so nothing stopped
+      // it. Same helper, same cap, and now the harder-to-reach route has it too.
       let raw: unknown;
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
       try {
-        raw = await c.req.json();
+        raw = JSON.parse(read.text);
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
@@ -399,9 +453,19 @@ export function build(opts: BuildOpts) {
       // transport fault, not a request with missing fields. Fixing identify alone
       // would leave the sibling route converting a truncated body into whatever
       // buildTicket makes of `{}`.
+      // BOUNDED. This is the prefix that is actually published to the public
+      // internet — `tailscale serve` maps /voice and nothing else — so it is the
+      // one place an unbounded body read matters most, and it was the one place
+      // the first version of this bound did not reach. Measured against a live
+      // process: a 64 MB chunked POST here drove RSS +109 MB while the guarded
+      // sibling took the same body at +7 MB. `c.req.json()` buffers without
+      // limit and a chunked request sends no content-length, so nothing stopped
+      // it. Same helper, same cap, and now the harder-to-reach route has it too.
       let raw: unknown;
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
       try {
-        raw = await c.req.json();
+        raw = JSON.parse(read.text);
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
@@ -509,9 +573,6 @@ export function build(opts: BuildOpts) {
     // A decision, not a document. Generous enough for a free-text answer with
     // reasoning; far below anything that makes the journal expensive to re-read.
     const MAX_ANSWER_CHARS = 4096;
-    // Generous multiple of the answer cap: the body carries an id and JSON
-    // framing too, and this is a cheap pre-filter rather than the real bound.
-    const MAX_BODY_BYTES = 64 * 1024;
     const walkieDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
       !secretMatches(c.req.header("x-genesis-walkie-secret"), opts.walkieSecret ?? "");
 
@@ -590,11 +651,23 @@ export function build(opts: BuildOpts) {
       // rejected it. Measured against a live process. So the read itself is
       // bounded, and the header check is kept only as the cheap early exit it
       // actually is.
-      const text = await readBounded(c.req.raw, MAX_BODY_BYTES);
-      if (text === null) return c.json({ error: "body too large" }, 413);
+      // ITS OWN CATCH, and deliberately not the JSON one below. `readBounded`
+      // propagates a rejection from `reader.read()`, and awaiting it outside a
+      // try let a body-transport fault escape the handler entirely: measured over
+      // a real socket, a malformed chunk-size line, an RST mid-body and a clean
+      // FIN mid-body each produced an uncaught AbortException, 32 lines of stderr
+      // and a 500 where the previous shape answered 400. This route was the only
+      // POST in the server whose body read could throw out of its handler.
+      //
+      // Merging it into the JSON catch would have been the smaller diff and the
+      // wrong one: this file says so three hundred lines up, at /voice/identify —
+      // "a transport fault would have looked like a stranger". A body that never
+      // arrived is not a body that failed to parse, so it gets its own message.
+      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
       let raw: unknown;
       try {
-        raw = JSON.parse(text);
+        raw = JSON.parse(read.text);
       } catch {
         return c.json({ error: "body must be JSON" }, 400);
       }
@@ -661,7 +734,21 @@ export function build(opts: BuildOpts) {
       // compacts. There is no verb for changing an answer; if one is ever
       // wanted it should be explicit, not an accident of retry semantics.
       if (existing.status === "answered") {
-        return c.json({ recorded: true, alreadyAnswered: true });
+        // A REPEAT IS NOT A REPLACEMENT, and `recorded: true` must not mean both.
+        // Returning it for a body that was discarded made the primary field
+        // change meaning between two branches of one handler: on the success path
+        // it asserts "your answer was recorded", here it asserted "an answer
+        // exists". A PWA doing the natural `if (body.recorded)` renders
+        // "recorded" while the store still serves the old decision — the operator
+        // believes HOLD is in force and the agent ships.
+        //
+        // So: an identical answer is a genuine no-op and stays 200. A DIFFERENT
+        // answer is a conflict, gets 409, and the response names the decision
+        // that actually stands so the client can show it rather than guess.
+        if (existing.answer === body.answer) {
+          return c.json({ recorded: true, alreadyAnswered: true });
+        }
+        return c.json({ error: "already answered", recorded: false, answer: existing.answer }, 409);
       }
       try {
         askLog.answer({

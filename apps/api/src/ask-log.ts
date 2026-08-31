@@ -86,6 +86,11 @@ export type AskStatus = "pending" | "answered";
 
 /** An ask joined with what became of it. */
 export interface AskEntry extends Ask {
+  /** The id appears under more than one threadId, so no answer can be attached to
+   *  it without guessing which ask a decision belonged to. Present ONLY when
+   *  true, so a client can disable its answer control and say why, rather than
+   *  discovering it as a 409 after the operator has already decided. */
+  readonly ambiguous?: true;
   readonly status: AskStatus;
   readonly answer?: string;
   readonly answeredAt?: string;
@@ -286,45 +291,32 @@ export function readAsks(
   // AN ANSWER CARRIES ONLY AN ID, so an id must identify an ask GLOBALLY. If the
   // same id appears under two different threadIds the join is ambiguous, and
   // attaching the answer to both shows one thread's DECISION inside the other's
-  // view. Measured against a live server, not reasoned about: `?thread=OTHER`
-  // returned OTHER's ask carrying thread `t`'s answer.
+  // view. Measured against a live server: `?thread=OTHER` returned OTHER's ask
+  // carrying thread `t`'s answer.
   //
-  // This is the SAME defect the thread-filter-before-dedupe fix addressed, at
-  // the site that fix could not reach. That one stopped the QUESTION text
-  // bleeding across threads; the answer join is keyed by id alone and kept
-  // bleeding. A rule spelled per-site is forgotten once per site, so it is
-  // stated generally here: a colliding id is AMBIGUOUS, an ambiguous ask gets no
-  // answer attached, and the read says so.
-  const threadsById = new Map<string, Set<string>>();
-  for (const v of askLines) {
-    if (!v || typeof v !== "object") continue;
-    const a = v as Record<string, unknown>;
-    if (typeof a.id !== "string" || !a.id) continue;
-    const t = typeof a.threadId === "string" ? a.threadId : "";
-    const set = threadsById.get(a.id);
-    if (set) set.add(t);
-    else threadsById.set(a.id, new Set([t]));
+  // THE VALIDITY GATE HERE MUST MATCH THE ONE BELOW, and the first version of
+  // this did not — it required only an id, while the entry loop also requires a
+  // question. So a line this function itself classifies as "skipped: no usable
+  // id or question", and never serves to anyone, still voted in the ambiguity
+  // election: its absent threadId coerced to "" and counted as a second thread.
+  // One appended `{"id":"a1"}` permanently retracted an already-recorded
+  // decision — GET showed the ask pending with the answer withheld, POST 409'd
+  // forever, and both journals are append-only so it never cleared. A record too
+  // malformed to be shown cannot disclose anything across a thread boundary, so
+  // it has no business deciding that a disclosure is possible. Reproduced end to
+  // end before this was changed.
+  //
+  // Expressed as ONE parse rather than two matching predicates, because "these
+  // two gates must agree" is exactly the invariant that gets forgotten once per
+  // site.
+  interface ParsedAsk {
+    readonly id: string;
+    readonly question: string;
+    readonly threadId: string;
+    readonly raw: Record<string, unknown>;
   }
-  const ambiguous = new Set<string>();
-  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);
-
-  const seen = new Set<string>();
-  const entries: AskEntry[] = [];
-  // MALFORMED RECORDS ARE COUNTED, NOT SILENTLY DROPPED. `degraded` exists so a
-  // read that could not see everything never renders as "nothing pending" — and a
-  // record skipped for a missing id, or served with its identity fields coerced
-  // to "", is that same failure one size down. Found by DOGFOODING, not by a
-  // test: an ask hand-written with `askedAt` instead of `createdAt` came back
-  // through the live route as a well-formed ask with `createdAt: ""`, no problem
-  // reported, so a client renders "Invalid Date" and nothing upstream says why.
-  // The tests all built their fixtures with `append`, which cannot emit that
-  // shape, so none of them could have caught it. (P11.)
-  //
-  // Counted rather than noted per record: the message must not grow with the
-  // journal, and `note` dedupes by exact string so per-record messages would
-  // collapse to one anyway and lose the magnitude.
+  const parsed: ParsedAsk[] = [];
   let skipped = 0;
-  let incomplete = 0;
   for (const v of askLines) {
     if (!v || typeof v !== "object") {
       skipped++;
@@ -339,26 +331,48 @@ export function readAsks(
       skipped++;
       continue;
     }
+    parsed.push({
+      id: a.id,
+      question: a.question,
+      // Compared as the COERCED value, not the raw one: a non-string threadId is
+      // emitted as "" below, so filtering on the raw value made an entry visible
+      // in the unfiltered list yet unreachable by any ?thread= value.
+      threadId: typeof a.threadId === "string" ? a.threadId : "",
+      raw: a,
+    });
+  }
 
-    // FILTER BEFORE DEDUPE. The reverse order made the dedupe key global while
-    // the visible universe was per-thread, so two asks sharing an id in
-    // different threads collapsed to whichever came first — and a request for
-    // the OTHER thread was served the first thread's question text, or nothing
-    // at all. Ids are supposed to be unique, but this reads an append-only file
-    // written by other processes; "supposed to be" is not a guarantee it can
-    // lean on, and the failure was cross-thread disclosure. (P20 MAJOR.)
-    //
-    // Compared against the COERCED value, not the raw one: a non-string
-    // threadId is emitted as "" below, so filtering on the raw value made an
-    // entry visible in the unfiltered list yet unreachable by any ?thread= value.
-    const threadId = typeof a.threadId === "string" ? a.threadId : "";
-    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;
+  const threadsById = new Map<string, Set<string>>();
+  for (const a of parsed) {
+    const set = threadsById.get(a.id);
+    if (set) set.add(a.threadId);
+    else threadsById.set(a.id, new Set([a.threadId]));
+  }
+  const ambiguous = new Set<string>();
+  for (const [id, threads] of threadsById) if (threads.size > 1) ambiguous.add(id);
 
+  const seen = new Set<string>();
+  const entries: AskEntry[] = [];
+  // Records that are SERVED but incomplete. Counted, not coerced in silence —
+  // `degraded` exists so a read that could not see everything never renders as
+  // "nothing pending", and a record served with its identity fields blanked is
+  // that failure one size down.
+  let incomplete = 0;
+  // Which ambiguous ids were actually REACHABLE under this read's filter. A
+  // thread-scoped reader told "answers withheld" about a collision living
+  // entirely in other threads learns nothing and loses the signal to noise: on a
+  // busy deployment the banner would be permanently on for everyone, because the
+  // journal is append-only. So the note is scoped to what this caller can see.
+  const ambiguousHere = new Set<string>();
+  for (const a of parsed) {
+    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
     if (seen.has(a.id)) continue;
     seen.add(a.id);
+    if (ambiguous.has(a.id)) ambiguousHere.add(a.id);
+    const raw = a.raw;
 
-    const options: AskOption[] = Array.isArray(a.options)
-      ? a.options.flatMap((o) => {
+    const options: AskOption[] = Array.isArray(raw.options)
+      ? raw.options.flatMap((o) => {
           if (!o || typeof o !== "object") return [];
           const opt = o as Record<string, unknown>;
           if (typeof opt.label !== "string" || !opt.label) return [];
@@ -374,10 +388,10 @@ export function readAsks(
     // into an absent ask, which is the worse of the two failures; coercing in
     // silence tells the client the ask is fine. So: serve it, and say so.
     if (
-      typeof a.sessionId !== "string" ||
-      !a.sessionId ||
-      typeof a.createdAt !== "string" ||
-      !a.createdAt
+      typeof raw.sessionId !== "string" ||
+      !raw.sessionId ||
+      typeof raw.createdAt !== "string" ||
+      !raw.createdAt
     ) {
       incomplete++;
     }
@@ -389,25 +403,32 @@ export function readAsks(
 
     entries.push({
       id: a.id,
-      sessionId: typeof a.sessionId === "string" ? a.sessionId : "",
-      threadId,
+      sessionId: typeof raw.sessionId === "string" ? raw.sessionId : "",
+      threadId: a.threadId,
       question: a.question,
-      ...(typeof a.header === "string" ? { header: a.header } : {}),
+      ...(typeof raw.header === "string" ? { header: raw.header } : {}),
       // VALIDATED, not cast. `Array.isArray` alone let `[1, null, {label:{}}]`
       // through as `readonly AskOption[]`, and a client looping `opt.label` gets
       // a TypeError on the null while React throws on the object. This file
       // reads a journal other processes append to, so the array's shape is an
       // input, not an invariant. (P20 MAJOR.)
       ...(options.length > 0 ? { options } : {}),
-      ...(typeof a.multiSelect === "boolean" ? { multiSelect: a.multiSelect } : {}),
-      createdAt: typeof a.createdAt === "string" ? a.createdAt : "",
+      ...(typeof raw.multiSelect === "boolean" ? { multiSelect: raw.multiSelect } : {}),
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
       status: ans ? "answered" : "pending",
+      // SURFACED PER ENTRY, not just as an aggregate count. The server computes
+      // this inside the very call the GET makes and used to discard it, so GET
+      // said `pending` while POST returned 409 forever for the same id — two
+      // endpoints of one API contradicting each other about one resource, with
+      // no way for a client to tell which ask was affected. A client can now
+      // disable the control and say why.
+      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),
       ...(ans ? { answer: ans.answer } : {}),
       ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
     });
   }
-  if (ambiguous.size > 0)
-    note(`${ambiguous.size} ask id(s) appear under more than one thread; answers withheld`);
+  if (ambiguousHere.size > 0)
+    note(`${ambiguousHere.size} ask id(s) appear under more than one thread; answers withheld`);
   if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);
   if (incomplete > 0) note(`${incomplete} ask record(s) missing sessionId or createdAt`);
   return {

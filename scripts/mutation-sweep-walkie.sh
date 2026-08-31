@@ -34,10 +34,16 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
+# server.test.ts IS IN THE SUITE, and its absence was a real hole: the voice-route
+# bound tests live there, so the mutant that removes that bound was never exposed
+# to the test written to kill it and SURVIVED for a reason unrelated to coverage.
+# A sweep's suite has to include every file that tests its subjects — this one
+# mutates server.ts, so every server.ts test belongs here.
 SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
-       apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts)
+       apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
+       apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=42
+EXPECTED_MUTANTS=49
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -187,14 +193,18 @@ mutate "short write silently ignored — the count is assumed, not read" "$A" \
   '      written = line.length;' \
   "every byte of the record reaches the file"
 
-mutate "dedupe moved back before the thread filter" "$A" \
-  '    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;
-
+# NOT a swap of the two guards. After the refactor `seen.add` sits AFTER the
+# filter, so swapping them is harmless — a record the filter drops no longer
+# consumes its id, and the mutant survived for that reason rather than for a
+# missing test. The mutation that still reproduces the original cross-thread
+# disclosure is claiming the id BEFORE the filter runs.
+mutate "an id is claimed before the thread filter, so one thread eats another's" "$A" \
+  '    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
     if (seen.has(a.id)) continue;
     seen.add(a.id);' \
   '    if (seen.has(a.id)) continue;
     seen.add(a.id);
-    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;' \
+    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;' \
   "do not mask each other"
 mutate "options cast instead of validated" "$A" \
   '      ...(options.length > 0 ? { options } : {}),' \
@@ -271,13 +281,12 @@ mutate "the count degrades to a boolean" "$A" \
   '  if (skipped > 0) note("1 ask record(s) skipped: no usable id or question");' \
   "the count is the number of bad records"
 mutate "the incomplete check loses its createdAt half" "$A" \
-  '    if (
-      typeof a.sessionId !== "string" ||
-      !a.sessionId ||
-      typeof a.createdAt !== "string" ||
-      !a.createdAt
-    ) {' \
-  '    if (typeof a.sessionId !== "string" || !a.sessionId) {' \
+  '      typeof raw.sessionId !== "string" ||
+      !raw.sessionId ||
+      typeof raw.createdAt !== "string" ||
+      !raw.createdAt' \
+  '      typeof raw.sessionId !== "string" ||
+      !raw.sessionId' \
   "createdAt missing"
 mutate "a non-object line goes back to a bare continue" "$A" \
   '    if (!v || typeof v !== "object") {
@@ -293,10 +302,13 @@ echo "the four merge-risk findings — each MEASURED against a live server first
 mutate "the body cap never trips" "$S" \
   '      if (total > max) {' '      if (false) {' \
   "one byte over the cap returns null"
-mutate "the route buffers the body unbounded again" "$S" \
-  '      const text = await readBounded(c.req.raw, MAX_BODY_BYTES);' \
-  '      const text = await c.req.raw.text();' \
-  "CHUNKED oversized body is refused"
+mutate "the walkie route buffers the body unbounded again" "$S" \
+  '      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
+      let raw: unknown;' \
+  '      const read = { ok: true as const, text: await c.req.raw.text() };
+      let raw: unknown;' \
+  "one byte over the cap IS refused"
 mutate "the stream is never cancelled past the cap" "$S" \
   '        await reader.cancel();
         return null;' \
@@ -307,7 +319,7 @@ mutate "no-store header dropped" "$S" \
   "Cache-Control: no-store"
 mutate "answering twice overwrites again" "$S" \
   '      if (existing.status === "answered") {' '      if (false) {' \
-  "does NOT change the recorded decision"
+  "DIFFERENT second answer is a 409"
 mutate "ambiguous ids get an answer attached anyway" "$A" \
   '    const ans = ambiguous.has(a.id) ? undefined : answers.get(a.id);' \
   '    const ans = answers.get(a.id);' \
@@ -319,6 +331,66 @@ mutate "a collision is no longer detected" "$A" \
 mutate "POST accepts an ambiguous id" "$S" \
   '      if (known.ambiguous?.has(body.id)) {' '      if (false) {' \
   "ambiguous id is refused with 409"
+
+echo "the 12 findings a focused review reproduced against the real system"
+mutate "the ambiguity gate stops requiring a question — junk retracts decisions" "$A" \
+  '    if (typeof a.question !== "string" || !a.question) {
+      skipped++;
+      continue;
+    }
+    parsed.push({' \
+  '    parsed.push({' \
+  "junk id-only line must not retract"
+mutate "ambiguity is no longer surfaced per entry" "$A" \
+  '      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),' '' \
+  "says so PER ENTRY"
+mutate "the withheld note is global again, not scoped to the filter" "$A" \
+  '  if (ambiguousHere.size > 0)
+    note(`${ambiguousHere.size} ask id(s) appear under more than one thread; answers withheld`);' \
+  '  if (ambiguous.size > 0)
+    note(`${ambiguous.size} ask id(s) appear under more than one thread; answers withheld`);' \
+  "NOT told about collisions in other threads"
+mutate "a transport fault is reported as a parse failure" "$S" \
+  '    return { ok: false, reason: "transport" };' \
+  '    return { ok: false, reason: "too-large" };' \
+  "never fully arrives is 400"
+mutate "readBody stops catching, so the fault escapes the handler" "$S" \
+  '  let text: string | null;
+  try {
+    text = await readBounded(req, MAX_BODY_BYTES);
+  } catch {
+    return { ok: false, reason: "transport" };
+  }' \
+  '  const text: string | null = await readBounded(req, MAX_BODY_BYTES);' \
+  "never fully arrives is 400"
+# ANCHORED ON WHAT FOLLOWS, because the two voice routes carry byte-identical
+# body-read blocks and the anchor must occur exactly once. /voice/identify
+# destructures one field, /voice/request three — that is the only text that
+# distinguishes them, so the mutation is expressed through it.
+mutate "/voice/identify goes back to buffering unbounded" "$S" \
+  '      const read = await readBody(c.req.raw);
+      if (!read.ok) return c.json(bodyReadError(read), read.reason === "too-large" ? 413 : 400);
+      try {
+        raw = JSON.parse(read.text);
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { callerId?: unknown };' \
+  '      const read = { ok: true as const, text: await c.req.raw.text() };
+      try {
+        raw = JSON.parse(read.text);
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { callerId?: unknown };' \
+  "voice routes BOUND the body"
+mutate "a differing second answer is accepted as recorded" "$S" \
+  '        if (existing.answer === body.answer) {
+          return c.json({ recorded: true, alreadyAnswered: true });
+        }' \
+  '        return c.json({ recorded: true, alreadyAnswered: true });
+        if (false) {}' \
+  "DIFFERENT second answer is a 409"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

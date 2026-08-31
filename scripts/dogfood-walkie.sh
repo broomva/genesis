@@ -138,7 +138,19 @@ say "answering"
 chk "POST valid answer" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
 code -H "$S" "$B/walkie/asks" >/dev/null
 if grep -q 'ask-1' "$RUN/body"; then bad "answered ask still listed as pending"; else ok "answered ask drops out of the pending list"; fi
-chk "answering twice is idempotent" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
+chk "re-posting the SAME answer is a 200 no-op" 200 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"ship it"}' "$B/walkie/answer")"
+# THE DISCRIMINATOR. The check above posts identical text and compares only the
+# status code, which is 200 under first-answer-wins AND under the last-write-wins
+# it replaced — so with the guard deleted this script stayed fully green and the
+# P11 receipt rested on a unit test. Posting a DIFFERENT answer is what separates
+# the two builds.
+chk "a DIFFERENT second answer is refused" 409 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"id":"ask-1","answer":"HOLD-INSTEAD"}' "$B/walkie/answer")"
+code -H "$S" "$B/walkie/asks?answered=1" >/dev/null
+if grep -q 'HOLD-INSTEAD' "$RUN/body"; then
+  bad "the second answer replaced the first — last write won"
+else
+  ok "the first decision still stands"
+fi
 echo "  answers.jsonl: $(cat "$ASKDIR/answers.jsonl" 2>/dev/null)"
 
 # --- 6. restart survival ------------------------------------------------------

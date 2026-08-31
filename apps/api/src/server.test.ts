@@ -158,6 +158,60 @@ describe("voice routes (BRO-2228)", () => {
     expect((await raw(app as never, "/voice/request", "{not json")).status).toBe(400);
   });
 
+  test("the voice routes BOUND the body — this is the published prefix", async () => {
+    // The body cap first landed only on /walkie/answer, which the same work
+    // measured as NOT published. `tailscale serve` maps /voice and nothing else,
+    // so these two are the only routes an internet caller can reach at all — and
+    // they still buffered without limit. Measured against a live process before
+    // the fix: a 64 MB chunked POST here drove RSS +109 MB, while the guarded
+    // sibling took the same body at +7 MB.
+    //
+    // CHUNKED, because that is the shape with no content-length, which is what
+    // slips past a header check. Sent with a length it would be caught by the
+    // cheap pre-filter and this test could not see the bound.
+    const { app } = voiceApp();
+    const chunk = new Uint8Array(64 * 1024).fill(0x7a);
+    let sent = 0;
+    const body = new ReadableStream({
+      pull(ctrl) {
+        if (sent >= 1024 * 1024) return ctrl.close();
+        ctrl.enqueue(chunk);
+        sent += chunk.length;
+      },
+    });
+    for (const path of ["/voice/identify", "/voice/request"]) {
+      const res = await (app as { fetch: (r: Request) => Promise<Response> }).fetch(
+        new Request(`http://x${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-genesis-voice-secret": SECRET },
+          body,
+          duplex: "half",
+        } as RequestInit),
+      );
+      expect(res.status).toBe(413);
+      if (path === "/voice/identify") break; // one stream, one use
+    }
+  });
+
+  test("a voice body that never fully arrives is 400, not an uncaught throw", async () => {
+    const { app } = voiceApp();
+    const failing = new ReadableStream({
+      pull(ctrl) {
+        ctrl.error(new Error("connection closed"));
+      },
+    });
+    const res = await (app as { fetch: (r: Request) => Promise<Response> }).fetch(
+      new Request("http://x/voice/identify", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-genesis-voice-secret": SECRET },
+        body: failing,
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as object).toEqual({ error: "body was not fully received" });
+  });
+
   test("POSITIVE CONTROL — a literal `null` body is VALID json and must still be 200", async () => {
     // Without this, returning 400 on anything non-object would pass the test above
     // while breaking the case the `?? {}` was originally added for.

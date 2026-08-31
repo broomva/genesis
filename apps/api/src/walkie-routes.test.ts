@@ -412,14 +412,65 @@ describe("the four merge-risk findings", () => {
     expect((await res.json()) as { error: string }).toEqual({ error: "body too large" });
   });
 
-  test("a body at exactly the cap is NOT refused", async () => {
-    // The negative control. Without it, `readBounded` could return null always
-    // and the test above would still pass.
+  test("a body at EXACTLY the cap is not refused", async () => {
+    // The negative control — and it has to actually reach the boundary. The
+    // first version of this test was named for the cap and sent 123 bytes
+    // against 65536, so flipping `total > max` to `total >= max` left this whole
+    // file green; only a unit test in another file, against a different
+    // constant, could see it. A test named for a boundary it never approaches is
+    // worse than no test, because the name is what the next reader trusts.
+    //
+    // 65536 bytes exactly, built by measuring the envelope rather than guessing
+    // it: an off-by-one in the padding silently moves this off the boundary in
+    // the safe direction, which is exactly how it stops discriminating.
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
-    const answer = "y".repeat(100);
-    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer }), H);
-    expect(res.status).toBe(200);
+    const envelope = JSON.stringify({ id: "a1", answer: "" }).length;
+    const answer = "y".repeat(64 * 1024 - envelope);
+    const body = JSON.stringify({ id: "a1", answer });
+    expect(new TextEncoder().encode(body).byteLength).toBe(64 * 1024);
+    const res = await post(app, "/walkie/answer", body, H);
+    // 413 for the ANSWER cap (4096 chars) is the right answer here — what must
+    // not happen is the BODY cap rejecting it, which would be "body too large".
+    expect((await res.json()) as { error?: string }).not.toEqual({ error: "body too large" });
+  });
+
+  test("one byte over the cap IS refused — by readBounded, not the header", async () => {
+    // CHUNKED, deliberately. Sent with a content-length, cap+1 is caught by the
+    // cheap `declared > MAX_BODY_BYTES` pre-filter and readBounded is never
+    // reached, so the test would pass with the bound deleted — a fixture the
+    // mutant cannot reach. A chunked request carries no content-length, which is
+    // the whole reason the bound exists, so this is the only shape that puts the
+    // boundary itself under test.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    const res = await app.fetch(
+      new Request("http://x/walkie/answer", {
+        method: "POST",
+        headers: { ...H, "content-type": "application/json" },
+        body: streamOf(64 * 1024 + 1),
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(res.status).toBe(413);
+    expect((await res.json()) as object).toEqual({ error: "body too large" });
+  });
+
+  test("one byte UNDER the cap, chunked, reaches the parser", async () => {
+    // The other side of the same boundary, through the same path. Without it,
+    // `total > max` could become `total >= 0` and the test above still passes.
+    const { app } = configured();
+    const res = await app.fetch(
+      new Request("http://x/walkie/answer", {
+        method: "POST",
+        headers: { ...H, "content-type": "application/json" },
+        body: streamOf(64 * 1024 - 1),
+        duplex: "half",
+      } as RequestInit),
+    );
+    // 'zzz…' is not JSON, so reaching the parser is exactly what 400 proves.
+    expect(res.status).toBe(400);
+    expect((await res.json()) as object).toEqual({ error: "body must be JSON" });
   });
 
   test("responses carry Cache-Control: no-store", async () => {
@@ -430,10 +481,15 @@ describe("the four merge-risk findings", () => {
     expect(p.headers.get("cache-control")).toBe("no-store");
   });
 
-  test("answering twice does NOT change the recorded decision", async () => {
+  test("a DIFFERENT second answer is a 409 that names the decision that stands", async () => {
     // Measured: POST SHIP then POST HOLD, and the live route served HOLD. The
-    // DoD says "acking twice is a no-op"; last-write-wins is not that, and it
-    // means a retried stale request can silently flip a decision.
+    // DoD says "acking twice is a no-op"; last-write-wins is not that.
+    //
+    // The first fix returned 200 {recorded:true, alreadyAnswered:true} here, and
+    // that was its own defect: `recorded` then meant "your answer was recorded"
+    // on one branch and "an answer exists" on the other, so a client doing the
+    // natural `if (body.recorded)` renders "recorded" for a decision that was
+    // discarded. A repeat is not a replacement, and the response now says so.
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
     expect(
@@ -445,12 +501,33 @@ describe("the four merge-risk findings", () => {
       JSON.stringify({ id: "a1", answer: "HOLD" }),
       H,
     );
-    expect(second.status).toBe(200);
-    expect((await second.json()) as object).toEqual({ recorded: true, alreadyAnswered: true });
+    expect(second.status).toBe(409);
+    // It NAMES the standing decision, so a client can show it instead of guessing.
+    expect((await second.json()) as object).toEqual({
+      error: "already answered",
+      recorded: false,
+      answer: "SHIP",
+    });
     const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
     expect(e?.answer).toBe("SHIP");
   });
 
+  test("an IDENTICAL second answer is a genuine 200 no-op", async () => {
+    // The other half, and the reason the 409 above is not merely "reject
+    // repeats": a retry whose first attempt the client never saw succeed must
+    // not look like a conflict. Same text, same outcome, 200.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1" }));
+    await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    const again = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ id: "a1", answer: "SHIP" }),
+      H,
+    );
+    expect(again.status).toBe(200);
+    expect((await again.json()) as object).toEqual({ recorded: true, alreadyAnswered: true });
+  });
   test("the repeat does not append a second line to answers.jsonl", async () => {
     const { app, log } = configured();
     log.append(ask({ id: "a1" }));
@@ -495,5 +572,100 @@ describe("the four merge-risk findings", () => {
     log.answer({ id: "solo", answer: "KEPT", answeredAt: "2026-08-31T12:00:00.000Z" });
     const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
     expect(e?.answer).toBe("KEPT");
+  });
+
+  test("BLOCKER: a junk id-only line must not retract an already-recorded decision", async () => {
+    // The ambiguity pass gated only on `id` while the entry loop also requires a
+    // `question`, so a line this module itself reports as "skipped: no usable id
+    // or question" — and never serves to anyone — still voted in the ambiguity
+    // election, its absent threadId coerced to "" and counted as a second thread.
+    // One appended `{"id":"a1"}` permanently retracted a recorded decision: GET
+    // showed pending with the answer withheld, POST 409'd forever, and both
+    // journals are append-only so it never cleared.
+    const { app, log } = configured();
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    log.answer({ id: "a1", answer: "SHIP", answeredAt: "2026-08-31T12:00:00.000Z" });
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1" })}\n`);
+
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.status).toBe("answered");
+    expect(e?.answer).toBe("SHIP");
+    // And the ask is still answerable — same text is a no-op, not a 409.
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "a1", answer: "SHIP" }), H);
+    expect(res.status).toBe(200);
+  });
+
+  test("a REAL collision still withholds — the negative control", async () => {
+    // Without this the ambiguity rule could have been deleted outright and the
+    // test above would pass.
+    const { app, log } = configured();
+    log.answer({ id: "dup", answer: "LEAK", answeredAt: "2026-08-31T12:00:00.000Z" });
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const body = await (await get(app, "/walkie/asks?answered=1", H)).text();
+    expect(body).not.toContain("LEAK");
+    expect(body).toContain("more than one thread");
+  });
+
+  test("an ambiguous ask says so PER ENTRY, not only as a count", async () => {
+    // GET used to report status:"pending" while POST 409'd forever for the same
+    // id — two endpoints of one API contradicting each other, with no way for a
+    // client to tell which ask was affected.
+    const { app } = configured();
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-a", question: "A?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-b", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const { asks } = (await (await get(app, "/walkie/asks", H)).json()) as {
+      asks: { ambiguous?: boolean }[];
+    };
+    expect(asks[0]?.ambiguous).toBe(true);
+  });
+
+  test("a thread-scoped read is NOT told about collisions in other threads", async () => {
+    // The banner is the one signal that would reveal a genuinely withheld
+    // decision. Firing it for a collision the caller cannot see makes it ambient
+    // noise, permanently, because the journal is append-only.
+    const { app } = configured();
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "mine", sessionId: "s", threadId: "t-alice", question: "Mine?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-bob", question: "B?", createdAt: "2026-08-31T12:00:00.000Z" })}\n` +
+        `${JSON.stringify({ id: "dup", sessionId: "s", threadId: "t-carol", question: "C?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const alice = await (await get(app, "/walkie/asks?thread=t-alice", H)).text();
+    expect(alice).toContain("Mine?");
+    expect(alice).not.toContain("more than one thread");
+    // ...and an unfiltered read still hears about it.
+    expect(await (await get(app, "/walkie/asks", H)).text()).toContain("more than one thread");
+  });
+
+  test("a body that never fully arrives is 400 'not fully received', not 500", async () => {
+    // readBounded REJECTS when the stream errors, and awaiting it outside a try
+    // let that escape the handler: over a real socket a malformed chunk-size
+    // line, an RST mid-body and a clean FIN mid-body each produced an uncaught
+    // AbortException, 32 lines of stderr, and a 500. It also must not be folded
+    // into the JSON-parse catch — this file says why three hundred lines up:
+    // "a transport fault would have looked like a stranger".
+    const { app } = configured();
+    const failing = new ReadableStream({
+      pull(ctrl) {
+        ctrl.error(new Error("connection closed"));
+      },
+    });
+    const res = await app.fetch(
+      new Request("http://x/walkie/answer", {
+        method: "POST",
+        headers: { ...H, "content-type": "application/json" },
+        body: failing,
+        duplex: "half",
+      } as RequestInit),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()) as object).toEqual({ error: "body was not fully received" });
   });
 });
