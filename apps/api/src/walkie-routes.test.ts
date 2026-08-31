@@ -1,0 +1,241 @@
+// The walkie surface's config gate and its two verbs (BRO-2387).
+//
+// DoD 3 is the one worth reading carefully: "a test asserts the routes are
+// ABSENT, not merely closed". Those are different failures. A registered-but-401
+// route tells an unauthenticated caller the surface exists; an unregistered one
+// tells them nothing. The voice work established that distinction after shipping
+// an intake surface no caller could reach while 25 tests passed against it — so
+// the assertion is 404, AND a companion assertion proves 404 is not simply what
+// this app returns for every unknown path.
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type Ask, createAskLog } from "./ask-log";
+import { build } from "./server";
+
+const SECRET = "walkie-test-secret";
+const H: Record<string, string> = { "x-genesis-walkie-secret": SECRET };
+
+/** The house shape: build() returns { app }, requests go through app.fetch. */
+type App = { fetch: (r: Request) => Promise<Response> };
+
+const get = (app: App, path: string, headers?: Record<string, string>) =>
+  app.fetch(new Request(`http://x${path}`, headers ? { headers } : undefined));
+
+const post = (app: App, path: string, body: string, headers: Record<string, string>) =>
+  app.fetch(
+    new Request(`http://x${path}`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body,
+    }),
+  );
+
+let dir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "walkie-routes-"));
+});
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const ask = (over: Partial<Ask> = {}): Ask => ({
+  id: "ask-1",
+  sessionId: "sess-1",
+  threadId: "thread-1",
+  question: "Deploy to production?",
+  createdAt: "2026-08-31T12:00:00.000Z",
+  ...over,
+});
+
+function configured() {
+  const log = createAskLog(dir);
+  const { app } = build({
+    workspaceRoot: dir,
+    walkieSecret: SECRET,
+    askLog: log,
+    askLogDir: dir,
+  } as never);
+  return { app: app as App, log };
+}
+
+function unconfigured(): App {
+  return build({ workspaceRoot: dir } as never).app as App;
+}
+
+const asksOf = async (r: Response) =>
+  ((await r.json()) as { asks: { id: string; status: string; answer?: string }[] }).asks;
+
+describe("DoD 4 — a configured secret without a store fails at BUILD", () => {
+  test("walkieSecret with no askLog throws, naming the sink", () => {
+    // NOT /askLog/ — that substring also appears in the askLogDir message, so
+    // disabling this throw let the OTHER one satisfy the assertion. The mutation
+    // sweep caught exactly that ("build-throw for a missing sink removed"
+    // SURVIVED). Match a phrase only this error carries.
+    expect(() => build({ workspaceRoot: dir, walkieSecret: SECRET } as never)).toThrow(
+      /askLog is not/,
+    );
+  });
+
+  test("walkieSecret with a store but no directory throws too", () => {
+    // The read half needs a directory. A configured surface whose GET has
+    // nothing to read is the same class of half-wired as a missing sink.
+    expect(() =>
+      build({ workspaceRoot: dir, walkieSecret: SECRET, askLog: createAskLog(dir) } as never),
+    ).toThrow(/askLogDir is not/);
+  });
+
+  test("a fully configured build does NOT throw", () => {
+    // The negative control. Without it, a build() that threw unconditionally
+    // would satisfy both assertions above.
+    expect(() => configured()).not.toThrow();
+  });
+});
+
+describe("DoD 3 — unconfigured, the routes do not exist", () => {
+  test("GET /walkie/asks is 404 when no secret is configured", async () => {
+    expect((await get(unconfigured(), "/walkie/asks", H)).status).toBe(404);
+  });
+
+  test("POST /walkie/answer is 404 when no secret is configured", async () => {
+    const r = await post(
+      unconfigured(),
+      "/walkie/answer",
+      JSON.stringify({ id: "ask-1", answer: "Yes" }),
+      H,
+    );
+    expect(r.status).toBe(404);
+  });
+
+  test("404 means ABSENT, not 'this app 404s everything'", async () => {
+    // Without this, both assertions above would pass against a build() that
+    // registered nothing at all. Configured, the same path answers.
+    const { app } = configured();
+    expect((await get(app, "/walkie/asks", H)).status).toBe(200);
+  });
+
+  test("configured but unauthenticated is 401 — a different failure from absent", async () => {
+    const { app } = configured();
+    expect((await get(app, "/walkie/asks")).status).toBe(401);
+    expect((await get(app, "/walkie/asks", { "x-genesis-walkie-secret": "wrong" })).status).toBe(
+      401,
+    );
+  });
+});
+
+describe("GET /walkie/asks", () => {
+  test("lists pending asks", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    const r = await get(app, "/walkie/asks", H);
+    expect(r.status).toBe(200);
+    expect((await asksOf(r)).map((a) => `${a.id}:${a.status}`)).toEqual(["ask-1:pending"]);
+  });
+
+  test("an answered ask drops out unless asked for", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "2026-08-31T12:05:00.000Z" });
+    expect(await asksOf(await get(app, "/walkie/asks", H))).toEqual([]);
+    expect(
+      (await asksOf(await get(app, "/walkie/asks?answered=1", H))).map((a) => a.status),
+    ).toEqual(["answered"]);
+  });
+
+  test("filters by thread", async () => {
+    const { app, log } = configured();
+    log.append(ask({ id: "a", threadId: "t1" }));
+    log.append(ask({ id: "b", threadId: "t2" }));
+    expect((await asksOf(await get(app, "/walkie/asks?thread=t1", H))).map((a) => a.id)).toEqual([
+      "a",
+    ]);
+  });
+});
+
+describe("POST /walkie/answer", () => {
+  test("records an answer, and the ask becomes answered", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    expect(r.status).toBe(200);
+    const after = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(after[0]?.status).toBe("answered");
+    expect(after[0]?.answer).toBe("Yes");
+  });
+
+  test("answering twice is a no-op, not a double effect", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    const send = () =>
+      post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(200);
+    expect(await asksOf(await get(app, "/walkie/asks?answered=1", H))).toHaveLength(1);
+  });
+
+  test("an unknown id is 404, not a silent accept", async () => {
+    // Otherwise a typo'd id sits in answers.jsonl forever matching nothing,
+    // while the operator believes they answered.
+    const { app } = configured();
+    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "nope", answer: "Yes" }), H);
+    expect(r.status).toBe(404);
+  });
+
+  test("unauthenticated cannot answer", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), {
+      "x-genesis-walkie-secret": "wrong",
+    });
+    expect(r.status).toBe(401);
+    // and nothing was recorded
+    expect((await asksOf(await get(app, "/walkie/asks", H)))[0]?.status).toBe("pending");
+  });
+
+  test.each([
+    ["not json", "a non-JSON body"],
+    [JSON.stringify({ answer: "Yes" }), "no id"],
+    [JSON.stringify({ id: "ask-1" }), "no answer"],
+    [JSON.stringify({ id: "ask-1", answer: "" }), "an empty answer"],
+    [JSON.stringify({ id: 42, answer: "Yes" }), "a non-string id"],
+  ])("rejects %#: %s", async (body, _why) => {
+    const { app, log } = configured();
+    log.append(ask());
+    expect((await post(app, "/walkie/answer", body, H)).status).toBe(400);
+  });
+});
+
+describe("a read that could not look says so", () => {
+  test("an unreadable ask log surfaces `degraded`, not an empty list", async () => {
+    // The failure this prevents: a permissions problem or a bad mount reads as
+    // "nothing is waiting on you", which is the most dangerous possible lie for
+    // this surface. Uncovered until the mutation sweep found "degraded flag
+    // swallowed" surviving.
+    const { app, log } = configured();
+    log.append(ask());
+    // Make asks.jsonl unreadable — EACCES rather than ENOENT, which is the only
+    // healthy absence.
+    const { chmodSync } = await import("node:fs");
+    chmodSync(join(dir, "asks.jsonl"), 0o000);
+    const r = await get(app, "/walkie/asks", H);
+    const body = (await r.json()) as { asks: unknown[]; degraded?: string };
+    chmodSync(join(dir, "asks.jsonl"), 0o644);
+    expect(body.degraded).toBeDefined();
+    expect(body.degraded).toContain("asks.jsonl");
+    // and it names the FILE, never the absolute path — this reaches a browser
+    expect(body.degraded).not.toContain(dir);
+  });
+});
+
+describe("the two stores stay separate", () => {
+  test("answering never writes into the voice intake queue", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    expect(existsSync(join(dir, "queue.jsonl"))).toBe(false);
+    expect(existsSync(join(dir, "asks.jsonl"))).toBe(true);
+    expect(existsSync(join(dir, "answers.jsonl"))).toBe(true);
+  });
+});

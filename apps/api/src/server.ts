@@ -11,6 +11,7 @@ import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { type Context, Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
+import { type Ask, type AskAnswer, readAsks } from "./ask-log";
 import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
@@ -107,6 +108,27 @@ export interface BuildOpts {
   /** Sink for queued voice work. Must return fast — a caller is on the line.
    *  REQUIRED whenever voiceSecret is set; build() throws otherwise. */
   enqueueVoice?: (ticket: VoiceTicket) => Promise<void> | void;
+  /** Shared secret the walkie client presents on /walkie/* (BRO-2387).
+   *  OMITTED → the walkie routes are NOT REGISTERED AT ALL, same rule as
+   *  voiceSecret: an unconfigured deploy must 404, not answer.
+   *
+   *  NOT the same secret as voiceSecret, deliberately. /voice is reachable from
+   *  the public internet through the Tailscale Funnel; /walkie is not. Sharing
+   *  one secret would make a leak of the internet-facing credential a leak of
+   *  the operator's pending decisions too. */
+  walkieSecret?: string;
+  /** The ask log's write half. REQUIRED whenever walkieSecret is set; build()
+   *  throws otherwise — a configured surface with no store would acknowledge an
+   *  answer and discard it, which is the exact shape voiceSecret/enqueueVoice
+   *  already failed in once. */
+  askLog?: {
+    append(ask: Ask): void;
+    answer(answer: AskAnswer): void;
+  };
+  /** Where the ask log lives, for the READ half. Separate from voiceQueueDir on
+   *  purpose: the two stores must not share a directory, so that an ask can
+   *  never be mistaken for caller-originated intake. */
+  askLogDir?: string;
   // NO voiceDelivery OPTION. Three designs failed here and the third failed most
   // instructively: an env string was an operator assertion, so it became a
   // {channel, deliver} object — and `deliver` had zero call sites, so passing
@@ -371,6 +393,105 @@ export function build(opts: BuildOpts) {
         // blocked on #107.)
         followUp: "none",
       });
+    });
+  }
+
+  // Walkie — the operator's pending decisions (BRO-2387). Registered ONLY with a
+  // configured secret, same rule and same reason as the voice channel above.
+  //
+  // TRANSPORT NOTE, because it constrains the client and must not be discovered
+  // later: authorization is a REQUEST HEADER. `EventSource` cannot set headers —
+  // its EventSourceInit has exactly one member, withCredentials — so a browser
+  // client reads these with `fetch`, not EventSource. That is a deliberate cost.
+  // The alternative is a credential in the query string, which this server's
+  // shared `unauthorized()` helper does accept, and which would land the secret
+  // in access logs, Referer headers and browser history. Paying a little client
+  // complexity to keep a credential out of a URL is the right trade.
+  if (opts.walkieSecret) {
+    // Same failure this exact shape already shipped once for voice: a configured
+    // surface whose sink was optional-chained away answered 200 and stored
+    // nothing. A misconfiguration, not a runtime condition — so it fails at
+    // BUILD.
+    if (!opts.askLog) {
+      throw new Error(
+        "walkieSecret is set but askLog is not: the walkie routes would " +
+          "acknowledge answers and discard them. Pass a store (createAskLog).",
+      );
+    }
+    if (!opts.askLogDir) {
+      throw new Error(
+        "walkieSecret is set but askLogDir is not: GET /walkie/asks would have " +
+          "nothing to read. Pass the same directory createAskLog was given.",
+      );
+    }
+    const askLog = opts.askLog;
+    const askLogDir = opts.askLogDir;
+    // NOT the shared unauthorized(): that helper opens with
+    // `if (!opts.token) return false`, so an unset token authorizes everyone,
+    // and it accepts the credential from the query string. Neither is acceptable
+    // for a surface that lists what an operator has been asked to decide.
+    const walkieDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
+      !secretMatches(c.req.header("x-genesis-walkie-secret"), opts.walkieSecret ?? "");
+
+    // What is waiting on a person. A plain JSON read — the client renders from
+    // this. GET /walkie/stream is a later addition on top, not a prerequisite:
+    // a client that can poll this can render, and a streaming endpoint carries
+    // hazards a read verb does not.
+    app.get("/walkie/asks", (c) => {
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      const threadId = c.req.query("thread");
+      const includeAnswered = c.req.query("answered") === "1";
+      const { entries, degraded } = readAsks(askLogDir, {
+        ...(threadId ? { threadId } : {}),
+        includeAnswered,
+      });
+      // `degraded` travels rather than being swallowed: a read that could not see
+      // a file must not look like a repo with nothing pending.
+      return c.json(degraded ? { asks: entries, degraded } : { asks: entries });
+    });
+
+    // The decision coming back.
+    app.post("/walkie/answer", async (c) => {
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      let raw: unknown;
+      try {
+        raw = await c.req.json();
+      } catch {
+        return c.json({ error: "body must be JSON" }, 400);
+      }
+      const body = (raw ?? {}) as { id?: unknown; answer?: unknown };
+      // A parse failure is not an empty answer, and an empty answer is not a
+      // decision. Both are 400s with distinct messages — collapsing them is how
+      // /voice/identify once made a transport fault look like normal traffic.
+      if (typeof body.id !== "string" || !body.id) {
+        return c.json({ error: "id must be a non-empty string" }, 400);
+      }
+      if (typeof body.answer !== "string" || !body.answer) {
+        return c.json({ error: "answer must be a non-empty string" }, 400);
+      }
+      // Answering an id that is not in the log is a 404, not a silent accept:
+      // otherwise a typo'd id is written to answers.jsonl forever, matching
+      // nothing, and the operator believes they answered.
+      const known = readAsks(askLogDir, { includeAnswered: true }).entries;
+      if (!known.some((a) => a.id === body.id)) {
+        return c.json({ error: "no such ask" }, 404);
+      }
+      try {
+        askLog.answer({
+          id: body.id,
+          answer: body.answer,
+          answeredAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        // The ask log's failure policy is the voice queue's: propagate. An answer
+        // the operator was told was recorded, which then vanished, is worse than
+        // a visible failure they can retry.
+        console.error("[walkie] could not record answer:", e);
+        return c.json({ error: "could not record the answer; please try again" }, 503);
+      }
+      // Answering twice is a no-op by construction — readAsks keys answers by id
+      // in a Map, so the second write overwrites rather than double-counting.
+      return c.json({ recorded: true });
     });
   }
 
