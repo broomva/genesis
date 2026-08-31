@@ -18,6 +18,17 @@ import { join } from "node:path";
 // the deploy smoke rather than a unit suite — that boot was exercised by hand
 // (both polarities: routes answer with the secret set, 404 without it).
 
+/** The build({...}) argument object with COMMENTS STRIPPED.
+ *
+ *  Without the strip, `toContain("walkieSecret")` is satisfied by a comment that
+ *  merely mentions the option — which is what happened: deleting all three
+ *  walkie options from the call left one assertion passing, because the comment
+ *  above them says "gates on walkieSecret being present". An assertion a
+ *  sentence can satisfy is not pinning a binding. */
+function withoutComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
 /** The literal argument object of the single build({...}) call in index.ts. */
 function buildCallSource(): string {
   const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
@@ -62,5 +73,50 @@ describe("index.ts wires the voice channel into build() (BRO-2228)", () => {
     // The option itself must not exist on BuildOpts: a caller that can pass it
     // can claim the channel, which is exactly how the last design failed.
     expect(server).not.toMatch(/^\s*voiceDelivery\??:/m);
+  });
+});
+
+// ── walkie (BRO-2387) ──────────────────────────────────────────────────────
+//
+// The same hole, and I dug it: build() accepted walkieSecret / askLog /
+// askLogDir while index.ts passed none of them, so `if (opts.walkieSecret)`
+// could never run and /walkie/asks and /walkie/answer did not exist in any real
+// deploy — with 21 route tests green, because every one of them injects the
+// options by hand. Exactly the shape the block above exists to prevent,
+// reproduced two years of lessons later. So it gets the same source-level guard.
+
+describe("index.ts wires walkie into build() (BRO-2387)", () => {
+  const call = withoutComments(buildCallSource());
+
+  test.each(["walkieSecret", "askLog", "askLogDir"])("build() receives %s", (option) => {
+    // Comment-stripped, and matched as a property rather than a substring: the
+    // first version of this passed on a comment mentioning the option name.
+    expect(call).toMatch(new RegExp(`(^|[\\s,{])${option}\\s*[,:]`));
+  });
+
+  test("the store is the durable ask log, not an inline throwaway", () => {
+    // The BINDING, not the identifier: "contains createAskLog" would pass on an
+    // unused import, which round 2 of the voice work established does not pin
+    // anything.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toMatch(/const\s+askLog\s*=[^;]*createAskLog\(/);
+  });
+
+  test("the ask log has its OWN directory, never the voice queue's", () => {
+    // The two stores must not share a directory. If askLogDir were derived from
+    // voiceQueueDir, an agent-originated ask would land beside caller-originated
+    // intake keyed by an untrusted phone number — the merge AGENTS.md forbids.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    const m = src.match(/const\s+askLogDir\s*=([^;]*);/);
+    expect(m).not.toBeNull();
+    expect(m?.[1]).not.toContain("voiceQueueDir");
+    expect(m?.[1]).not.toContain("GENESIS_VOICE_QUEUE_DIR");
+  });
+
+  test("the store is built ONLY when the channel is configured", () => {
+    // An unconfigured deploy must not create a directory nothing will ever write
+    // to — the same rule the voice queue follows one line above it.
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+    expect(src).toMatch(/const\s+askLog\s*=\s*walkieSecret\s*\?/);
   });
 });
