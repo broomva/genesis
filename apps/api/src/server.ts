@@ -399,6 +399,15 @@ export function build(opts: BuildOpts) {
   // Walkie — the operator's pending decisions (BRO-2387). Registered ONLY with a
   // configured secret, same rule and same reason as the voice channel above.
   //
+  // REACHABILITY, corrected. An earlier version of this comment said /walkie/*
+  // is not internet-reachable because the Funnel publishes only the /voice
+  // prefix. That is what server.ts:100-103 claims, and it is contradicted by the
+  // shipped instruction: integrations/elevenlabs/README.md:47-49 and
+  // scripts/elevenlabs-provision.sh:31-32 both say to FUNNEL THE ROOT, because
+  // --set-path strips the prefix. Assume this surface IS reachable from the
+  // public internet, and treat the header check below as the only thing between
+  // an anonymous caller and the operator's pending decisions. (BRO-2412.)
+  //
   // TRANSPORT NOTE, because it constrains the client and must not be discovered
   // later: authorization is a REQUEST HEADER. `EventSource` cannot set headers —
   // its EventSourceInit has exactly one member, withCredentials — so a browser
