@@ -330,8 +330,7 @@ if (walkieSecret) {
   // Says "no producer" out loud: the routes answer, but nothing writes an ask
   // yet, so an operator seeing this line must not read it as a live channel.
   console.log(
-    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} ` +
-      "(routes live; no producer yet — asks are not written by anything)",
+    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} (routes live; no producer yet — asks are not written by anything)`,
   );
 }
 if (voiceSecret) {
