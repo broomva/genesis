@@ -668,4 +668,41 @@ describe("the four merge-risk findings", () => {
     expect(res.status).toBe(400);
     expect((await res.json()) as object).toEqual({ error: "body was not fully received" });
   });
+
+  test("the 409 carries a decision from a thread the caller never named", async () => {
+    // Verified behaviour, kept deliberately — see the note at the 409. Pinned so
+    // it is a decision rather than an accident.
+    const { app, log } = configured();
+    log.append(ask({ id: "secret-ask", threadId: "t-alice" }));
+    log.answer({
+      id: "secret-ask",
+      answer: "ALICE-PRIVATE-DECISION",
+      answeredAt: "2026-08-31T12:01:00.000Z",
+    });
+    const res = await post(
+      app,
+      "/walkie/answer",
+      JSON.stringify({ id: "secret-ask", answer: "someone-else-tries" }),
+      H,
+    );
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("ALICE-PRIVATE-DECISION");
+  });
+
+  test("...and the SAME credential can already read it, which is why that is safe", async () => {
+    // THE LOAD-BEARING HALF. The 409 above is acceptable only because
+    // `walkieSecret` is one shared secret with no per-thread scoping, so it
+    // discloses nothing a plain GET does not. If per-thread credentials are ever
+    // added and GET is scoped without scoping the 409, THIS test fails and points
+    // at the one above. The reason is the assertion, not a comment.
+    const { app, log } = configured();
+    log.append(ask({ id: "secret-ask", threadId: "t-alice" }));
+    log.answer({
+      id: "secret-ask",
+      answer: "ALICE-PRIVATE-DECISION",
+      answeredAt: "2026-08-31T12:01:00.000Z",
+    });
+    const body = await (await get(app, "/walkie/asks?answered=1", H)).text();
+    expect(body).toContain("ALICE-PRIVATE-DECISION");
+  });
 });

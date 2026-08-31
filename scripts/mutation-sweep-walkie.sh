@@ -43,7 +43,7 @@ SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=49
+EXPECTED_MUTANTS=51
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -391,6 +391,17 @@ mutate "a differing second answer is accepted as recorded" "$S" \
   '        return c.json({ recorded: true, alreadyAnswered: true });
         if (false) {}' \
   "DIFFERENT second answer is a 409"
+
+echo "the 409's threat model — a deliberate disclosure, so it is pinned"
+mutate "the 409 stops naming the standing answer" "$S" \
+  '        return c.json({ error: "already answered", recorded: false, answer: existing.answer }, 409);' \
+  '        return c.json({ error: "already answered", recorded: false }, 409);' \
+  "carries a decision from a thread the caller never named"
+mutate "GET stops exposing answers, which would make the 409 an escalation" "$S" \
+  '        ...(truncated ? { truncated: true } : {}),' \
+  '        asks: [],
+        ...(truncated ? { truncated: true } : {}),' \
+  "SAME credential can already read it"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

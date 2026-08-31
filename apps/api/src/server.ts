@@ -748,6 +748,27 @@ export function build(opts: BuildOpts) {
         if (existing.answer === body.answer) {
           return c.json({ recorded: true, alreadyAnswered: true });
         }
+        // THE STANDING ANSWER TRAVELS, and the threat model is why that is safe
+        // rather than a leak. `readAsks` is called here WITHOUT a thread filter,
+        // so this body can carry a decision from a thread the caller never named
+        // — verified by running it, it does. It is not an escalation:
+        // `walkieSecret` is ONE shared secret with no per-thread scoping (see
+        // BuildOpts.walkieSecret), so the same credential can already read every
+        // thread's answers via GET /walkie/asks?answered=1. Also verified.
+        //
+        // The thread filter is a VIEW, not an authorization boundary. Stated here
+        // because the ambiguity rule above is framed as "cross-thread
+        // disclosure", and that is a violation of the FILTER'S CONTRACT — a
+        // response containing what the filter said it excluded — not a privilege
+        // boundary being crossed. Conflating the two would leave the next reader
+        // either treating `?thread=` as auth or "fixing" this 409 into
+        // uselessness.
+        //
+        // THE DAY THIS STOPS BEING TRUE is the day walkie gets per-thread
+        // credentials. walkie-routes.test.ts pins both halves — that the 409
+        // carries the answer, AND that a plain GET already exposes it — so
+        // scoping GET without scoping this breaks the second half and points
+        // straight at the first.
         return c.json({ error: "already answered", recorded: false, answer: existing.answer }, 409);
       }
       try {
