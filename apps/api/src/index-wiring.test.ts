@@ -26,7 +26,20 @@ import { join } from "node:path";
  *  above them says "gates on walkieSecret being present". An assertion a
  *  sentence can satisfy is not pinning a binding. */
 function withoutComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  return (
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      // AND string/template literals. Stripping comments alone was not enough: the
+      // assertion is a text match over source, so ANY literal inside the call
+      // satisfies it. Demonstrated by a reviewer with
+      // `workspaceName: \`walkie wired: walkieSecret, askLog, askLogDir\`` and all
+      // three real options deleted — green. Third time in this ticket that a
+      // matcher was satisfied by prose rather than by code. (P20 MAJOR.)
+      .replace(/`(?:[^`\\]|\\.)*`/g, "``")
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+  );
 }
 
 /** The literal argument object of the single build({...}) call in index.ts. */

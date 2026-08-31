@@ -16,10 +16,10 @@
 // suite imply a guarantee it cannot make.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ANSWER_FILE, ASK_FILE, type Ask, createAskLog, readAsks } from "./ask-log";
+import { ANSWER_FILE, ASK_FILE, type Ask, type DurableFs, createAskLog, readAsks } from "./ask-log";
 
 const MODULE = new URL("./ask-log.ts", import.meta.url).pathname;
 
@@ -185,5 +185,128 @@ describe("reading is tolerant, and says when it is not", () => {
     log.append(ask({ id: "first", createdAt: "2026-08-31T10:00:00.000Z" }));
     log.append(ask({ id: "second", createdAt: "2026-08-31T11:00:00.000Z" }));
     expect(readAsks(dir).entries.map((e) => e.id)).toEqual(["first", "second"]);
+  });
+});
+
+describe("findings from the P20 review", () => {
+  test("a short write is COMPLETED — every byte of the record reaches the file", () => {
+    // POSIX write() may write fewer bytes than asked — the ordinary shape of a
+    // nearly-full filesystem. Discarding the count left a line with no trailing
+    // newline, and the NEXT append landed on it, gluing two records into one
+    // unparseable line: the reader skips it and BOTH are gone.
+    //
+    // The first version of this test asserted `not.toThrow()`, which passes
+    // whether the loop completes the write or assumes it did — it asserted
+    // nothing about the bytes, and the mutation sweep caught it surviving.
+    // So it reassembles what the spy actually received.
+    let first = true;
+    const wrote: string[] = [];
+    const shortFs: DurableFs = {
+      openSync: () => 7,
+      writeSync: (_fd, str) => {
+        const n = first ? Math.floor(str.length / 2) : str.length;
+        first = false;
+        wrote.push(str.slice(0, n));
+        return n;
+      },
+      fsyncSync: () => {},
+      closeSync: () => {},
+    };
+    const a = ask();
+    createAskLog(dir, shortFs).append(a);
+    const assembled = wrote.join("");
+    expect(assembled).toBe(`${JSON.stringify(a)}\n`);
+    // Specifically: it ends in a newline. That is the property whose absence
+    // destroys the NEXT record.
+    expect(assembled.endsWith("\n")).toBe(true);
+    expect(wrote.length).toBeGreaterThan(1); // it really did take two writes
+  });
+
+  test("a write making no progress throws instead of spinning forever", () => {
+    const stuckFs: DurableFs = {
+      openSync: () => 7,
+      writeSync: () => 0, // no progress, ever
+      fsyncSync: () => {},
+      closeSync: () => {},
+    };
+    expect(() => createAskLog(dir, stuckFs).append(ask())).toThrow(/short write/);
+  });
+
+  test("the fd is closed even when a short write throws", () => {
+    const closed: number[] = [];
+    const stuckFs: DurableFs = {
+      openSync: () => 7,
+      writeSync: () => 0,
+      fsyncSync: () => {},
+      closeSync: (fd) => {
+        closed.push(fd);
+      },
+    };
+    expect(() => createAskLog(dir, stuckFs).append(ask())).toThrow();
+    expect(closed).toEqual([7]);
+  });
+
+  test("two asks sharing an id in different threads do not mask each other", () => {
+    // Dedupe ran BEFORE the thread filter, so the dedupe key was global while
+    // the visible universe was per-thread: ?thread=t2 was served t1's question
+    // text, or nothing. Cross-thread disclosure.
+    const log = createAskLog(dir);
+    log.append(ask({ id: "dup", threadId: "t1", question: "Alice: ship it?" }));
+    log.append(ask({ id: "dup", threadId: "t2", question: "Bob: DELETE prod?" }));
+    expect(readAsks(dir, { threadId: "t1" }).entries.map((e) => e.question)).toEqual([
+      "Alice: ship it?",
+    ]);
+    expect(readAsks(dir, { threadId: "t2" }).entries.map((e) => e.question)).toEqual([
+      "Bob: DELETE prod?",
+    ]);
+  });
+
+  test("malformed options are dropped, not handed to the client as AskOption[]", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({
+        id: "opt",
+        sessionId: "s",
+        threadId: "t",
+        question: "q?",
+        createdAt: "x",
+        options: [
+          1,
+          null,
+          { label: { nested: true } },
+          "str",
+          { label: "Yes" },
+          { label: "No", description: "d" },
+        ],
+      })}\n`,
+    );
+    const e = readAsks(dir).entries[0];
+    expect(e?.options).toEqual([{ label: "Yes" }, { label: "No", description: "d" }]);
+  });
+
+  test("a non-string threadId is reachable by the value it is emitted as", () => {
+    // The filter compared the RAW value while the output coerced to "", so an
+    // entry appeared in the unfiltered list and was reachable by no ?thread=.
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "n", sessionId: "s", threadId: null, question: "q?", createdAt: "x" })}\n`,
+    );
+    expect(readAsks(dir).entries[0]?.threadId).toBe("");
+    expect(readAsks(dir, { threadId: "" }).entries.map((e) => e.id)).toEqual(["n"]);
+  });
+
+  test("both journals unreadable reports BOTH, not just the last", () => {
+    const log = createAskLog(dir);
+    log.append(ask());
+    log.answer({ id: "ask-1", answer: "Yes", answeredAt: "x" });
+    chmodSync(join(dir, ASK_FILE), 0o000);
+    chmodSync(join(dir, ANSWER_FILE), 0o000);
+    const { degraded } = readAsks(dir);
+    chmodSync(join(dir, ASK_FILE), 0o644);
+    chmodSync(join(dir, ANSWER_FILE), 0o644);
+    // The answers failure is the one that used to vanish, and it is the more
+    // deceptive: it renders every answered ask as pending.
+    expect(degraded).toContain(ANSWER_FILE);
+    expect(degraded).toContain(ASK_FILE);
   });
 });

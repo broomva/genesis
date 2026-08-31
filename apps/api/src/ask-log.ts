@@ -96,12 +96,32 @@ export interface DurableFs {
   closeSync(fd: number): void;
 }
 
-const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync, closeSync };
+/** The production ops. Exported ONLY so a test can assert these are the real
+ *  node:fs syscalls rather than lookalikes — the injected seam cannot see this. */
+export const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync, closeSync };
 
 function durableAppend(file: string, record: unknown, fs: DurableFs): void {
+  const line = `${JSON.stringify(record)}\n`;
   const fd = fs.openSync(file, "a");
   try {
-    fs.writeSync(fd, `${JSON.stringify(record)}\n`);
+    // writeSync RETURNS A COUNT and POSIX write() is permitted to write fewer
+    // bytes than asked — the ordinary shape of a nearly-full filesystem, where
+    // it writes what fits and returns short rather than raising ENOSPC.
+    //
+    // Discarding that count does not merely lose the record. The partial line
+    // has no trailing newline, so the NEXT append's bytes land on it and the two
+    // records are glued into one unparseable line — the reader skips it and BOTH
+    // are gone, silently, with the caller having been told both were recorded.
+    // (P20 BLOCKER, reproduced under RLIMIT_FSIZE: writeSync returned 1024 for a
+    // 2031-byte record and did not throw.)
+    let written = 0;
+    while (written < line.length) {
+      const n = fs.writeSync(fd, line.slice(written));
+      // A zero-byte write makes no progress; looping would spin forever.
+      if (n <= 0)
+        throw new Error(`short write to ${file}: wrote ${written} of ${line.length} bytes`);
+      written += n;
+    }
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -190,18 +210,26 @@ function readLines(dir: string, name: string, onDegraded: (msg: string) => void)
  *  no-op without the write path needing to know anything. Duplicate ASKS collapse
  *  the same way: a retried tool call yields a stable id, and the ask is shown once.
  *
- *  `principal` filters to one thread. The ask log is per-principal in the sense
- *  that a reader is scoped to their own thread, not in the sense that the file is
- *  partitioned — there is no principal partition anywhere in this repo, and
- *  inventing one here would be a second answer to a question the codebase has
- *  already answered differently. */
+ *  `threadId` is a FILTER, not an authorization boundary, and the distinction
+ *  matters: the thread is chosen by the caller as a query parameter, so anyone
+ *  holding the shared secret can read any thread. An earlier version of this
+ *  comment said the reader "is scoped to their own thread", which described a
+ *  property nothing implements. There is no principal partition anywhere in this
+ *  repo; inventing one here would be a second answer to a question the codebase
+ *  has already answered differently, and pretending one exists is worse than
+ *  either. (P20 MINOR.) */
 export function readAsks(
   dir: string,
   opts?: { threadId?: string; includeAnswered?: boolean },
 ): { entries: AskEntry[]; degraded?: string } {
-  let degraded: string | undefined;
+  // ACCUMULATED, not overwritten. `degraded = m` kept only the last failure, and
+  // answers.jsonl is read first — so with both journals unreadable the ANSWERS
+  // message was the one lost, which is the wrong one to drop: an unreadable
+  // answers.jsonl makes every answered ask render as pending, a plausible-looking
+  // backlog, while an unreadable asks.jsonl merely shows nothing. (P20 NIT.)
+  const problems: string[] = [];
   const note = (m: string) => {
-    degraded = m;
+    if (!problems.includes(m)) problems.push(m);
   };
 
   const answers = new Map<string, RawAnswer>();
@@ -214,10 +242,36 @@ export function readAsks(
     const a = v as Record<string, unknown>;
     if (typeof a.id !== "string" || !a.id) continue;
     if (typeof a.question !== "string" || !a.question) continue;
+
+    // FILTER BEFORE DEDUPE. The reverse order made the dedupe key global while
+    // the visible universe was per-thread, so two asks sharing an id in
+    // different threads collapsed to whichever came first — and a request for
+    // the OTHER thread was served the first thread's question text, or nothing
+    // at all. Ids are supposed to be unique, but this reads an append-only file
+    // written by other processes; "supposed to be" is not a guarantee it can
+    // lean on, and the failure was cross-thread disclosure. (P20 MAJOR.)
+    //
+    // Compared against the COERCED value, not the raw one: a non-string
+    // threadId is emitted as "" below, so filtering on the raw value made an
+    // entry visible in the unfiltered list yet unreachable by any ?thread= value.
+    const threadId = typeof a.threadId === "string" ? a.threadId : "";
+    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;
+
     if (seen.has(a.id)) continue;
     seen.add(a.id);
 
-    if (opts?.threadId !== undefined && a.threadId !== opts.threadId) continue;
+    const options: AskOption[] = Array.isArray(a.options)
+      ? a.options.flatMap((o) => {
+          if (!o || typeof o !== "object") return [];
+          const opt = o as Record<string, unknown>;
+          if (typeof opt.label !== "string" || !opt.label) return [];
+          return [
+            typeof opt.description === "string"
+              ? { label: opt.label, description: opt.description }
+              : { label: opt.label },
+          ];
+        })
+      : [];
 
     const ans = answers.get(a.id);
     if (ans && opts?.includeAnswered !== true) continue;
@@ -225,10 +279,15 @@ export function readAsks(
     entries.push({
       id: a.id,
       sessionId: typeof a.sessionId === "string" ? a.sessionId : "",
-      threadId: typeof a.threadId === "string" ? a.threadId : "",
+      threadId,
       question: a.question,
       ...(typeof a.header === "string" ? { header: a.header } : {}),
-      ...(Array.isArray(a.options) ? { options: a.options as AskOption[] } : {}),
+      // VALIDATED, not cast. `Array.isArray` alone let `[1, null, {label:{}}]`
+      // through as `readonly AskOption[]`, and a client looping `opt.label` gets
+      // a TypeError on the null while React throws on the object. This file
+      // reads a journal other processes append to, so the array's shape is an
+      // input, not an invariant. (P20 MAJOR.)
+      ...(options.length > 0 ? { options } : {}),
       ...(typeof a.multiSelect === "boolean" ? { multiSelect: a.multiSelect } : {}),
       createdAt: typeof a.createdAt === "string" ? a.createdAt : "",
       status: ans ? "answered" : "pending",
@@ -236,5 +295,5 @@ export function readAsks(
       ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
     });
   }
-  return degraded ? { entries, degraded } : { entries };
+  return problems.length > 0 ? { entries, degraded: problems.join("; ") } : { entries };
 }

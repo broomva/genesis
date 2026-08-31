@@ -439,6 +439,9 @@ export function build(opts: BuildOpts) {
     // `if (!opts.token) return false`, so an unset token authorizes everyone,
     // and it accepts the credential from the query string. Neither is acceptable
     // for a surface that lists what an operator has been asked to decide.
+    // A decision, not a document. Generous enough for a free-text answer with
+    // reasoning; far below anything that makes the journal expensive to re-read.
+    const MAX_ANSWER_CHARS = 4096;
     const walkieDenied = (c: { req: { header: (k: string) => string | undefined } }): boolean =>
       !secretMatches(c.req.header("x-genesis-walkie-secret"), opts.walkieSecret ?? "");
 
@@ -454,9 +457,25 @@ export function build(opts: BuildOpts) {
         ...(threadId ? { threadId } : {}),
         includeAnswered,
       });
+      // BOUNDED, like /admin/voice/queue. Both journals are append-only and
+      // nothing compacts them, so an unbounded response grows without limit —
+      // measured at 16.2 MB for 100k asks, against the sibling route's 50 over
+      // the same record count. Oldest first, so the cap keeps the longest-waiting
+      // questions rather than an arbitrary window. (P20 MAJOR.)
+      const rawLimit = Number(c.req.query("limit"));
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+      const page = entries.slice(0, limit);
+      const truncated = entries.length > page.length;
       // `degraded` travels rather than being swallowed: a read that could not see
       // a file must not look like a repo with nothing pending.
-      return c.json(degraded ? { asks: entries, degraded } : { asks: entries });
+      // `total` and `truncated` travel so a client can tell "nothing pending" from
+      // "the first 50 of 4000" — the same reason `degraded` travels.
+      return c.json({
+        asks: page,
+        total: entries.length,
+        ...(truncated ? { truncated: true } : {}),
+        ...(degraded ? { degraded } : {}),
+      });
     });
 
     // The decision coming back.
@@ -478,11 +497,29 @@ export function build(opts: BuildOpts) {
       if (typeof body.answer !== "string" || !body.answer) {
         return c.json({ error: "answer must be a non-empty string" }, 400);
       }
+      // CAPPED. There is no body-size limit anywhere in this server (`app.use`
+      // appears zero times), so an unbounded answer is appended verbatim to a
+      // journal every later request re-reads: a 50 MB answer returned 200 in
+      // 90 ms and left every subsequent GET and POST re-parsing 50 MB. An answer
+      // is a decision, not a document. (P20 MAJOR.)
+      if (body.answer.length > MAX_ANSWER_CHARS) {
+        return c.json({ error: `answer must be at most ${MAX_ANSWER_CHARS} characters` }, 413);
+      }
       // Answering an id that is not in the log is a 404, not a silent accept:
       // otherwise a typo'd id is written to answers.jsonl forever, matching
       // nothing, and the operator believes they answered.
-      const known = readAsks(askLogDir, { includeAnswered: true }).entries;
-      if (!known.some((a) => a.id === body.id)) {
+      const known = readAsks(askLogDir, { includeAnswered: true });
+      // A DEGRADED READ IS NOT AN ABSENT ASK. Dropping `degraded` here collapsed
+      // an unreadable asks.jsonl to an empty list, so every answer to a real
+      // pending ask 404'd "no such ask" — telling the operator their question
+      // does not exist when the truth is that the log could not be opened. The
+      // GET route propagates this deliberately; the POST route must not
+      // contradict it. (P20 MAJOR.)
+      if (known.degraded) {
+        console.error("[walkie] ask log degraded, refusing to answer:", known.degraded);
+        return c.json({ error: "could not read the ask log; please try again" }, 503);
+      }
+      if (!known.entries.some((a) => a.id === body.id)) {
         return c.json({ error: "no such ask" }, 404);
       }
       try {

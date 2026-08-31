@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.." || exit 2
 SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=15
+EXPECTED_MUTANTS=23
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -111,8 +111,9 @@ I=apps/api/src/index.ts
 
 echo "durability — the write must leave the process, and reach the platter"
 mutate "the append is buffered and never written" "$A" \
-  'fs.writeSync(fd, `${JSON.stringify(record)}\n`);
-    fs.fsyncSync(fd);' 'void record;' "survives a process restart"
+  '    let written = 0;' \
+  '    let written = line.length;' \
+  "survives a process restart"
 mutate "fsync removed (page cache only)" "$A" \
   '    fs.fsyncSync(fd);
 ' '' "fsync"
@@ -158,10 +159,58 @@ mutate "auth check inverted to fail open" "$S" \
 
 echo "answer semantics"
 mutate "unknown id silently accepted" "$S" \
-  '      if (!known.some((a) => a.id === body.id)) {' '      if (false) {' "unknown id"
-mutate "degraded flag swallowed" "$S" \
-  '      return c.json(degraded ? { asks: entries, degraded } : { asks: entries });' \
-  '      return c.json({ asks: entries });' "could not look"
+  '      if (!known.entries.some((a) => a.id === body.id)) {' '      if (false) {' "unknown id"
+mutate "degraded flag swallowed on GET" "$S" \
+  '        asks: page,
+        total: entries.length,
+        ...(truncated ? { truncated: true } : {}),
+        ...(degraded ? { degraded } : {}),' \
+  '        asks: page,
+        total: entries.length,
+        ...(truncated ? { truncated: true } : {}),' \
+  "could not look"
+
+echo "P20 findings — each of these shipped once"
+# NOTE: mutate `written += n` and NOT the `n <= 0` guard. Removing that guard makes
+# a zero-byte write spin forever, so the mutant hangs the sweep instead of failing
+# it — a mutant that never terminates is as useless as one that survives. This
+# replacement reproduces the ORIGINAL defect exactly (assume the write completed)
+# and terminates.
+mutate "short write silently ignored — the count is assumed, not read" "$A" \
+  '      written += n;' \
+  '      written = line.length;' \
+  "every byte of the record reaches the file"
+
+mutate "dedupe moved back before the thread filter" "$A" \
+  '    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;
+
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);' \
+  '    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    if (opts?.threadId !== undefined && threadId !== opts.threadId) continue;' \
+  "do not mask each other"
+mutate "options cast instead of validated" "$A" \
+  '      ...(options.length > 0 ? { options } : {}),' \
+  '      ...(Array.isArray(a.options) ? { options: a.options as AskOption[] } : {}),' \
+  "malformed options"
+mutate "degraded overwrites instead of accumulating" "$A" \
+  '    if (!problems.includes(m)) problems.push(m);' \
+  '    problems.length = 0; problems.push(m);' \
+  "reports BOTH"
+mutate "production fsync replaced by a no-op" "$A" \
+  'export const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync, closeSync };' \
+  'export const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync: () => {}, closeSync };' \
+  "real syscalls"
+mutate "result bound removed" "$S" \
+  '      const page = entries.slice(0, limit);' '      const page = entries;' \
+  "bounded"
+mutate "answer length cap removed" "$S" \
+  '      if (body.answer.length > MAX_ANSWER_CHARS) {' '      if (false) {' \
+  "oversized answer"
+mutate "degraded dropped on POST, unreadable log becomes 404" "$S" \
+  '      if (known.degraded) {' '      if (false) {' \
+  "never .no such ask"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

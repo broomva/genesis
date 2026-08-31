@@ -239,3 +239,56 @@ describe("the two stores stay separate", () => {
     expect(existsSync(join(dir, "answers.jsonl"))).toBe(true);
   });
 });
+
+describe("findings from the P20 review", () => {
+  test("GET /walkie/asks is bounded, and says when it truncated", async () => {
+    // 100k asks returned a 16.2 MB body; the sibling /admin/voice/queue capped
+    // at 200 over the same record count.
+    const { app, log } = configured();
+    for (let i = 0; i < 120; i++) log.append(ask({ id: `a-${i}` }));
+    const body = (await (await get(app, "/walkie/asks", H)).json()) as {
+      asks: unknown[];
+      total: number;
+      truncated?: boolean;
+    };
+    expect(body.asks).toHaveLength(50);
+    expect(body.total).toBe(120);
+    expect(body.truncated).toBe(true);
+  });
+
+  test("limit is honoured and capped", async () => {
+    const { app, log } = configured();
+    for (let i = 0; i < 300; i++) log.append(ask({ id: `a-${i}` }));
+    expect(
+      ((await (await get(app, "/walkie/asks?limit=10", H)).json()) as { asks: unknown[] }).asks,
+    ).toHaveLength(10);
+    // Above the cap, the cap wins.
+    expect(
+      ((await (await get(app, "/walkie/asks?limit=99999", H)).json()) as { asks: unknown[] }).asks,
+    ).toHaveLength(200);
+  });
+
+  test("an oversized answer is refused, not appended", async () => {
+    const { app, log } = configured();
+    log.append(ask());
+    const huge = "x".repeat(5000);
+    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: huge }), H);
+    expect(r.status).toBe(413);
+    // and it stayed pending
+    expect((await asksOf(await get(app, "/walkie/asks", H)))[0]?.status).toBe("pending");
+  });
+
+  test("an unreadable log is a 503, never 'no such ask'", async () => {
+    // Dropping `degraded` here made an unreadable asks.jsonl collapse to an
+    // empty list, so answering a REAL pending ask returned 404 "no such ask" —
+    // telling the operator their question does not exist.
+    const { app, log } = configured();
+    log.append(ask());
+    const { chmodSync } = await import("node:fs");
+    chmodSync(join(dir, "asks.jsonl"), 0o000);
+    const r = await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H);
+    chmodSync(join(dir, "asks.jsonl"), 0o644);
+    expect(r.status).toBe(503);
+    expect(r.status).not.toBe(404);
+  });
+});

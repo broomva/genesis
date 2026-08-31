@@ -21,10 +21,18 @@
 // is injected.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type DurableFs, createAskLog } from "./ask-log";
+import { type DurableFs, REAL_FS, createAskLog } from "./ask-log";
 
 let dir: string;
 let calls: string[];
@@ -73,6 +81,11 @@ describe("every append reaches the platter, not just the page cache", () => {
 
   test("fsync happens BEFORE close — closing a fd does not flush", () => {
     createAskLog(dir, spy()).append(ask);
+    // PRESENCE FIRST. `indexOf` returns -1 for a missing element and -1 is less
+    // than every real index, so the ordering assertion alone passed when there
+    // was NO fsync at all. Asserted vacuously in exactly the way this file was
+    // written to prevent. (P20 MINOR.)
+    expect(calls).toContain("fsync:42");
     expect(calls.indexOf("fsync:42")).toBeLessThan(calls.indexOf("close:42"));
   });
 
@@ -102,5 +115,42 @@ describe("every append reaches the platter, not just the page cache", () => {
     // The throw propagates — the ask log's failure policy is the voice queue's —
     // and the descriptor is still released.
     expect(calls).toContain("close:42");
+  });
+});
+
+/**
+ * The seam tests what is injected. Production uses the DEFAULT.
+ *
+ * Every assertion above passes with `REAL_FS.fsyncSync` replaced by a no-op —
+ * measured: the full suite stayed at 1658 pass, 0 fail, byte-identical to
+ * baseline, while production stopped fsyncing entirely. The injected spy proves
+ * `durableAppend` calls whatever it is handed in the right order; it says
+ * nothing about what the shipping path is handed.
+ *
+ * A behavioural assertion is not available — no userspace observation
+ * distinguishes a real fsync from a no-op. So this pins IDENTITY: the production
+ * ops must BE the node:fs syscalls, not merely have their shape. Swap any one
+ * for a stub, a wrapper or a logger and this fails.
+ */
+describe("the production default is the real syscalls, not a lookalike", () => {
+  test("REAL_FS is exactly node:fs", () => {
+    expect(REAL_FS.openSync).toBe(openSync);
+    expect(REAL_FS.writeSync).toBe(writeSync);
+    expect(REAL_FS.fsyncSync).toBe(fsyncSync);
+    expect(REAL_FS.closeSync).toBe(closeSync);
+  });
+
+  test("createAskLog uses REAL_FS when nothing is injected", () => {
+    // Identity above is worthless if the default parameter points elsewhere.
+    // Written for real, on disk, with no spy — if the default were a stub that
+    // wrote nothing, the file would not exist.
+    const d = mkdtempSync(join(tmpdir(), "ask-real-"));
+    try {
+      createAskLog(d).append({ ...ask, id: "real-1" });
+      const raw = readFileSync(join(d, "asks.jsonl"), "utf8");
+      expect(JSON.parse(raw.trim()).id).toBe("real-1");
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });
