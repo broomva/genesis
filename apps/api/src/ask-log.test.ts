@@ -201,13 +201,19 @@ describe("findings from the P20 review", () => {
     // nothing about the bytes, and the mutation sweep caught it surviving.
     // So it reassembles what the spy actually received.
     let first = true;
-    const wrote: string[] = [];
+    // BYTE-HONEST, and that is the whole point of this spy. The previous version
+    // took a string and returned `str.length` — UTF-16 CODE UNITS — which is
+    // exactly the confusion the code under test had. An instrument that shares
+    // the defect it is meant to detect cannot report it at any input, and this
+    // one could not: the loop it guards was silently corrupting every non-ASCII
+    // record and the test was green.
+    const wrote: Buffer[] = [];
     const shortFs: DurableFs = {
       openSync: () => 7,
-      writeSync: (_fd, str) => {
-        const n = first ? Math.floor(str.length / 2) : str.length;
+      writeSync: (_fd, data) => {
+        const n = first ? Math.floor(data.byteLength / 2) : data.byteLength;
         first = false;
-        wrote.push(str.slice(0, n));
+        wrote.push(Buffer.from(data.subarray(0, n)));
         return n;
       },
       fsyncSync: () => {},
@@ -215,12 +221,44 @@ describe("findings from the P20 review", () => {
     };
     const a = ask();
     createAskLog(dir, shortFs).append(a);
-    const assembled = wrote.join("");
+    const assembled = Buffer.concat(wrote).toString("utf8");
     expect(assembled).toBe(`${JSON.stringify(a)}\n`);
     // Specifically: it ends in a newline. That is the property whose absence
     // destroys the NEXT record.
     expect(assembled.endsWith("\n")).toBe(true);
     expect(wrote.length).toBeGreaterThan(1); // it really did take two writes
+  });
+
+  test("a NON-ASCII record survives a short write — bytes, not code units", () => {
+    // THE TEST THAT COULD NOT EXIST BEFORE. `writeSync` returns a BYTE count and
+    // the loop resumed with a UTF-16 CODE UNIT offset. Identical for ASCII, which
+    // is why every fixture here passed while the loop silently corrupted anything
+    // else. Measured against the old code with a byte-honest spy and a 10-byte
+    // short write:
+    //   "€€€ Wire €40.000 — approve?"  ->  "€€re €40.0 — appro?"
+    // 123 of 133 bytes, characters dropped from the MIDDLE of the operator's
+    // question — and still valid JSON, so the reader accepts it. Silent
+    // corruption, worse than the glued-line loss the loop exists to prevent.
+    const chunks: Buffer[] = [];
+    const tenBytesAtATime: DurableFs = {
+      openSync: () => 9,
+      writeSync: (_fd, data) => {
+        const n = Math.min(10, data.byteLength);
+        chunks.push(Buffer.from(data.subarray(0, n)));
+        return n;
+      },
+      fsyncSync: () => {},
+      closeSync: () => {},
+    };
+    const q = "€€€ Wire €40.000 — approve?";
+    createAskLog(dir, tenBytesAtATime).append(ask({ question: q }));
+    const assembled = Buffer.concat(chunks).toString("utf8");
+    // Round-trips as JSON AND carries the question verbatim. Asserting only that
+    // it parses would pass on a truncation that happened to stay valid.
+    expect(JSON.parse(assembled.trim())).toMatchObject({ question: q });
+    expect(Buffer.byteLength(assembled)).toBe(
+      Buffer.byteLength(`${JSON.stringify(ask({ question: q }))}\n`),
+    );
   });
 
   test("a write making no progress throws instead of spinning forever", () => {
@@ -285,15 +323,32 @@ describe("findings from the P20 review", () => {
     expect(e?.options).toEqual([{ label: "Yes" }, { label: "No", description: "d" }]);
   });
 
-  test("a non-string threadId is reachable by the value it is emitted as", () => {
-    // The filter compared the RAW value while the output coerced to "", so an
-    // entry appeared in the unfiltered list and was reachable by no ?thread=.
+  test('a non-string threadId is SKIPPED, not coerced to thread ""', () => {
+    // POLICY CHANGED DELIBERATELY, and this test used to pin the opposite.
+    //
+    // It was written for a real bug — the filter compared the RAW value while the
+    // output coerced to "", so an entry was visible unfiltered and reachable by no
+    // `?thread=`. The fix made both sides use the coerced value. That closed the
+    // reachability hole and opened a worse one: a record with no thread became a
+    // record in thread "", indistinguishable from a genuine one, and could then
+    // collide with a real ask under the same id without triggering the ambiguity
+    // rule. Reproduced through the real routes, an operator answering "Approve the
+    // staging rebuild?" recorded APPROVED against "Wire $40,000 to vendor X?".
+    //
+    // An ask that states no thread is UNROUTABLE — it cannot be shown in a thread
+    // and an answer to it cannot be attributed — so it is malformed, like a record
+    // with no id or no question, and it is skipped and counted rather than served
+    // under a fabricated thread. The reachability bug this test was written for
+    // cannot recur, because nothing unreachable is emitted at all.
     writeFileSync(
       join(dir, ASK_FILE),
       `${JSON.stringify({ id: "n", sessionId: "s", threadId: null, question: "q?", createdAt: "x" })}\n`,
     );
-    expect(readAsks(dir).entries[0]?.threadId).toBe("");
-    expect(readAsks(dir, { threadId: "" }).entries.map((e) => e.id)).toEqual(["n"]);
+    const r = readAsks(dir);
+    expect(r.entries).toHaveLength(0);
+    expect(r.degraded).toContain("1 ask record(s) skipped");
+    // And it is not hiding under the empty thread either.
+    expect(readAsks(dir, { threadId: "" }).entries).toHaveLength(0);
   });
 
   test("both journals unreadable reports BOTH, not just the last", () => {
@@ -396,7 +451,7 @@ describe("readAsks accounts for malformed records", () => {
     // half survives, because every other fixture is missing sessionId too.
     writeFileSync(
       join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "a1", sessionId: "s", question: "Q?" })}\n`,
+      `${JSON.stringify({ id: "a1", sessionId: "s", threadId: "t", question: "Q?" })}\n`,
     );
     expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
   });
@@ -404,7 +459,7 @@ describe("readAsks accounts for malformed records", () => {
   test("createdAt present, sessionId missing — still counted", () => {
     writeFileSync(
       join(dir, ASK_FILE),
-      `${JSON.stringify({ id: "a1", question: "Q?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+      `${JSON.stringify({ id: "a1", threadId: "t", question: "Q?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
     );
     expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
   });
@@ -419,7 +474,10 @@ describe("readAsks accounts for malformed records", () => {
   });
 
   test("a record missing BOTH sessionId and createdAt counts once, not twice", () => {
-    writeFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", question: "Q?" })}\n`);
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "a1", threadId: "t", question: "Q?" })}\n`,
+    );
     expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
   });
 
@@ -437,7 +495,7 @@ describe("readAsks accounts for malformed records", () => {
   test("both counters travel together, and the unreadable-file message survives", () => {
     writeFileSync(
       join(dir, ASK_FILE),
-      `${JSON.stringify({ question: "no id" })}\n${JSON.stringify({ id: "a2", question: "Q?" })}\n`,
+      `${JSON.stringify({ question: "no id" })}\n${JSON.stringify({ id: "a2", threadId: "t", question: "Q?" })}\n`,
     );
     writeFileSync(join(dir, ANSWER_FILE), "{}\n");
     chmodSync(join(dir, ANSWER_FILE), 0o000);

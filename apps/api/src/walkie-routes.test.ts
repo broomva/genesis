@@ -330,8 +330,13 @@ describe("a malformed record must not block answering a good ask", () => {
     const { app, log } = configured();
     log.append(ask({ id: "good" }));
     // One line no typed writer could produce — which is why no fixture in this
-    // file had ever produced it.
-    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "bad", question: "Q?" })}\n`);
+    // file had ever produced it. It states a thread, so it is SERVED and counted
+    // as incomplete; a record with no thread is skipped instead, which is a
+    // different message and a different test.
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "bad", threadId: "t", question: "Q?" })}\n`,
+    );
 
     const body = (await (await get(app, "/walkie/asks", H)).json()) as { degraded?: string };
     // The disclosure still happens...
@@ -903,5 +908,47 @@ describe("the four merge-risk findings", () => {
       expect(res.status).toBe(200);
       expect((await res.json()) as { asks: unknown[] }).toMatchObject({ asks: [], total: 1 });
     });
+  });
+
+  test("BLOCKER: a thread-less row must not absorb another thread's answer", async () => {
+    // THE REPRODUCTION, kept verbatim as a test so the regression is a failure
+    // rather than a rediscovery. Measured against the previous commit through
+    // these same routes:
+    //
+    //   asks.jsonl line 1: {"id":"tc-9","threadId":"t-alice",
+    //                       "question":"Wire $40,000 to vendor X?"}
+    //   asks.jsonl line 2: {"id":"tc-9","question":"Approve the staging rebuild?"}
+    //
+    //   GET  /walkie/asks?thread=            -> the REBUILD question, no ambiguous flag
+    //   POST {"id":"tc-9","answer":"APPROVED"} -> 200 recorded   (not 409)
+    //   GET  /walkie/asks?thread=t-alice     -> "Wire $40,000..." answer: "APPROVED"
+    //
+    // The operator approved a staging rebuild and authorised a $40,000 wire. The
+    // record was exempt from the ambiguity election by `hasThread` yet still
+    // served under a fabricated thread "" — two answers to "which thread is this
+    // record in". There is one answer now: a row that states no thread is
+    // malformed and is not served at all.
+    const { app, log } = configured();
+    log.append(ask({ id: "tc-9", threadId: "t-alice", question: "Wire $40,000 to vendor X?" }));
+    appendFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "tc-9", question: "Approve the staging rebuild?" })}\n`,
+    );
+
+    // The thread-less row is served to nobody, under any filter.
+    for (const q of ["", "?thread=", "?thread=t-alice"]) {
+      const body = await (await get(app, `/walkie/asks${q}`, H)).text();
+      expect(`${q}:${body.includes("staging rebuild")}`).toBe(`${q}:false`);
+    }
+
+    // Answering tc-9 reaches alice's ask — the only tc-9 that exists — and the
+    // question it lands against is the one the operator was shown.
+    expect(
+      (await post(app, "/walkie/answer", JSON.stringify({ id: "tc-9", answer: "APPROVED" }), H))
+        .status,
+    ).toBe(200);
+    const [e] = await asksOf(await get(app, "/walkie/asks?thread=t-alice&answered=1", H));
+    expect(e?.question).toBe("Wire $40,000 to vendor X?");
+    expect(e?.answer).toBe("APPROVED");
   });
 });

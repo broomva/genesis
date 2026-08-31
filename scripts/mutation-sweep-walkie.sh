@@ -43,7 +43,7 @@ SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=59
+EXPECTED_MUTANTS=58
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -336,13 +336,22 @@ echo "the 12 findings a focused review reproduced against the real system"
 # not the question gate exists. The gate is still load-bearing, for a DIFFERENT
 # input: a record that names a thread but no question. Two guards, two inputs, two
 # tests; a mutant pointed at the wrong one reports a verdict about the wrong thing.
+# HOISTED. The two `hasThread` mutants that used to sit here are gone with the
+# field: thread attribution is now decided once, at the parse gate, so there is one
+# thing to mutate instead of two that had to agree.
+mutate "a row that states no thread is served under a fabricated thread again" "$A" \
+  '    if (typeof a.threadId !== "string") {
+      skipped++;
+      continue;
+    }' \
+  '' \
+  "thread-less row must not absorb"
 mutate "a record with a thread but no question votes, and retracts a decision" "$A" \
   '    if (typeof a.question !== "string" || !a.question) {
       skipped++;
       continue;
-    }
-    parsed.push({' \
-  '    parsed.push({' \
+    }' \
+  '' \
   "naming a THREAD but no question must not retract"
 mutate "ambiguity is no longer surfaced per entry" "$A" \
   '      ...(ambiguous.has(a.id) ? { ambiguous: true as const } : {}),' '' \
@@ -407,13 +416,6 @@ mutate "GET stops exposing answers, which would make the 409 an escalation" "$S"
   "SAME credential can already read it"
 
 echo "the final round — four defects three review lenses found in the previous fix"
-mutate "a record naming no thread votes in the ambiguity election again" "$A" \
-  '    if (!a.hasThread) continue;' '' \
-  "with NO threadId must not retract"
-mutate "an explicit empty threadId stops counting as a thread" "$A" \
-  '      hasThread: typeof a.threadId === "string",' \
-  '      hasThread: typeof a.threadId === "string" && a.threadId.length > 0,' \
-  "EXPLICIT empty threadId still counts"
 mutate "an empty answer is accepted as a decision again" "$A" \
   '    typeof e.answer === "string" &&
     e.answer.length > 0 &&' \

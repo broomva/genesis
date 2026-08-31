@@ -110,7 +110,11 @@ export interface AskEntry extends Ask {
  *  vanished. The throw becomes the route's 503. */
 export interface DurableFs {
   openSync(path: string, flags: string): number;
-  writeSync(fd: number, s: string): number;
+  /** BYTES, not a string. `fs.writeSync` RETURNS a byte count, and the previous
+   *  signature took a string — so the resume offset and the loop bound were
+   *  UTF-16 code units while the count was bytes. Identical for ASCII, divergent
+   *  for everything else. Passing a Uint8Array makes the units agree by type. */
+  writeSync(fd: number, data: Uint8Array): number;
   fsyncSync(fd: number): void;
   closeSync(fd: number): void;
 }
@@ -120,7 +124,23 @@ export interface DurableFs {
 export const REAL_FS: DurableFs = { openSync, writeSync, fsyncSync, closeSync };
 
 function durableAppend(file: string, record: unknown, fs: DurableFs): void {
-  const line = `${JSON.stringify(record)}\n`;
+  // ENCODED ONCE, AND THE LOOP WORKS IN BYTES. `writeSync` returns a BYTE count;
+  // the previous version resumed with `line.slice(written)` and bounded on
+  // `line.length`, both of which are UTF-16 CODE UNITS. For ASCII the two agree
+  // and everything looked correct. For anything else they diverge, and a short
+  // write resumed at the wrong offset.
+  //
+  // Measured with a byte-honest spy and a 10-byte short write:
+  //   "€€€ Wire €40.000 — approve?"  ->  "€€re €40.0 — appro?"
+  // 123 of 133 bytes, characters dropped from the middle of the operator's
+  // question — and the result is still VALID JSON, so the reader accepts it.
+  // Silent corruption is worse than the glued-line loss this loop was written to
+  // prevent, because the survivor is plausible. The bound could also exit early
+  // (bytes counted against code units), which resurrects that glued line too.
+  //
+  // Neither the test nor the mutant could see any of it: both modelled writeSync
+  // as returning code units, so the instruments shared the code's own confusion.
+  const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
   const fd = fs.openSync(file, "a");
   try {
     // writeSync RETURNS A COUNT and POSIX write() is permitted to write fewer
@@ -134,11 +154,13 @@ function durableAppend(file: string, record: unknown, fs: DurableFs): void {
     // (P20 BLOCKER, reproduced under RLIMIT_FSIZE: writeSync returned 1024 for a
     // 2031-byte record and did not throw.)
     let written = 0;
-    while (written < line.length) {
-      const n = fs.writeSync(fd, line.slice(written));
+    while (written < line.byteLength) {
+      // `subarray`, not `slice`: a byte offset into the encoded buffer, so the
+      // resume position is in the same unit as the returned count.
+      const n = fs.writeSync(fd, line.subarray(written));
       // A zero-byte write makes no progress; looping would spin forever.
       if (n <= 0)
-        throw new Error(`short write to ${file}: wrote ${written} of ${line.length} bytes`);
+        throw new Error(`short write to ${file}: wrote ${written} of ${line.byteLength} bytes`);
       written += n;
     }
     fs.fsyncSync(fd);
@@ -318,7 +340,6 @@ export function readAsks(
   interface ParsedAsk {
     readonly id: string;
     readonly question: string;
-    readonly hasThread: boolean;
     readonly threadId: string;
     readonly raw: Record<string, unknown>;
   }
@@ -338,19 +359,34 @@ export function readAsks(
       skipped++;
       continue;
     }
+    // A RECORD THAT STATES NO THREAD IS MALFORMED, not a record in thread "".
+    //
+    // This is the ONE answer to "which thread is this record in", and the defect
+    // it closes is that the module used to give two. `hasThread` exempted such a
+    // record from the ambiguity election while the coerced "" still served it and
+    // matched `?thread=` — so it collided with nothing and was shown as its own
+    // ask. Reproduced through the real routes: with a genuine ask
+    // `{"id":"tc-9","threadId":"t-alice","question":"Wire $40,000 to vendor X?"}`
+    // and a thread-less `{"id":"tc-9","question":"Approve the staging rebuild?"}`,
+    // an operator answering the rebuild got 200 — and the wire was recorded as
+    // APPROVED. Two different questions, one id, no ambiguity flag, no 409.
+    //
+    // An ask with no thread is UNROUTABLE: walkie cannot show it in any thread and
+    // an answer to it cannot be attributed. Serving it under a fabricated thread
+    // was the fiction. It is skipped and counted, like a record with no id or no
+    // question — which is what it is.
+    //
+    // This is the fourth appearance of one invariant ("an id whose thread
+    // attribution is not unique must not carry an answer") and the previous three
+    // fixes each relocated the hole by one field. Hoisting the attribution to a
+    // single gate is what stops the next field from being the next round.
+    if (typeof a.threadId !== "string") {
+      skipped++;
+      continue;
+    }
     parsed.push({
       id: a.id,
       question: a.question,
-      // WHETHER A THREAD WAS STATED AT ALL, kept separate from the coerced value
-      // below. A missing threadId becomes "" for serving, and treating that ""
-      // as a thread NAME is what left the retraction blocker one key short: the
-      // fix required id AND question, so `{"id":"a1"}` stopped voting — and
-      // `{"id":"a1","question":"x"}` still permanently retracted a recorded
-      // decision, because its absent thread coerced to "" and counted as a
-      // second one. A record that names no thread cannot be attributed to a
-      // thread, so it cannot establish that an id spans two. Same principle as
-      // the malformed records above, one field along.
-      hasThread: typeof a.threadId === "string",
       // Compared as the COERCED value, not the raw one: a non-string threadId is
       // emitted as "" below, so filtering on the raw value made an entry visible
       // in the unfiltered list yet unreachable by any ?thread= value.
@@ -361,7 +397,6 @@ export function readAsks(
 
   const threadsById = new Map<string, Set<string>>();
   for (const a of parsed) {
-    if (!a.hasThread) continue;
     const set = threadsById.get(a.id);
     if (set) set.add(a.threadId);
     else threadsById.set(a.id, new Set([a.threadId]));

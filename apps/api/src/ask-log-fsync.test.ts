@@ -44,9 +44,11 @@ const spy = (): DurableFs => ({
     calls.push("open");
     return 42;
   },
-  writeSync: (_fd, s) => {
-    calls.push(`write:${s.trim()}`);
-    return s.length;
+  writeSync: (_fd, data) => {
+    // Bytes in, bytes out — the spy must not reintroduce the code-unit confusion
+    // the loop under test was fixed for.
+    calls.push(`write:${Buffer.from(data).toString("utf8").trim()}`);
+    return data.byteLength;
   },
   fsyncSync: (fd) => {
     calls.push(`fsync:${fd}`);
