@@ -337,3 +337,129 @@ describe("answeredAt is typed, not trusted", () => {
     );
   });
 });
+
+// A malformed ask must not be indistinguishable from no ask. This whole block
+// exists because DOGFOODING found what the suite could not: every fixture above
+// is built by `append`, which is typed, so no test in this file could ever
+// produce a record with a missing field. Hand-writing one through the live route
+// did — it came back as a well-formed ask with `createdAt: ""`, `degraded`
+// absent. (P11 — BRO-2387.)
+describe("readAsks accounts for malformed records", () => {
+  test("a record with no id is counted, not silently dropped", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ sessionId: "s", threadId: "t", question: "Q?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const r = readAsks(dir);
+    expect(r.entries).toHaveLength(0);
+    // The COUNT is the assertion, not merely "degraded is set": a message that
+    // does not name how many records vanished cannot be acted on.
+    expect(r.degraded).toContain("1 ask record(s) skipped");
+  });
+
+  test("a record with no question is counted", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "a1", sessionId: "s", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    expect(readAsks(dir).degraded).toContain("1 ask record(s) skipped");
+  });
+
+  test("the count is the number of bad records, not a boolean", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ question: "A?" })}\n${JSON.stringify({ question: "B?" })}\n${JSON.stringify({ question: "C?" })}\n`,
+    );
+    // Mutating `skipped++` to `skipped = 1` must fail here. With a boolean
+    // `degraded` flag it would not.
+    expect(readAsks(dir).degraded).toContain("3 ask record(s) skipped");
+  });
+
+  test("the exact shape dogfooding produced: askedAt instead of createdAt", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "ask-1", threadId: "t-alpha", question: "Ship or hold?", askedAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const r = readAsks(dir);
+    // STILL SERVED. Dropping it would turn a partial write into an absent ask,
+    // which is the worse failure — the operator would never see the question.
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0]?.createdAt).toBe("");
+    // ...but the client is told the record was incomplete.
+    expect(r.degraded).toContain("1 ask record(s) missing sessionId or createdAt");
+  });
+
+  test("sessionId present, createdAt missing — still counted", () => {
+    // The two halves of the incomplete check must be INDEPENDENTLY killable.
+    // With only this and the both-missing case, a mutant deleting the createdAt
+    // half survives, because every other fixture is missing sessionId too.
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "a1", sessionId: "s", question: "Q?" })}\n`,
+    );
+    expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
+  });
+
+  test("createdAt present, sessionId missing — still counted", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ id: "a1", question: "Q?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
+  });
+
+  test("a line that is valid JSON but not an object is counted", () => {
+    // `"hello"` and `42` parse fine and reach the loop as non-objects. Before
+    // this they hit a bare `continue`.
+    writeFileSync(join(dir, ASK_FILE), '"hello"\n42\nnull\n');
+    const r = readAsks(dir);
+    expect(r.entries).toHaveLength(0);
+    expect(r.degraded).toContain("3 ask record(s) skipped");
+  });
+
+  test("a record missing BOTH sessionId and createdAt counts once, not twice", () => {
+    writeFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "a1", question: "Q?" })}\n`);
+    expect(readAsks(dir).degraded).toContain("1 ask record(s) missing");
+  });
+
+  test("a well-formed log reports NOTHING degraded", () => {
+    // The negative control. Without this the two counters could fire on every
+    // read and every assertion above would still pass.
+    const log = createAskLog(dir);
+    log.append(ask());
+    log.append(ask({ id: "ask-2" }));
+    const r = readAsks(dir);
+    expect(r.entries).toHaveLength(2);
+    expect(r.degraded).toBeUndefined();
+  });
+
+  test("both counters travel together, and the unreadable-file message survives", () => {
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ question: "no id" })}\n${JSON.stringify({ id: "a2", question: "Q?" })}\n`,
+    );
+    writeFileSync(join(dir, ANSWER_FILE), "{}\n");
+    chmodSync(join(dir, ANSWER_FILE), 0o000);
+    const d = readAsks(dir).degraded ?? "";
+    chmodSync(join(dir, ANSWER_FILE), 0o644);
+    // Accumulation, not overwrite — the property the earlier `degraded = m` bug
+    // broke. All three problems must be present in one string.
+    expect(d).toContain("answers.jsonl could not be read");
+    expect(d).toContain("1 ask record(s) skipped");
+    expect(d).toContain("1 ask record(s) missing");
+  });
+
+  test("a filtered read still reports records the filter never reached", () => {
+    // A malformed record has no trustworthy threadId, so it is counted BEFORE
+    // the thread filter. Over-reporting is the safe direction: a client asking
+    // about one thread is told the log is incomplete rather than shown a clean
+    // partial view.
+    writeFileSync(
+      join(dir, ASK_FILE),
+      `${JSON.stringify({ question: "no id" })}\n${JSON.stringify({ id: "a2", sessionId: "s", threadId: "t-alpha", question: "Q?", createdAt: "2026-08-31T12:00:00.000Z" })}\n`,
+    );
+    const r = readAsks(dir, { threadId: "t-alpha" });
+    expect(r.entries).toHaveLength(1);
+    expect(r.degraded).toContain("1 ask record(s) skipped");
+  });
+});

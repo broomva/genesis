@@ -9,10 +9,10 @@
 // this app returns for every unknown path.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Ask, createAskLog } from "./ask-log";
+import { ANSWER_FILE, ASK_FILE, type Ask, createAskLog } from "./ask-log";
 import { build } from "./server";
 
 const SECRET = "walkie-test-secret";
@@ -318,5 +318,58 @@ describe("the body is bounded before it is parsed", () => {
     expect(
       (await post(app, "/walkie/answer", JSON.stringify({ id: "ask-1", answer: "Yes" }), H)).status,
     ).toBe(200);
+  });
+});
+
+// The regression a live server found and 1689 unit tests did not: widening what
+// `degraded` covers made POST refuse on a malformed RECORD, not just an
+// unreadable FILE — so one bad line in an append-only journal blocked answering
+// every other ask, permanently. (BRO-2387, P11.)
+describe("a malformed record must not block answering a good ask", () => {
+  test("POST succeeds while the log reports malformed records", async () => {
+    const { app, log } = configured();
+    log.append(ask({ id: "good" }));
+    // One line no typed writer could produce — which is why no fixture in this
+    // file had ever produced it.
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "bad", question: "Q?" })}\n`);
+
+    const body = (await (await get(app, "/walkie/asks", H)).json()) as { degraded?: string };
+    // The disclosure still happens...
+    expect(body.degraded).toContain("missing sessionId or createdAt");
+
+    // ...and the answer still lands. 503 here is the regression.
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    expect(res.status).toBe(200);
+  });
+
+  test("an unreadable answers.jsonl also refuses — status quo, now pinned", async () => {
+    // Before this change POST refused on `degraded`, which EITHER journal could
+    // set. Narrowing `unreadable` to asks.jsonl would be a behaviour change
+    // smuggled in under a malformed-record fix, so it is not narrowed — and this
+    // test is why that is a decision rather than an accident. An answers.jsonl
+    // that cannot be read makes every answered ask render as pending: a
+    // plausible-looking backlog, which is the worse of the two read failures.
+    const { app, log } = configured();
+    log.append(ask({ id: "good" }));
+    log.answer({ id: "other", answer: "x", answeredAt: "2026-08-31T12:00:00.000Z" });
+    // WRITE-ONLY (0o222), not 0o000. With no write bit the append itself throws
+    // and the route 503s from its catch, so the assertion passes without the
+    // read check ever mattering — the mutation sweep caught exactly that: the
+    // first version of this test SURVIVED the mutant it was written to kill.
+    chmodSync(join(dir, ANSWER_FILE), 0o222);
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    chmodSync(join(dir, ANSWER_FILE), 0o644);
+    expect(res.status).toBe(503);
+  });
+
+  test("POST still refuses when a FILE cannot be read", async () => {
+    // The negative control. Without it the fix above could have deleted the
+    // refusal outright and the test above would still pass.
+    const { app, log } = configured();
+    log.append(ask({ id: "good" }));
+    chmodSync(join(dir, ASK_FILE), 0o000);
+    const res = await post(app, "/walkie/answer", JSON.stringify({ id: "good", answer: "yes" }), H);
+    chmodSync(join(dir, ASK_FILE), 0o644);
+    expect(res.status).toBe(503);
   });
 });

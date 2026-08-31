@@ -243,7 +243,7 @@ function readLines(dir: string, name: string, onDegraded: (msg: string) => void)
 export function readAsks(
   dir: string,
   opts?: { threadId?: string; includeAnswered?: boolean },
-): { entries: AskEntry[]; degraded?: string } {
+): { entries: AskEntry[]; degraded?: string; unreadable?: true } {
   // ACCUMULATED, not overwritten. `degraded = m` kept only the last failure, and
   // answers.jsonl is read first — so with both journals unreadable the ANSWERS
   // message was the one lost, which is the wrong one to drop: an unreadable
@@ -253,17 +253,60 @@ export function readAsks(
   const note = (m: string) => {
     if (!problems.includes(m)) problems.push(m);
   };
+  // TWO KINDS OF DEGRADATION, AND THEY MUST NOT BE ONE FLAG.
+  //
+  // A FILE that could not be opened makes the entry list untrustworthy as a
+  // whole: an ask that exists may be missing from it, so answering by id cannot
+  // distinguish "no such ask" from "could not look". POST /walkie/answer refuses
+  // on that, deliberately.
+  //
+  // A RECORD that is malformed does not have that property. It was read; the id
+  // lookup is exactly as reliable as before. Collapsing the two — which the first
+  // version of this change did — made one bad line refuse every answer to every
+  // OTHER ask, forever, because this journal is append-only and nothing compacts
+  // it. Caught by dogfooding a live server, with 1689 tests and 31/31 mutants
+  // green; no unit test in this file had a reason to POST after a malformed read.
+  let unreadable: true | undefined;
+  const noteUnreadable = (m: string) => {
+    unreadable = true;
+    note(m);
+  };
 
   const answers = new Map<string, RawAnswer>();
-  for (const v of readLines(dir, ANSWER_FILE, note)) if (isAnswer(v)) answers.set(v.id, v);
+  for (const v of readLines(dir, ANSWER_FILE, noteUnreadable))
+    if (isAnswer(v)) answers.set(v.id, v);
 
   const seen = new Set<string>();
   const entries: AskEntry[] = [];
-  for (const v of readLines(dir, ASK_FILE, note)) {
-    if (!v || typeof v !== "object") continue;
+  // MALFORMED RECORDS ARE COUNTED, NOT SILENTLY DROPPED. `degraded` exists so a
+  // read that could not see everything never renders as "nothing pending" — and a
+  // record skipped for a missing id, or served with its identity fields coerced
+  // to "", is that same failure one size down. Found by DOGFOODING, not by a
+  // test: an ask hand-written with `askedAt` instead of `createdAt` came back
+  // through the live route as a well-formed ask with `createdAt: ""`, no problem
+  // reported, so a client renders "Invalid Date" and nothing upstream says why.
+  // The tests all built their fixtures with `append`, which cannot emit that
+  // shape, so none of them could have caught it. (P11.)
+  //
+  // Counted rather than noted per record: the message must not grow with the
+  // journal, and `note` dedupes by exact string so per-record messages would
+  // collapse to one anyway and lose the magnitude.
+  let skipped = 0;
+  let incomplete = 0;
+  for (const v of readLines(dir, ASK_FILE, noteUnreadable)) {
+    if (!v || typeof v !== "object") {
+      skipped++;
+      continue;
+    }
     const a = v as Record<string, unknown>;
-    if (typeof a.id !== "string" || !a.id) continue;
-    if (typeof a.question !== "string" || !a.question) continue;
+    if (typeof a.id !== "string" || !a.id) {
+      skipped++;
+      continue;
+    }
+    if (typeof a.question !== "string" || !a.question) {
+      skipped++;
+      continue;
+    }
 
     // FILTER BEFORE DEDUPE. The reverse order made the dedupe key global while
     // the visible universe was per-thread, so two asks sharing an id in
@@ -295,6 +338,18 @@ export function readAsks(
         })
       : [];
 
+    // Served, but ACCOUNTED FOR. Dropping the record would turn a partial write
+    // into an absent ask, which is the worse of the two failures; coercing in
+    // silence tells the client the ask is fine. So: serve it, and say so.
+    if (
+      typeof a.sessionId !== "string" ||
+      !a.sessionId ||
+      typeof a.createdAt !== "string" ||
+      !a.createdAt
+    ) {
+      incomplete++;
+    }
+
     const ans = answers.get(a.id);
     if (ans && opts?.includeAnswered !== true) continue;
 
@@ -317,5 +372,11 @@ export function readAsks(
       ...(ans?.answeredAt ? { answeredAt: ans.answeredAt } : {}),
     });
   }
-  return problems.length > 0 ? { entries, degraded: problems.join("; ") } : { entries };
+  if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);
+  if (incomplete > 0) note(`${incomplete} ask record(s) missing sessionId or createdAt`);
+  return {
+    entries,
+    ...(problems.length > 0 ? { degraded: problems.join("; ") } : {}),
+    ...(unreadable ? { unreadable } : {}),
+  };
 }

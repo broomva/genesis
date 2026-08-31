@@ -531,8 +531,15 @@ export function build(opts: BuildOpts) {
       // does not exist when the truth is that the log could not be opened. The
       // GET route propagates this deliberately; the POST route must not
       // contradict it. (P20 MAJOR.)
-      if (known.degraded) {
-        console.error("[walkie] ask log degraded, refusing to answer:", known.degraded);
+      // `unreadable`, NOT `degraded`. A FILE that could not be opened means the
+      // id lookup below cannot tell "no such ask" from "could not look", so it
+      // must refuse. A malformed RECORD does not: it was read, and the lookup is
+      // as reliable as ever. Gating on the broader flag made a single bad line
+      // refuse every answer to every other ask permanently — this journal is
+      // append-only and nothing compacts it, so that state never clears. Found
+      // by dogfooding, after the unit suite and the mutation sweep both passed.
+      if (known.unreadable) {
+        console.error("[walkie] ask log unreadable, refusing to answer:", known.degraded);
         return c.json({ error: "could not read the ask log; please try again" }, 503);
       }
       if (!known.entries.some((a) => a.id === body.id)) {

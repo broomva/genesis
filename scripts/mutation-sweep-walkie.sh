@@ -37,7 +37,7 @@ cd "$(dirname "$0")/.." || exit 2
 SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts)
 SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=26
+EXPECTED_MUTANTS=34
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -215,8 +215,28 @@ mutate "answer length cap removed" "$S" \
   '      if (body.answer.length > MAX_ANSWER_CHARS) {' '      if (false) {' \
   "oversized answer"
 mutate "degraded dropped on POST, unreadable log becomes 404" "$S" \
-  '      if (known.degraded) {' '      if (false) {' \
+  '      if (known.unreadable) {' '      if (false) {' \
   "never .no such ask"
+# The three below are the split between "a FILE could not be read" and "a RECORD
+# was malformed". Conflating them is not hypothetical: it is what the first
+# version of the malformed-record change did, and a live server was the only
+# thing that noticed.
+mutate "POST gates on degraded again — one bad line blocks every answer" "$S" \
+  '      if (known.unreadable) {' '      if (known.degraded) {' \
+  "POST succeeds while the log reports malformed records"
+mutate "the unreadable flag is never set" "$A" \
+  '  const noteUnreadable = (m: string) => {
+    unreadable = true;
+    note(m);
+  };' \
+  '  const noteUnreadable = (m: string) => {
+    note(m);
+  };' \
+  "POST still refuses when a FILE cannot be read"
+mutate "the answers file no longer reports its own unreadability" "$A" \
+  'for (const v of readLines(dir, ANSWER_FILE, noteUnreadable))' \
+  'for (const v of readLines(dir, ANSWER_FILE, note))' \
+  "unreadable answers.jsonl also refuses"
 
 mutate "answeredAt type check removed" "$A" \
   '    (e.answeredAt === undefined || typeof e.answeredAt === "string")' \
@@ -226,10 +246,48 @@ mutate "pre-parse body guard removed" "$S" \
   '      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {' \
   '      if (false) {' \
   "Content-Length is 413"
+# ANCHOR REPAIRED, and how it broke is the point. `biome check --write --unsafe`
+# collapsed this boot line's string concat into one template literal, so the
+# anchor stopped matching — and the commit that did it still claimed "26 mutants,
+# 0 survivors", because that number was measured BEFORE the formatter ran. The
+# anchor guard is the only reason this is a caught error rather than a silent
+# false pass. A formatter is a code change.
 mutate "the producer-gap caveat removed from the boot line" "$I" \
-  '      "(routes live; no producer yet — asks are not written by anything)",' \
-  '      "",' \
+  '${join(askLogDir, "asks.jsonl")} (routes live; no producer yet — asks are not written by anything)`,' \
+  '${join(askLogDir, "asks.jsonl")}`,' \
   "no producer"
+
+echo "malformed-record accounting — silence must not mean 'nothing pending'"
+mutate "the skipped-record message is never emitted" "$A" \
+  '  if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);' \
+  '' \
+  "a record with no id is counted"
+mutate "the incomplete-record message is never emitted" "$A" \
+  '  if (incomplete > 0) note(`${incomplete} ask record(s) missing sessionId or createdAt`);' \
+  '' \
+  "askedAt instead of createdAt"
+mutate "the count degrades to a boolean" "$A" \
+  '  if (skipped > 0) note(`${skipped} ask record(s) skipped: no usable id or question`);' \
+  '  if (skipped > 0) note("1 ask record(s) skipped: no usable id or question");' \
+  "the count is the number of bad records"
+mutate "the incomplete check loses its createdAt half" "$A" \
+  '    if (
+      typeof a.sessionId !== "string" ||
+      !a.sessionId ||
+      typeof a.createdAt !== "string" ||
+      !a.createdAt
+    ) {' \
+  '    if (typeof a.sessionId !== "string" || !a.sessionId) {' \
+  "createdAt missing"
+mutate "a non-object line goes back to a bare continue" "$A" \
+  '    if (!v || typeof v !== "object") {
+      skipped++;
+      continue;
+    }' \
+  '    if (!v || typeof v !== "object") {
+      continue;
+    }' \
+  "not an object"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \
