@@ -11,7 +11,7 @@ import { resolve } from "node:path";
  * `normalizePhone` to a completely unrelated rule left it reporting 14 pass /
  * 0 fail (BRO-2422). Consolidation removes the drift class; this keeps it
  * removed, because the next copy was already scheduled — BRO-2389 adds a device
- * principal and its ticket says to write a third (in fact fifth) one.
+ * principal and its ticket says to write a third — it would have been the sixth.
  *
  * Two design notes, both learned from a gate that had to be rewritten four times:
  *
@@ -24,14 +24,32 @@ import { resolve } from "node:path";
  */
 const ROOT = resolve(import.meta.dir, "../../..");
 
-// Assembled so this file does not contain the literal it searches for.
-const NEEDLE = ["replace(/", "\\", "D/g"].join("");
+// Assembled so this file does not contain the literals it searches for.
+//
+// More than one spelling, because the first version scanned for exactly one and
+// a review demonstrated the negated-character-class form walking straight past
+// it. Spelling that form out in this comment is what made the scan match its own
+// prose on the next run — hence the assembly, and hence no literal here. This is
+// not a claim to catch every rewrite; it catches the forms people actually
+// write.
+const NEEDLES = [
+  ["replace(/", "\\", "D/g"].join(""),
+  ["replace(/[^", "0-9]/g"].join(""),
+  ["replace(/[^", "\\", "d]/g"].join(""),
+];
 
 /** The single legitimate home, relative to the repo root. */
 const HOME = "packages/identity/src/index.ts";
 
 function trackedTs(): string[] {
-  const out = Bun.spawnSync(["git", "ls-files", "--", "*.ts"], { cwd: ROOT }).stdout.toString();
+  // Every TypeScript extension, not just `.ts`. The first version scanned `*.ts`
+  // while its own docblock said a derived scan has no holes by omission — and it
+  // omitted apps/web's 54 tracked `.tsx` files, which is the app that already
+  // renders phone requests and is therefore the likeliest home for copy six.
+  const out = Bun.spawnSync(
+    ["git", "ls-files", "--", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs"],
+    { cwd: ROOT },
+  ).stdout.toString();
   return out
     .split("\n")
     .map((l) => l.trim())
@@ -48,10 +66,17 @@ describe("exactly one phone normalizer", () => {
     expect(files).toContain(HOME);
   });
 
+  test("the scan reaches apps/web, the likeliest home for the next copy", () => {
+    // Named explicitly because this is the hole the first version had: `*.ts`
+    // alone could not see a `.tsx` file.
+    expect(files.some((f) => f.startsWith("apps/web/") && f.endsWith(".tsx"))).toBe(true);
+  });
+
   test("POSITIVE CONTROL: the scan finds the implementation where it lives", () => {
     // If this fails, the needle no longer matches the real code and the
     // assertion below is proving nothing.
-    expect(readFileSync(`${ROOT}/${HOME}`, "utf8")).toContain(NEEDLE);
+    const home = readFileSync(`${ROOT}/${HOME}`, "utf8");
+    expect(NEEDLES.some((n) => home.includes(n))).toBe(true);
   });
 
   test("no other file carries a second copy", () => {
@@ -59,7 +84,8 @@ describe("exactly one phone normalizer", () => {
       .filter((f) => f !== HOME)
       .filter((f) => {
         try {
-          return readFileSync(`${ROOT}/${f}`, "utf8").includes(NEEDLE);
+          const body = readFileSync(`${ROOT}/${f}`, "utf8");
+          return NEEDLES.some((n) => body.includes(n));
         } catch {
           return false;
         }

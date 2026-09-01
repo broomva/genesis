@@ -37,7 +37,7 @@ describe("secretMatches — the voice surface's only gate", () => {
   });
 });
 
-describe("normalizeCallerId — must agree with the WhatsApp allowlist", () => {
+describe("normalizeCallerId — an alias of the one shared normalizer", () => {
   test("reduces every spelling of one number to one id", () => {
     for (const spelling of [
       "+57 301 775 8620",
