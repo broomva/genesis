@@ -40,6 +40,16 @@ API_PORT=${API_PORT:-8787}
 BOT_PORT=${BOT_PORT:-8788}
 WEBHOOK_PATH=${WEBHOOK_PATH:-/webhooks/kapso}
 
+# Renders a seconds gap as the largest sensible unit. "0d before its last source
+# commit" is what this replaced, which reads like the probe is broken.
+gap () {
+  local sec=$1
+  if   [ "$sec" -ge 172800 ]; then echo "$((sec / 86400))d"
+  elif [ "$sec" -ge 7200 ];   then echo "$((sec / 3600))h"
+  elif [ "$sec" -ge 120 ];    then echo "$((sec / 60))m"
+  else echo "${sec}s"; fi
+}
+
 TMPD=$(mktemp -d /tmp/deploy-probe.XXXXXX) || { echo "✗ could not create a temp dir"; exit 1; }
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -192,22 +202,57 @@ if systemctl --user cat genesis-api.service >/dev/null 2>&1 && [ -d "${REPO_DIR:
     behind=$(git -C "$RD" rev-list --count HEAD..origin/main 2>/dev/null || echo unknown)
     eq "checkout is at origin/main" "0 commits behind" "$behind commits behind"
 
-    # Process currency. A pull without a restart leaves the unit executing the
-    # code it loaded at start time, so the checkout can be perfectly current while
-    # the thing answering requests is not. Compare the unit's start to HEAD's
-    # commit time; older start = running pre-pull code.
-    started=$(systemctl --user show genesis-api.service -p ActiveEnterTimestamp --value 2>/dev/null)
-    started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
-    head_epoch=$(git -C "$RD" log -1 --format=%ct 2>/dev/null || echo 0)
-    if [ "$started_epoch" -eq 0 ] || [ "$head_epoch" -eq 0 ]; then
-      bad "genesis-api is running the checked-out commit" "comparable timestamps" \
-          "start=$started head=$head_epoch"
-    elif [ "$started_epoch" -ge "$head_epoch" ]; then
-      ok "genesis-api started after the checked-out commit"
-    else
-      bad "genesis-api is running the checked-out commit" \
-          "unit restarted after HEAD was committed" \
-          "unit started $(( (head_epoch - started_epoch) / 3600 ))h BEFORE HEAD — pulled, never restarted"
+    # Process currency, PER UNIT. The first version of this checked genesis-api
+    # only, and the deploy that motivated the whole check then produced the exact
+    # state it could not see: api restarted and CURRENT, bot and web still running
+    # code from 8 days earlier out of a checkout that had already moved. It would
+    # have reported "the host is running origin/main" — true of the checkout,
+    # false of two of the three things serving traffic.
+    #
+    # Compared against the last commit touching each unit's OWN paths rather than
+    # against HEAD, so a unit whose sources did not change is not reported stale.
+    # Over-reporting is the safer bias for a detector, but it is also the bias
+    # that gets detectors ignored.
+    #
+    # KNOWN LIMIT, stated rather than papered over: genesis-web serves a BUILT
+    # artifact (Next standalone). Restart time is a proxy for build time, so a
+    # restart without a rebuild reads as current here. The .next/standalone mtime
+    # is checked separately for that reason.
+    for unit_paths in "genesis-api:apps/api packages" \
+                      "genesis-bot:apps/chat-bot packages" \
+                      "genesis-web:apps/web packages"; do
+      unit=${unit_paths%%:*}
+      paths=${unit_paths#*:}
+      systemctl --user cat "$unit.service" >/dev/null 2>&1 || continue
+      started=$(systemctl --user show "$unit.service" -p ActiveEnterTimestamp --value 2>/dev/null)
+      started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
+      # shellcheck disable=SC2086
+      touched=$(git -C "$RD" log -1 --format=%ct -- $paths 2>/dev/null || echo 0)
+      if [ "$started_epoch" -eq 0 ] || [ "$touched" -eq 0 ]; then
+        bad "$unit is running its current sources" "comparable timestamps" \
+            "start=$started last-touch=$touched"
+      elif [ "$started_epoch" -ge "$touched" ]; then
+        ok "$unit started after the last commit touching its sources"
+      else
+        bad "$unit is running its current sources" \
+            "restarted after its sources last changed" \
+            "started $(gap $((touched - started_epoch))) before its last source commit — pulled, never restarted"
+      fi
+    done
+
+    # genesis-web serves a build, not the checkout. A rebuild that never happened
+    # is invisible to the restart check above.
+    SA="$RD/apps/web/.next/standalone"
+    if [ -d "$SA" ]; then
+      built=$(stat -c %Y "$SA" 2>/dev/null || echo 0)
+      web_touched=$(git -C "$RD" log -1 --format=%ct -- apps/web packages 2>/dev/null || echo 0)
+      if [ "$built" -ge "$web_touched" ] && [ "$built" -ne 0 ]; then
+        ok "apps/web standalone build is newer than its sources"
+      else
+        bad "apps/web standalone build is newer than its sources" \
+            "rebuilt after apps/web last changed" \
+            "build is $(gap $((web_touched - built))) older than its last source commit"
+      fi
     fi
   else
     bad "origin is reachable to assess freshness" "fetch succeeds" "fetch failed"

@@ -47,6 +47,33 @@ describe("deploy-probe freshness", () => {
     expect(section).toContain("log -1 --format=%ct");
   });
 
+  test("it checks EVERY unit, not just the api", () => {
+    // The first version checked genesis-api alone, and the deploy that motivated
+    // this whole check then produced the exact state it could not see: api
+    // restarted and current, bot and web still running code from 8 days earlier
+    // out of a checkout that had already moved. "The host is running origin/main"
+    // was true of the checkout and false of two of the three serving processes.
+    for (const unit of ["genesis-api", "genesis-bot", "genesis-web"]) {
+      expect(section).toContain(unit);
+    }
+  });
+
+  test("staleness is judged per unit against ITS OWN paths", () => {
+    // Comparing every unit to HEAD would report a unit stale whenever any other
+    // app changed. Over-reporting is the safer bias for a detector and also the
+    // bias that gets detectors ignored.
+    expect(section).toContain("apps/chat-bot");
+    expect(section).toContain("apps/web");
+    expect(section).toMatch(/log -1 --format=%ct -- \$paths/);
+  });
+
+  test("genesis-web is judged on its BUILD, not only its restart", () => {
+    // It serves a Next standalone artifact, so a restart without a rebuild would
+    // read as current from the process check alone.
+    expect(section).toContain(".next/standalone");
+    expect(section).toContain("standalone build is newer than its sources");
+  });
+
   test("off the deployed host it DECLINES rather than passing", () => {
     // Run from a laptop the git checkout in scope is the developer's, not the
     // deployment's. Measuring it would answer about the wrong machine in the
