@@ -319,7 +319,9 @@ export function build(opts: BuildOpts) {
   if (opts.extraArgs?.includes("--dangerously-skip-permissions") && !opts.token) {
     console.warn(
       "[genesis] WARNING: agent runs with --dangerously-skip-permissions and /message is unauthenticated. " +
-        "Bind to localhost only, or set GENESIS_TOKEN. (Phase 2 wires Better Auth.)",
+        "Set GENESIS_TOKEN. Binding to localhost helps against a tailnet or LAN caller but NOT against " +
+        "a Tailscale funnel, which forwards to localhost — if this host is funnelled, scope it to /voice. " +
+        "(Phase 2 wires Better Auth.)",
     );
   }
   // Self-serve workspace mutation (BRO-1629) with no token → POST/DELETE /workspaces
@@ -339,14 +341,17 @@ export function build(opts: BuildOpts) {
   // (commit+push to the owner's real remote); GET /workspaces/browse is a READ route
   // that discloses the host-FS layout UNDER the add-roots ($HOME) with absolute paths.
   // With no GENESIS_TOKEN, a direct :8787 caller (the on-box agent, or anything on the
-  // tailnet) bypasses the owner gate on both. Hard deployment invariant: bind :8787 to
-  // localhost + set GENESIS_TOKEN. (Both are still sandboxed — commit to the workspace,
+  // tailnet) bypasses the owner gate on both. Hard deployment invariant: SET
+  // GENESIS_TOKEN. Binding :8787 to localhost narrows the caller set but is not a
+  // substitute — a Tailscale funnel forwards TO localhost, so on a funnelled host
+  // it buys nothing. (Both are still sandboxed — commit to the workspace,
   // browse to the add-roots — so this is bypass-of-owner-gate, not arbitrary-FS.)
   if (!opts.token) {
     console.warn(
       "[genesis] WARNING: POST /workspaces/:id/git/commit (write) and GET /workspaces/browse " +
         "(host-FS-layout read) are owner-gated ONLY at the BFF. With no GENESIS_TOKEN a direct " +
-        ":8787 caller reaches both. Bind :8787 to localhost/tailnet-only and/or set GENESIS_TOKEN.",
+        ":8787 caller reaches both. Set GENESIS_TOKEN. Binding :8787 to localhost narrows the " +
+        "caller set but is NOT a substitute — a Tailscale funnel forwards to localhost.",
     );
   }
 
@@ -533,11 +538,16 @@ export function build(opts: BuildOpts) {
   // REACHABILITY — MEASURED, after being asserted twice in opposite directions.
   //
   // It was first claimed here that /walkie/* is not internet-reachable, on the
-  // strength of the comment at server.ts:100-103. Unverified. It was then
-  // "corrected" to the opposite — assume it IS reachable — on the strength of
-  // integrations/elevenlabs/README.md:46-49 and
-  // scripts/elevenlabs-provision.sh:31-32, which say to FUNNEL THE ROOT. Also
-  // unverified. Two confident claims, neither measured, pointing opposite ways.
+  // strength of this file's own /voice-prefix comment. Unverified. It was then
+  // "corrected" to the opposite — assume it IS reachable — on the strength of an
+  // earlier revision of the ElevenLabs README and provisioning script, which at
+  // the time instructed funnelling the root. Also unverified. Two confident
+  // claims, neither measured, pointing opposite ways.
+  //
+  // Those two files now say the opposite: BRO-2412 scoped the funnel to /voice.
+  // Written without line numbers on purpose — a present-tense citation into a
+  // sibling file, pinned to a line, is a stale-provenance generator, and this
+  // paragraph was itself stale for exactly that reason.
   //
   // Measured through the PUBLIC ingress: curl --resolve to the funnel's public
   // address, with %{remote_ip} confirming the request did not quietly take the
@@ -555,13 +565,19 @@ export function build(opts: BuildOpts) {
   // /voice path segment. As deployed today this surface is NOT reachable from
   // the public internet, and server.ts:100-103 is correct.
   //
-  // The hazard is a CONFIGURATION one, not a current exposure: this repo's own
-  // shipped instruction says to funnel the root, and following it publishes this
-  // surface with only the header check below in front of it. That is why the
-  // check is dedicated rather than the shared helper, why the secret is separate
-  // from voiceSecret, and why these responses are no-store — defence in depth
-  // against an instruction the repo already gives. (BRO-2412 states this
-  // backwards and needs correcting.)
+  // The hazard is a CONFIGURATION one, not a current exposure. The repo's
+  // instruction now scopes the funnel to /voice (BRO-2412, measured — see
+  // `scripts/funnel-scope-probe.sh`), so nothing shipped tells an operator to
+  // publish this surface. The dedicated check stays anyway, because an operator
+  // can still widen the funnel by hand and the shared helper fails OPEN on an
+  // unset token. That is also why the secret is separate from voiceSecret and
+  // why these responses are no-store.
+  //
+  // An earlier version of this paragraph asserted that "this repo's own shipped
+  // instruction says to funnel the root". That was true when written and this
+  // change made it false — a stale assertion about a sibling document is exactly
+  // the class BRO-2412 was filed about, so it is corrected here rather than left
+  // as a fourth incompatible account.
   //
   // TRANSPORT NOTE, because it constrains the client and must not be discovered
   // later: authorization is a REQUEST HEADER. `EventSource` cannot set headers —

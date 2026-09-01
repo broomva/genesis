@@ -42,10 +42,11 @@ cd "$(dirname "$0")/.." || exit 2
 SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts packages/projection/src/asks-raised.test.ts
        apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
-       apps/api/src/server.test.ts)
+       apps/api/src/server.test.ts
+       apps/api/src/deployment-claims.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=83
+EXPECTED_MUTANTS=85
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -544,6 +545,16 @@ mutate "a throwing store retires every ask" "$S" \
   '        console.error("[walkie] could not read sessions; asks not aged:", e);' \
   '        throw e;' \
   "throws ages NOTHING"
+
+echo "the deployment claims — a contradiction between two prose files is invisible to every other gate"
+mutate "the retracted bind-to-localhost mitigation comes back unqualified" apps/api/src/index.ts \
+  '"unauthenticated. Set GENESIS_TOKEN. Binding to localhost helps against a tailnet or LAN " +' \
+  '"unauthenticated. Bind to localhost only, or set GENESIS_TOKEN." +' \
+  "does not say bind-to-localhost is THE mitigation"
+mutate "the source stops stating the /voice model" "$S" \
+  'Funnel publishes exactly the' \
+  'Funnel publishes something like the' \
+  "says the funnel publishes the /voice prefix"
 
 echo "read mirrors — the client's own gate, and only reads (BRO-2417)"
 mutate "a mirror re-implements its body instead of sharing the twin's" "$S" \

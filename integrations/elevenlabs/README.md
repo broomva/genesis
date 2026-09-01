@@ -43,10 +43,72 @@ of every tool and agent.
 differ, every tool call returns 401 and the agent will sound like it is working
 while recording nothing.
 
-`GENESIS_PUBLIC_URL` is a base URL with no path and no trailing slash. A Tailscale
-funnel is the easy option — but do **not** use `--set-path`: it strips the prefix,
-so ElevenLabs calls `/voice/identify` and Genesis never sees that path. Funnel the
-root.
+`GENESIS_PUBLIC_URL` is a base URL with no path and no trailing slash.
+
+**Do not funnel the root.** Scope it to `/voice` on a dedicated port — and the
+port is not free: Tailscale Funnel listens only on **443, 8443 and 10000**. On
+this host 443 and 8443 are already taken, which is why the recipe says 10000.
+
+```sh
+tailscale funnel --bg --https=10000 --set-path=/voice http://127.0.0.1:8787/voice
+```
+
+Then `GENESIS_PUBLIC_URL=https://<host>.<tailnet>.ts.net:10000`.
+
+**One command, not two.** Since the v2 CLI, `funnel` *is* `serve` with
+`AllowFunnel` set — it establishes the mount and publishes it in the same call.
+There is no toggle form. `tailscale funnel --help` documents
+`funnel <target>` (plus `status` and `reset`) and no on/off form, and the pre-v2
+syntax is rejected outright with *"the CLI for
+serve and funnel has changed"*.
+
+An earlier revision of this file prescribed two commands: a `serve` line, then a
+second line attempting to switch the funnel on. That would have left the mount
+tailnet-only — the same "published nothing" failure it was written to fix. The
+removed command is described rather than quoted here on purpose: a shipped file
+should not carry a copy-pasteable command that does not work, and the guard in
+`deployment-claims.test.ts` reads command lines rather than prose precisely
+because a command is what an operator acts on.
+
+Confirmed against the host's own state rather than by parsing: `serve
+status --json` reports `AllowFunnel` true for `:10000` with a single `/voice`
+mount, which is what the one command above produces.
+
+**Why the target repeats `/voice`.** `--set-path=/voice` mounts the handler at
+`/voice` and STRIPS that prefix before forwarding — so with a bare
+`http://127.0.0.1:8787` target, `/voice/identify` arrives at Genesis as
+`/identify` and 404s. Naming `http://127.0.0.1:8787/voice` as the target re-joins
+it, and the round trip is `/voice/identify` → `/voice/identify`.
+
+An earlier version of this paragraph got that backwards twice: it concluded from
+the stripping that the root had to be funnelled, and a later revision claimed
+`--set-path` was not involved at all. `--set-path` is exactly the mechanism; what
+was missing was the prefix on the target.
+
+**Why the scope matters**, as consequence rather than preference: funnelling the
+root publishes *every* route on that port, including `POST /message`, which
+dispatches an agent turn — arbitrary command execution in a workspace. Those
+routes are gated by `unauthorized()`, which opens with `if (!opts.token) return
+false`, so on a deploy without `GENESIS_TOKEN` they authorize everyone.
+
+**Measured, and re-runnable:** `scripts/funnel-scope-probe.sh <host> [port]`.
+Run against the live host 2026-09-01, over public DNS pinned with `--resolve`:
+
+| request | code | bytes | who answered |
+|---|---|---|---|
+| `POST /voice/identify` | 401 | 24 | Genesis (`{"error":"unauthorized"}`) |
+| `POST /voice/request` | 401 | 24 | Genesis |
+| `POST /message/__scope_probe__` | 404 | **19** | **tailscaled** — declined at the funnel |
+| `POST /control/__scope_probe__` | 404 | **19** | tailscaled — declined |
+| `POST /workspaces/refresh/__scope_probe__` | 404 | **19** | tailscaled — declined |
+| `POST /walkie/asks/__scope_probe__` | 404 | **19** | tailscaled — declined |
+
+The byte count is the discriminator, not the status: Hono's 404 body is
+`404 Not Found` (13 bytes) and tailscaled's Go `http.NotFound` is
+`404 page not found` (19 bytes). A 19-byte 404 means the request never reached
+Genesis. The script also prints `remote_ip` per row, because MagicDNS resolves
+this hostname to the tailnet and a plain `curl` would measure the wrong path
+entirely — which has already happened here once.
 
 ## Why the prompt is written the way it is
 
