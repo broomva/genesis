@@ -81,7 +81,7 @@ export interface AskAnswer {
   readonly answeredAt: string;
 }
 
-export type AskStatus = "pending" | "answered";
+export type AskStatus = "pending" | "answered" | "stale";
 
 /** An ask joined with what became of it. */
 export interface AskEntry extends Ask {
@@ -484,4 +484,47 @@ export function readAsks(
     ...(problems.length > 0 ? { degraded: problems.join("; ") } : {}),
     ...(unreadable ? { unreadable } : {}),
   };
+}
+
+/** Mark asks whose session has moved on. (BRO-2415)
+ *
+ *  NOTHING EVER ENDED AN ASK EXCEPT AN ANSWER, so a turn that was reset,
+ *  interrupted, timed out, or simply finished left its ask `pending` forever — on
+ *  an append-only journal nothing compacts, ordered oldest-first, so the dead ones
+ *  accumulated AHEAD of the live ones and the real question was the one that fell
+ *  off the page.
+ *
+ *  DERIVED, NOT RECORDED, and that is the whole design. The obvious shape was a
+ *  third journal written on the edge OUT of `awaiting` — but that edge is exactly
+ *  what a crashed process never observes, so it would have left the same bug in
+ *  the case that matters most, plus a file and a status to maintain.
+ *
+ *  Session phase is already truthful instead. `reconcileInterruptedSessions`
+ *  (packages/core/src/reconcile.ts) runs at boot and resets every `running` OR
+ *  `awaiting` session to `blocked`, reasoning verbatim that "across a process
+ *  crash that session is dead, so a stored `awaiting` is exactly as stale as a
+ *  stored `running`". So the restart case is handled by machinery that already
+ *  exists and is already tested, and this needs no writes at all.
+ *
+ *  RESIDUAL, stated rather than hidden: a thread that raised an ask, had it
+ *  answered, and is now awaiting a NEWER ask will show the older one as live too —
+ *  phase is per session, not per turn, and an Ask carries no turn number. The
+ *  answered one is already excluded, so this only bites for two UNANSWERED asks in
+ *  one thread, which requires the agent to ask twice without the first being
+ *  answered. Fixing it means a turn number on the Ask, which is a producer change.
+ */
+export function markStale(
+  entries: readonly AskEntry[],
+  phaseOf: (threadId: string) => string | undefined,
+): AskEntry[] {
+  return entries.map((e) => {
+    if (e.status !== "pending") return e;
+    const phase = phaseOf(e.threadId);
+    // UNKNOWN IS NOT STALE. A thread with no session in the store yet — the
+    // producer appended before the session was persisted, or the store was
+    // replaced — must not have its ask silently retired. Absence of evidence is
+    // the one thing this whole file refuses to treat as evidence.
+    if (phase === undefined || phase === "awaiting") return e;
+    return { ...e, status: "stale" as const };
+  });
 }

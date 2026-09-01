@@ -13,7 +13,7 @@ import type { HostProvider } from "@genesis/host";
 import type { RunOptions, RunResult } from "@genesis/runner";
 import { type Context, Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
-import { type Ask, type AskAnswer, readAsks } from "./ask-log";
+import { type Ask, type AskAnswer, markStale, readAsks } from "./ask-log";
 import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
@@ -619,7 +619,7 @@ export function build(opts: BuildOpts) {
       c.header("Pragma", "no-cache");
     };
 
-    app.get("/walkie/asks", (c) => {
+    app.get("/walkie/asks", async (c) => {
       noStore(c);
       if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
       // `!== undefined`, not truthiness. `?thread=` (present, empty) returns "",
@@ -628,10 +628,44 @@ export function build(opts: BuildOpts) {
       // whole job is narrowing.
       const threadId = c.req.query("thread");
       const includeAnswered = c.req.query("answered") === "1";
-      const { entries, degraded } = readAsks(askLogDir, {
+      const { entries: raw, degraded } = readAsks(askLogDir, {
         ...(threadId !== undefined ? { threadId } : {}),
         includeAnswered,
       });
+
+      // STALE ASKS (BRO-2415). Nothing ever ended an ask except an answer, so a
+      // turn that was reset, interrupted, timed out or simply finished left its
+      // ask pending forever — accumulating AHEAD of the live ones, because the
+      // page is oldest-first.
+      //
+      // Derived from session phase rather than recorded, so a crashed process
+      // needs no edge it could never observe: `reconcileInterruptedSessions`
+      // already resets every orphaned `awaiting` to `blocked` at boot. See the
+      // note on markStale.
+      //
+      // ONE listSessions, not one lookup per ask: a page is up to 200 entries and
+      // this route is polled every 4s by the client.
+      const phases = new Map<string, string>();
+      try {
+        // `opts.store` is optional in BuildOpts, and an absent store is not an
+        // absent session — it is no knowledge at all. markStale treats unknown as
+        // LIVE, so a build without a store ages nothing rather than retiring
+        // everything, which is the fail-open direction on purpose: hiding a real
+        // question is worse than showing a dead one.
+        for (const sess of (await opts.store?.listSessions()) ?? []) {
+          phases.set(sess.threadId, sess.phase);
+        }
+      } catch (e) {
+        // A store that cannot be read must not silently retire every ask — the
+        // map stays empty, markStale treats unknown as live, and the read is
+        // reported degraded like any other partial answer.
+        console.error("[walkie] could not read sessions; asks not aged:", e);
+      }
+      const entries = markStale(raw, (t) => phases.get(t));
+      // A stale ask is not pending. It stays visible under ?answered=1, which is
+      // the "everything" view, so a decision that was asked and abandoned is
+      // still auditable rather than deleted.
+      const shown = includeAnswered ? entries : entries.filter((e) => e.status === "pending");
       // BOUNDED, like /admin/voice/queue. Both journals are append-only and
       // nothing compacts them, so an unbounded response grows without limit —
       // measured at 16.2 MB for 100k asks, against the sibling route's 50 over
@@ -654,18 +688,18 @@ export function build(opts: BuildOpts) {
       // cap and looking, not by reading either site.
       const rawOffset = Number(c.req.query("offset"));
       const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
-      const page = entries.slice(offset, offset + limit);
+      const page = shown.slice(offset, offset + limit);
       // "IS THERE MORE AFTER THIS PAGE", not "is the log bigger than one page" —
       // the old form stayed true on the final page, so a client paging until
       // `truncated` disappeared would never stop.
-      const truncated = offset + page.length < entries.length;
+      const truncated = offset + page.length < shown.length;
       // `degraded` travels rather than being swallowed: a read that could not see
       // a file must not look like a repo with nothing pending.
       // `total` and `truncated` travel so a client can tell "nothing pending" from
       // "the first 50 of 4000" — the same reason `degraded` travels.
       return c.json({
         asks: page,
-        total: entries.length,
+        total: shown.length,
         // The offset travels back so a client paging a growing journal can tell
         // which window it received without tracking the request it sent.
         ...(offset > 0 ? { offset } : {}),
