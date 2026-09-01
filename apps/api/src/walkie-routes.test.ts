@@ -1222,6 +1222,34 @@ describe("an ask whose session moved on is stale, not pending (BRO-2415)", () =>
       },
     } as never);
     log.append(ask({ id: "a1", threadId: "t1" }));
-    expect(await asksOf(await get(app as App, "/walkie/asks", H))).toHaveLength(1);
+    const res = await get(app as App, "/walkie/asks", H);
+    expect(await asksOf(res)).toHaveLength(1);
+    // ...AND SAYS SO. Keeping the ask is right; keeping it silently is the
+    // failure this file's degraded channel exists to prevent — a clean-looking
+    // list whose lifecycle status is actually unknown.
+    const body = (await (await get(app as App, "/walkie/asks", H)).json()) as { degraded?: string };
+    expect(body.degraded).toContain("sessions could not be read");
+  });
+
+  test("a journal problem AND a session problem both travel", async () => {
+    // Joined, not overwritten — the same rule readAsks applies to its own
+    // problems. A caller must not have to guess which read failed.
+    const log = createAskLog(dir);
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      store: {
+        listSessions: async () => {
+          throw new Error("store on fire");
+        },
+      },
+    } as never);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "junk" })}\n`);
+    const body = (await (await get(app as App, "/walkie/asks", H)).json()) as { degraded?: string };
+    expect(body.degraded).toContain("skipped");
+    expect(body.degraded).toContain("sessions could not be read");
   });
 });

@@ -45,7 +45,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=72
+EXPECTED_MUTANTS=74
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -169,11 +169,11 @@ echo "answer semantics"
 mutate "unknown id silently accepted" "$S" \
   '      if (!existing) {' '      if (false) {' "unknown id"
 mutate "degraded flag swallowed on GET" "$S" \
-  '        ...(truncated ? { truncated: true } : {}),
-        ...(degraded ? { degraded } : {}),
+  '        ...(degraded || sessionsUnread
+          ? { degraded: [degraded, sessionsUnread].filter(Boolean).join("; ") }
+          : {}),
       });' \
-  '        ...(truncated ? { truncated: true } : {}),
-      });' \
+  '      });' \
   "could not look"
 
 echo "P20 findings — each of these shipped once"
@@ -529,6 +529,17 @@ mutate "an already-answered ask is re-marked stale" "$A" \
 mutate "total counts the whole log again, not what is shown" "$S" \
   '        total: shown.length,' '        total: raw.length,' \
   "counts what is SHOWN"
+mutate "a failed session read is silent, so the list looks clean" "$S" \
+  '        sessionsUnread =
+          "sessions could not be read; asks may be shown as pending after their turn ended";' \
+  '' \
+  "throws ages NOTHING"
+mutate "the two degraded messages overwrite instead of joining" "$S" \
+  '        ...(degraded || sessionsUnread
+          ? { degraded: [degraded, sessionsUnread].filter(Boolean).join("; ") }
+          : {}),' \
+  '        ...(degraded ? { degraded } : {}),' \
+  "both travel"
 mutate "a throwing store retires every ask" "$S" \
   '        console.error("[walkie] could not read sessions; asks not aged:", e);' \
   '        throw e;' \

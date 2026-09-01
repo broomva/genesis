@@ -646,6 +646,14 @@ export function build(opts: BuildOpts) {
       // ONE listSessions, not one lookup per ask: a page is up to 200 entries and
       // this route is polled every 4s by the client.
       const phases = new Map<string, string>();
+      // A session read that failed is a read that could not see everything, and
+      // this file's whole `degraded` channel exists so that never renders as
+      // normal. Tracked here and folded into the response below — writing it only
+      // to the console would leave the operator a clean-looking list whose
+      // lifecycle status is unknown, which is the exact failure the channel was
+      // built for. Caught in review, in code written to honour that rule
+      // elsewhere in the same function.
+      let sessionsUnread: string | undefined;
       try {
         // `opts.store` is optional in BuildOpts, and an absent store is not an
         // absent session — it is no knowledge at all. markStale treats unknown as
@@ -660,6 +668,8 @@ export function build(opts: BuildOpts) {
         // map stays empty, markStale treats unknown as live, and the read is
         // reported degraded like any other partial answer.
         console.error("[walkie] could not read sessions; asks not aged:", e);
+        sessionsUnread =
+          "sessions could not be read; asks may be shown as pending after their turn ended";
       }
       const entries = markStale(raw, (t) => phases.get(t));
       // A stale ask is not pending. It stays visible under ?answered=1, which is
@@ -704,7 +714,12 @@ export function build(opts: BuildOpts) {
         // which window it received without tracking the request it sent.
         ...(offset > 0 ? { offset } : {}),
         ...(truncated ? { truncated: true } : {}),
-        ...(degraded ? { degraded } : {}),
+        // Both halves travel, joined the way readAsks joins its own problems: a
+        // caller must not have to guess whether "degraded" covered the journal,
+        // the sessions, or both.
+        ...(degraded || sessionsUnread
+          ? { degraded: [degraded, sessionsUnread].filter(Boolean).join("; ") }
+          : {}),
       });
     });
 
