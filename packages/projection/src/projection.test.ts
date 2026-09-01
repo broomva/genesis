@@ -70,7 +70,11 @@ describe("parser", () => {
       ],
     };
     expect(textBlocks(msg)).toEqual(["hi"]);
-    expect(toolUses(msg)).toEqual([{ name: "Bash", input: { command: "ls" } }]);
+    // `id` carried since BRO-2413 — the ask producer needs the SDK's own id for
+    // the tool call as the ask's identity. This block has none, so it is
+    // `undefined`, and asserting that explicitly is the point: the field is
+    // optional because it parses agent output, not because it is decorative.
+    expect(toolUses(msg)).toEqual([{ id: undefined, name: "Bash", input: { command: "ls" } }]);
   });
 
   test("parseStream drops noise and keeps order", () => {

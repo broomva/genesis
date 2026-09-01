@@ -5,7 +5,7 @@
 // malformed ones a live-agent test would never generate.
 
 import { describe, expect, test } from "bun:test";
-import type { AgentEvent } from "./reducer";
+import type { AgentEvent } from "./parser";
 import { asksRaisedBy } from "./reducer";
 
 const assistant = (blocks: unknown[]): AgentEvent =>
