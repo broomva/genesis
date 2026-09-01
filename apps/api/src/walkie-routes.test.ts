@@ -1059,6 +1059,42 @@ describe("Genesis serves the client, so both share one origin (BRO-2416)", () =>
     expect(await res.text()).not.toContain("SECRET-QUESTION");
   });
 
+  test("a directory that is not a built client is refused at BUILD", async () => {
+    // CodeRabbit's caveat, made mechanical: "the configured directory must
+    // contain only public client assets". The realistic failure is an operator
+    // pointing this at the wrong tree — a home directory, a docs folder — where
+    // the extension allowlist would then serve any .html/.json/.png under it.
+    // Failing at boot is the same rule the sibling misconfigurations follow.
+    const empty = join(dir, "not-a-client");
+    mkdirSync(empty, { recursive: true });
+    expect(() =>
+      build({
+        workspaceRoot: dir,
+        walkieSecret: SECRET,
+        askLog: createAskLog(dir),
+        askLogDir: dir,
+        walkieClientDir: empty,
+      } as never),
+    ).toThrow(/does not look like a built walkie client/);
+  });
+
+  test("a directory with index.html but NO app.js is refused too", async () => {
+    // Both files, not either: a lone index.html is what a docs directory looks
+    // like, and checking one of the two would let exactly that through.
+    const half = join(dir, "half-a-client");
+    mkdirSync(half, { recursive: true });
+    writeFileSync(join(half, "index.html"), "<!doctype html>");
+    expect(() =>
+      build({
+        workspaceRoot: dir,
+        walkieSecret: SECRET,
+        askLog: createAskLog(dir),
+        askLogDir: dir,
+        walkieClientDir: half,
+      } as never),
+    ).toThrow(/does not look like a built walkie client/);
+  });
+
   test("an unconfigured deploy has NO such route — the negative control", async () => {
     // Same rule as every other walkie option: unconfigured must 404 rather than
     // answer. Without this the route could be registered unconditionally and

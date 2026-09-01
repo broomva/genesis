@@ -45,7 +45,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=64
+EXPECTED_MUTANTS=66
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -498,6 +498,14 @@ mutate "the content-type allowlist gains a permissive default" "$W" \
 mutate "a directory is served as an asset" "$W" \
   '  if (statSync(candidate).isDirectory()) return undefined;' '' \
   "directory is not an asset"
+mutate "a directory that is not a built client is accepted" "$S" \
+  '      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {' \
+  '      if (false) {' \
+  "not a built client is refused at BUILD"
+mutate "only one of the two marker files is required" "$S" \
+  '      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {' \
+  '      if (!existsSync(join(clientDir, "index.html"))) {' \
+  "NO app.js is refused too"
 mutate "the client route is registered even when unconfigured" "$S" \
   '    if (opts.walkieClientDir) {' '    if (true) {' \
   "unconfigured deploy has NO such route"

@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   type AgentEvent,
   type ConcurrencyLimits,
@@ -681,6 +683,20 @@ export function build(opts: BuildOpts) {
     // routes above are what the secret protects.
     if (opts.walkieClientDir) {
       const clientDir = opts.walkieClientDir;
+      // IT MUST LOOK LIKE A BUILT CLIENT, checked at BUILD like the sibling
+      // misconfigurations above rather than at request time.
+      //
+      // Not a security boundary — anyone who can set this env var owns the
+      // process — but the realistic failure here is an operator pointing it at
+      // the wrong directory, and the extension allowlist alone would then happily
+      // serve any .html/.json/.png under it. Requiring the two files every walkie
+      // build produces turns "pointed at my home directory" from a quiet
+      // exposure into a refusal at boot.
+      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {
+        throw new Error(
+          `walkieClientDir does not look like a built walkie client (no index.html or app.js in ${clientDir}). Run \`bun run build\` in broomva/walkie and point this at its dist/.`,
+        );
+      }
       app.get("/walkie/app/*", (c) => {
         const rest = c.req.path.slice("/walkie/app".length);
         const asset = resolveAsset(clientDir, rest);
