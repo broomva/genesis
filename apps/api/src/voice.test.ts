@@ -37,8 +37,8 @@ describe("secretMatches — the voice surface's only gate", () => {
   });
 });
 
-describe("normalizeCallerId — must agree with the WhatsApp allowlist", () => {
-  test("reduces every spelling of one number to one id", () => {
+describe("normalizeCallerId — an alias of the one shared normalizer", () => {
+  test("punctuation is stripped, so one number written many ways is one id", () => {
     for (const spelling of [
       "+57 301 775 8620",
       "573017758620",
@@ -49,15 +49,13 @@ describe("normalizeCallerId — must agree with the WhatsApp allowlist", () => {
     }
   });
 
-  test("DRIFT GUARD: same rule as allowlist.ts normalizePhone (digits only)", () => {
-    // If these two implementations ever diverge, an allowlisted caller resolves
-    // as unknown and silently drops to take-a-message. Nothing errors. This test
-    // is the tripwire until the rule lives in one shared module (#107).
-    const allowlistRule = (v: string) => v.replace(/\D/g, "");
-    for (const s of ["+57 (301) 775-8620", "  573017758620  ", "tel:+573017758620", ""]) {
-      expect(normalizeCallerId(s)).toBe(allowlistRule(s));
-    }
-  });
+  // The "DRIFT GUARD" test that lived here is DELETED, not repaired. It
+  // re-implemented the allowlist rule inline instead of importing it, so with
+  // `normalizePhone` mutated to a completely different rule it still reported
+  // 14 pass / 0 fail — it could not detect the drift it was named for. Both
+  // names are now aliases of one function in @genesis/identity, so the drift
+  // class does not exist and a test for an impossible defect is noise. The
+  // no-second-implementation gate is packages/identity/src/one-copy.test.ts.
 });
 
 describe("resolveCaller — caller id routes, it does not authorize", () => {

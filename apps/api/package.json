@@ -12,11 +12,12 @@
   },
   "dependencies": {
     "@genesis/core": "workspace:*",
+    "@genesis/db": "workspace:*",
     "@genesis/host": "workspace:*",
+    "@genesis/identity": "workspace:*",
     "@genesis/projection": "workspace:*",
     "@genesis/runner": "workspace:*",
-    "hono": "^4.6.14",
-    "@genesis/db": "workspace:*"
+    "hono": "^4.6.14"
   },
   "devDependencies": {
     "@types/bun": "latest",
