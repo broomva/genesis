@@ -21,9 +21,35 @@ export interface Store {
   /** Sessions whose stored phase is any of `phases`. Used for boot-time
    *  reconciliation of turns interrupted by a process crash (BRO-1530). */
   findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
-  /** Every session, for the thread-list UI (BRO-1567). Order is unspecified —
-   *  callers (Supervisor.listThreads) sort for display. Includes archived
-   *  sessions; the drawer filters them (BRO-1592). */
+  /** One ordered page of sessions plus the total, **from the source**.
+   *
+   *  `listSessions()` below materialises every row, so a caller that slices its
+   *  result bounds only what it *reads*. A DURABLE implementation must apply the
+   *  order and the window in the query, and must be backed by an index that can
+   *  serve that exact order — without one the database still scans and sorts the
+   *  whole table, and only the wire payload is bounded. `InMemoryStore` sorts
+   *  its whole map and slices, which is the shape this paragraph warns about;
+   *  that is acceptable there because the map IS the working set, and it is
+   *  stated rather than left to be discovered.
+   *
+   *  Callers must satisfy `assertPageOpts`.
+   *
+   *  Order is `compareSessionsNewestFirst`. `total` counts every session, not
+   *  the page — it is what a caller needs in order to know a next page exists,
+   *  and it comes from the same call so the two cannot disagree. */
+  sessionsPage(opts: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{ sessions: Session[]; total: number }>;
+  /** EVERY session, unbounded. Order is unspecified BY CONTRACT — `DrizzleStore`
+   *  happens to return them `ORDER BY created_at` and a test pins that, so do not
+   *  read this as "arbitrary"; read it as "callers may not depend on it". The
+   *  thread-list UI no longer uses
+   *  this — it pages through `sessionsPage` — so the one remaining caller is the
+   *  ask-log phase map in `apps/api/src/server.ts`, which needs every session
+   *  because any ask may belong to any thread; bounding it there would silently
+   *  age live asks. Prefer `sessionsPage` for anything user-facing. Includes
+   *  archived sessions; the drawer filters them (BRO-1592). */
   listSessions(): Promise<Session[]>;
   addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
   turnsForSession(sessionId: string): Promise<Turn[]>;
@@ -35,6 +61,62 @@ export interface Store {
 // Collision-safe across restarts, PIDs, and instances — required now that IDs
 // are primary keys in durable storage (a counter+PID repeats after a restart).
 const id = (p: string) => `${p}-${crypto.randomUUID()}`;
+/** The precondition `Store.sessionsPage` puts on its window, enforced identically
+ *  by every implementation.
+ *
+ *  It THROWS rather than clamping because the two implementations disagree on
+ *  what invalid input means and both answers look plausible: `Array#slice`
+ *  reads a negative offset as "from the end" and a `NaN` limit as "nothing",
+ *  while Postgres rejects both outright. Measured on the same four sessions,
+ *  `{limit: NaN}` returned [] in memory and ALL FOUR rows from pg — two
+ *  successful calls, different answers, no error on either side. Clamping would
+ *  have picked one of those meanings and hidden the caller's bug; throwing puts
+ *  it at the boundary. No live caller is affected: the HTTP route sanitises
+ *  before it gets here. */
+export function assertPageOpts(opts: { limit?: number; offset?: number }): void {
+  for (const [name, v] of [
+    ["limit", opts.limit],
+    ["offset", opts.offset],
+  ] as const) {
+    if (v === undefined) continue;
+    if (!Number.isInteger(v) || v < 0) {
+      throw new TypeError(
+        `sessionsPage: ${name} must be a non-negative integer or undefined, got ${String(v)}`,
+      );
+    }
+  }
+}
+
+/** The total order `Store.sessionsPage` promises: newest-first by `createdAt`,
+ *  ties broken by `id` ascending.
+ *
+ *  The tiebreaker is load-bearing, not cosmetic. `createdAt` is millisecond
+ *  resolution, so two sessions created in the same millisecond tie — and paging
+ *  over a non-unique sort key lets tied rows swap between queries, which makes
+ *  the same row appear on two pages or on none. `id` is the primary key, so the
+ *  pair is total and the boundary is stable.
+ *
+ *  Comparison is JS `<` on strings, i.e. UTF-16 code-unit order. The SQL store
+ *  pins `COLLATE "C"`, i.e. UTF-8 byte order. Those coincide for ASCII and
+ *  DIVERGE above U+FFFF, where a JS surrogate sorts below U+E000..U+FFFF but its
+ *  UTF-8 bytes sort above. Unreachable today — ids are `sess-<uuid>` and
+ *  `createdAt` is ISO, both ASCII — but the two are NOT the same order, and a
+ *  future sort key drawn from user text would make the difference reachable.
+ *
+ *  Exported because `InMemoryStore` and the conformance suite both need it. It is
+ *  NOT what keeps the SQL ORDER BY in step — the pg store hand-writes that and
+ *  imports nothing from here. Nothing enforces the mirror. */
+export const compareSessionsNewestFirst = (a: Session, b: Session): number =>
+  a.createdAt < b.createdAt
+    ? 1
+    : a.createdAt > b.createdAt
+      ? -1
+      : a.id < b.id
+        ? -1
+        : a.id > b.id
+          ? 1
+          : 0;
+
 const now = () => new Date(performance.timeOrigin + performance.now()).toISOString();
 
 export class InMemoryStore implements Store {
@@ -69,6 +151,15 @@ export class InMemoryStore implements Store {
   }
   async listSessions() {
     return [...this.sessions.values()].map((s) => ({ ...s }));
+  }
+
+  async sessionsPage(opts: { limit?: number; offset?: number }) {
+    assertPageOpts(opts);
+    const ordered = [...this.sessions.values()].sort(compareSessionsNewestFirst);
+    const offset = opts.offset ?? 0;
+    const page =
+      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);
+    return { sessions: page.map((s) => ({ ...s })), total: ordered.length };
   }
   async addTurn(t: Omit<Turn, "id" | "createdAt">) {
     const turn: Turn = { ...t, id: id("turn"), createdAt: now() };

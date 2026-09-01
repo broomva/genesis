@@ -27,8 +27,12 @@
 #   arity           delete every mutant and an unguarded sweep prints
 #                   "0 mutants, 0 survivors" and exits 0
 #
-# Not yet wired into CI: genesis runs a single sequential job and adding a
-# parallel gate is BRO-2407. Run it by hand before touching these files.
+# Not wired into CI, and the reason is NOT the one this line used to give ("genesis
+# runs a single sequential job"): ci.yml has been five parallel jobs since BRO-2407
+# and already runs mutation-sweep-duration.sh. The real reason is in ci.yml — a
+# clean runner gave 85 mutants / 5 SURVIVED where this tree reports 0 locally. Until
+# that is explained, EVERY local verdict from this script, including 0 survivors, is
+# a single-machine claim. Run it by hand before touching these files.
 #
 # Usage: scripts/mutation-sweep-walkie.sh
 set -uo pipefail
@@ -49,10 +53,22 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        # sweep scored supervisor mutants against a suite that excluded them: a
        # reversed sort in listThreads survived the sweep and was caught only by
        # supervisor.test.ts, which the sweep never ran.
-       packages/core/src/supervisor.test.ts)
+       packages/core/src/supervisor.test.ts
+       # Same rule, for the paging move (follow-up to BRO-2418): ordering and bounding now live
+       # in the two Store implementations, so their tests have to run here or the
+       # store mutants would be scored against a suite that cannot see them.
+       packages/db/src/store.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
-          packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=93
+          packages/projection/src/reducer.ts packages/core/src/supervisor.ts
+          packages/core/src/store.ts packages/db/src/store.ts packages/db/src/schema.ts)
+EXPECTED_MUTANTS=104
+
+# Subject paths used by mutants below. Defined HERE, not at first use: the
+# paging mutants sit ~25 lines above where these used to be declared, and with
+# `set -u` an undefined expansion aborts the run rather than mis-targeting.
+SC=packages/db/src/schema.ts
+CS=packages/core/src/store.ts
+DS=packages/db/src/store.ts
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -653,11 +669,10 @@ echo
 
 M=apps/api/src/ttl-memo.ts
 
-mutate "listThreads pages the RESULT, so the work stays O(box)" "$C" \
-  "    return opts.limit === undefined
-      ? ordered.slice(offset)
-      : ordered.slice(offset, offset + opts.limit);" \
-  "    return ordered.slice(offset);" \
+mutate "InMemoryStore.sessionsPage returns the whole ordered list" "$CS" \
+  "    const page =
+      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);" \
+  "    const page = ordered.slice(offset);" \
   "bounds the WORK"
 
 mutate "the 200 cap on /threads stops truncating" "$S" \
@@ -675,10 +690,103 @@ mutate "the checks cache stores AFTER resolving, losing in-flight de-duplication
   "    value.then(() => entries.set(key, entry));" \
   "CONCURRENT calls share ONE execution"
 
-mutate "listThreads stops ordering newest-first" "$C" \
-  "      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0," \
-  "      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0," \
+# Paging moved into the Store (follow-up to BRO-2418): the comparator that used to live in
+# supervisor.ts is now `compareSessionsNewestFirst`, and the bound is SQL. The
+# anchor moved with it — a sweep whose anchor no longer exists ERRORs rather
+# than silently scoring nothing, which is how this one was caught.
+mutate "listThreads stops ordering newest-first" "$CS" \
+  '  a.createdAt < b.createdAt
+    ? 1
+    : a.createdAt > b.createdAt
+      ? -1' \
+  '  a.createdAt < b.createdAt
+    ? -1
+    : a.createdAt > b.createdAt
+      ? 1' \
   "ordered newest-first"
+mutate "ties lose their id tiebreaker, so page boundaries stop being stable" "$CS" \
+  '      : a.id < b.id
+        ? -1
+        : a.id > b.id
+          ? 1
+          : 0;' \
+  '      : 0;' \
+  "identical pages at every boundary"
+# THE NEGATIVE CONTROL, as a committed mutant. It was run by hand and reported in
+# a commit message — which is the thing this file's header says never to do again:
+# a claim from a script in /tmp is reproducible by nobody. It bounds in JS instead
+# of in SQL, so it returns a byte-identical page while retrieving everything.
+mutate "the page is bounded in JS instead of in SQL — identical response, unbounded work" "$DS" \
+  '            : await ordered.limit(opts.limit).offset(offset);' \
+  '            : (await ordered.offset(offset)).slice(0, opts.limit);' \
+  "no query retrieves more rows than the window"
+# The DDL the page's bound depends on. schema.ts was not a SUBJECT until now, so
+# the index this whole PR rests on was under no mutant at all.
+mutate "the index loses its collation, so the planner cannot use it" "$SC" \
+  'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at COLLATE "C" DESC, id COLLATE "C" ASC);' \
+  'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at DESC, id ASC);' \
+  "the plan reads offset"
+# The narrow case scans() exists for, and the only mutant it can catch: sessionsPage
+# implemented OVER listSessions. pages() stays 1 and the response is byte-identical,
+# so scans() is the sole discriminator.
+mutate "InMemoryStore.sessionsPage is implemented over listSessions" "$CS" \
+  '    const ordered = [...this.sessions.values()].sort(compareSessionsNewestFirst);' \
+  '    const ordered = (await this.listSessions()).sort(compareSessionsNewestFirst);' \
+  "never calls listSessions"
+# C11: the SQL id key had no mutant at all — the COLLATE count is what guards it,
+# and nothing proved the count would actually fall to 1.
+mutate "the SQL tiebreaker key is dropped entirely" "$DS" \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC`);' \
+  "pins COLLATE"
+# C10: the precondition is documented as "enforced identically by every
+# implementation" and the sweep enforced exactly one of the two.
+mutate "the pg store drops the window precondition" "$DS" \
+  '    assertPageOpts(opts);' \
+  '' \
+  "rejected identically by BOTH stores"
+mutate "the id tiebreaker loses its collation and follows the database locale" "$DS" \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} ASC`);' \
+  "pins COLLATE"
+# `{}` was a CRASH mutant: drizzle emits a bare `set transaction ` and every call
+# throws, so the kill proved nothing about the isolation assertion. `read committed`
+# compiles, runs, removes the snapshot property, and is caught by the regex alone.
+mutate "page and total stop sharing a snapshot" "$DS" \
+  '      { isolationLevel: "repeatable read" },' \
+  '      { isolationLevel: "read committed" },' \
+  "share ONE snapshot"
+mutate "the window precondition is dropped, so the two stores diverge on bad input" "$CS" \
+  '    assertPageOpts(opts);' \
+  '' \
+  "rejected identically by BOTH stores"
+# `listThreads` and `listThreadsPage` need SEPARATE mutants: the /walkie/threads
+# route calls the PAGE form, so a mutant on the other one never reaches the route
+# test at all. The first version of this used `want "never calls listSessions"` for the
+# listThreads mutant and the sweep reported "red, but not via <want>" — it was
+# killed by supervisor.test.ts instead, which is the correct kill for it.
+mutate "listThreads goes back to scanning every session and slicing in JS" "$C" \
+  '    return this.summarize((await this.store.sessionsPage(opts)).sessions);' \
+  '    const all = await this.store.listSessions();
+    const off = opts.offset ?? 0;
+    return this.summarize(
+      opts.limit === undefined ? all.slice(off) : all.slice(off, off + opts.limit),
+    );' \
+  "returns threads newest-first"
+# THIS is the one that proves `scans() === 0` is load-bearing: it is the form the
+# route actually calls, and it returns a byte-identical response.
+mutate "listThreadsPage goes back to scanning every session and slicing in JS" "$C" \
+  '    const { sessions, total } = await this.store.sessionsPage(opts);
+    return { threads: await this.summarize(sessions), total };' \
+  '    const all = await this.store.listSessions();
+    const off = opts.offset ?? 0;
+    return {
+      threads: await this.summarize(
+        opts.limit === undefined ? all.slice(off) : all.slice(off, off + opts.limit),
+      ),
+      total: all.length,
+    };' \
+  "never calls listSessions"
 
 mutate "the memo evicts an entry a later call already replaced" "$M" \
   "      if (entries.get(key)?.value === value) entries.delete(key);" \
@@ -693,7 +801,7 @@ mutate "the default page size drops to 50" "$S" \
 mutate "the route scans sessions twice per request" "$S" \
   "    const { threads, total } = await supervisor.listThreadsPage({ limit, offset });" \
   "    const threads = await supervisor.listThreads({ limit, offset }); const total = (await supervisor.listThreadsPage({})).total;" \
-  "ONE session scan"
+  "never calls listSessions"
 
 if [ "$total" -ne "$EXPECTED_MUTANTS" ]; then
   echo "$total mutants ran, expected $EXPECTED_MUTANTS — a mutant was added or removed"

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Supervisor } from "@genesis/core";
+import { type Store, Supervisor } from "@genesis/core";
 import type { RunResult } from "@genesis/runner";
 import { createPgliteStore } from "./factory";
 
@@ -438,5 +438,361 @@ describe("DrizzleStore (pglite) — turn parts + thinking (BRO-1607)", () => {
     const [t] = await store.turnsForSession("sD");
     expect(t?.durationMs).toBe(324_000);
     await store.close();
+  });
+});
+
+describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follow-up to BRO-2418)", () => {
+  // Building the client here rather than through `createPgliteStore` is the
+  // point: the factory hides it, and the only way to show the LIMIT reached
+  // Postgres is to watch what Postgres was asked and what it handed back.
+  const instrumented = async () => {
+    const { PGlite } = await import("@electric-sql/pglite");
+    const { drizzle } = await import("drizzle-orm/pglite");
+    const { MIGRATE_SQL } = await import("./schema");
+    const { DrizzleStore } = await import("./store");
+    const client = new PGlite();
+    await client.exec(MIGRATE_SQL);
+    const seen: Array<{ sql: string; params: unknown[]; rows: number }> = [];
+    const record = (args: unknown[], r: { rows?: unknown[] }) =>
+      seen.push({
+        sql: String(args[0] ?? ""),
+        params: (args[1] as unknown[]) ?? [],
+        rows: r.rows?.length ?? 0,
+      });
+    // Forward EVERY argument. The first draft took (sql, params) and dropped
+    // drizzle's third argument — the row-mode/parser options — so `count(*)`
+    // came back in a shape the store read as NaN. The instrument was corrupting
+    // the thing it measured.
+    const wrap = (target: { query: (...a: unknown[]) => Promise<unknown> }) => {
+      const orig = target.query.bind(target);
+      target.query = async (...args: unknown[]) => {
+        const r = (await orig(...args)) as { rows?: unknown[] };
+        record(args, r);
+        return r;
+      };
+    };
+    wrap(client as unknown as { query: (...a: unknown[]) => Promise<unknown> });
+    // And inside transactions. drizzle's pglite driver runs a transaction's
+    // statements through `client.transaction(cb)`, binding a NEW session to the
+    // Transaction object rather than to the client — so patching `client.query`
+    // alone observes NOTHING once `sessionsPage` became transactional, and
+    // `Math.max(...[])` is `-Infinity`, which is <= any bound. That is not
+    // hypothetical: this exact wrapper silently passed the window assertion on
+    // the first transactional revision. Hence both the patch below and the
+    // non-emptiness guard every caller of `seen` now makes.
+    const origTxn = client.transaction.bind(client);
+    (
+      client as unknown as { transaction: (cb: (tx: unknown) => unknown) => Promise<unknown> }
+    ).transaction = (cb: (tx: unknown) => unknown) =>
+      origTxn(((tx: { query: (...a: unknown[]) => Promise<unknown> }) => {
+        wrap(tx);
+        return cb(tx);
+      }) as never) as Promise<unknown>;
+    const store = new DrizzleStore(drizzle(client), () => client.close());
+    return { store, seen, client };
+  };
+
+  const seed = async (store: Store, rows: Array<{ id: string; createdAt: string }>) => {
+    await store.upsertWorkspace(ws);
+    for (const r of rows) {
+      await store.upsertSession({
+        id: r.id,
+        workspaceId: ws.id,
+        threadId: `t-${r.id}`,
+        phase: "idle",
+        createdAt: r.createdAt,
+      });
+    }
+  };
+
+  test("no query retrieves more rows than the window", async () => {
+    // The property, not a spelling of it. Asserting the SQL string contains
+    // "limit" would pass for a query that also selected everything else; this
+    // fails for ANY implementation that hydrates rows outside the page —
+    // including `listSessions()`-then-slice, which returns an identical page.
+    const { store, seen } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 250 }, (_, i) => ({
+        id: `sess-${String(i).padStart(3, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    seen.length = 0;
+
+    const page = await store.sessionsPage({ limit: 5 });
+
+    // The bound FIRST. `expect(page.sessions.length).toBe(5)` below is satisfied
+    // by the unbounded implementation too, so asserting it first would shadow
+    // this one for any mutant that removes the limit — the assertion would never
+    // be reached and the check that matters would never have failed.
+    //
+    // And the non-emptiness guard, because `Math.max(...[])` is `-Infinity`,
+    // which is <= any bound. An instrument that stops observing does not fail
+    // here, it PASSES. That happened: when this method became transactional the
+    // wrapper went blind and this test went green on its own vacuity.
+    expect(seen.length).toBeGreaterThan(0);
+    const widest = Math.max(...seen.map((q) => q.rows));
+    expect(widest).toBeLessThanOrEqual(5);
+
+    expect(page.sessions.length).toBe(5);
+    expect(page.total).toBe(250); // the total is exact despite the bound
+    await store.close();
+  });
+
+  test('the ORDER BY pins COLLATE "C" — the cross-store agreement is by construction', async () => {
+    // The conformance suite below compares this store against InMemoryStore and
+    // passes — but PGlite reports datcollate `C`, so it would pass for an
+    // unpinned ORDER BY too. It cannot discriminate the property, and production
+    // is a Postgres created with a locale collation.
+    //
+    // Since the divergent engine is not reachable from this suite, the claim is
+    // bound to the mechanism that makes the engine irrelevant: the emitted SQL.
+    // This is a weaker check than a behavioural one and is written down as such
+    // — it fails if someone drops the collation, which is the regression.
+    const { store, seen } = await instrumented();
+    await seed(store, [{ id: "s-1", createdAt: "2026-08-31T12:00:00.000Z" }]);
+    seen.length = 0;
+    await store.sessionsPage({ limit: 1 });
+    const ordering = seen.filter((q) => /order\s+by/i.test(q.sql));
+    expect(ordering.length).toBeGreaterThan(0);
+    for (const q of ordering) {
+      // BOTH keys, counted. `toContain` is satisfied by one occurrence, so it
+      // passes for `created_at COLLATE "C" DESC, id ASC` — the likeliest hand
+      // edit, and the one that abandons the tiebreaker to the database locale
+      // while looking fixed. The contract needs two.
+      expect((q.sql.match(/COLLATE "C"/g) ?? []).length).toBe(2);
+    }
+    await store.close();
+  });
+
+  test("the page and the total share ONE snapshot", async () => {
+    // The code this replaced read every session once, so its page and its total
+    // could not disagree. Two independent statements can: an insert landing
+    // between them yields a total that does not describe the page, and `hasMore`
+    // derived from it is wrong on a surface the client polls.
+    //
+    // An earlier revision bought the single snapshot with `count(*) over()`,
+    // carrying the total on each page row. A window function with an empty frame
+    // must drain its whole input, so that forced the full retrieve-and-sort this
+    // exists to avoid; it is now bought with REPEATABLE READ instead.
+    //
+    // Concurrency is not reproducible here, so this asserts the mechanism rather
+    // than trying to lose a race — and the isolation level is directly
+    // observable, so dropping it is a visible regression rather than a silent one.
+    const { store, seen } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 40 }, (_, i) => ({
+        id: `sess-${String(i).padStart(3, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    seen.length = 0;
+    const page = await store.sessionsPage({ limit: 5 });
+    expect(page.sessions.length).toBe(5);
+    expect(page.total).toBe(40);
+
+    expect(seen.some((q) => /isolation level repeatable read/i.test(q.sql))).toBe(true);
+    // Exactly two: the page and the count. Three would mean something re-read.
+    expect(seen.filter((q) => /^\s*select/i.test(q.sql)).length).toBe(2);
+    await store.close();
+  });
+
+  test("EXPLAIN: the plan reads offset+limit rows, and uses the index", async () => {
+    // This test used to assert `max rows <= limit` at offset 0 ONLY — the single
+    // offset where that is true. Review ran it at other offsets and it fails its
+    // own assertion on its own fixture: offset=10 reads 20 rows, offset=1990
+    // reads 2000. `OFFSET n` walks and discards n tuples first.
+    //
+    // So it now asserts the real bound, at the SHAPE the consumer uses:
+    // apps/web walks `offset = page * 200` at limit 200 (threads.ts), so the
+    // offsets here are multiples of 200 at limit 200 rather than the arbitrary
+    // ones this first used. Its deepest real position is offset 4800, which this
+    // 2000-row fixture cannot reach — stated because the coverage claim is
+    // otherwise broader than the test.
+    const { store, seen, client } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 2000 }, (_, i) => ({
+        id: `sess-${String(i).padStart(5, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    await client.exec("analyze sessions");
+
+    const N = 2000;
+    const LIMIT = 200;
+    for (const offset of [0, 200, 1000]) {
+      // The bound is only a real constraint while it is BELOW the table size:
+      // at offset+limit >= N a full scan satisfies it and the assertion goes
+      // vacuous. Guarded so a later edit deepening the offsets fails loudly.
+      expect(offset + LIMIT).toBeLessThan(N);
+      seen.length = 0;
+      await store.sessionsPage({ limit: LIMIT, offset });
+      const stmt = seen.find((q) => /\blimit\b/i.test(q.sql));
+      expect(stmt).toBeDefined();
+      if (!stmt) return;
+      const plan = (
+        (await client.query(`EXPLAIN (ANALYZE, COSTS OFF) ${stmt.sql}`, stmt.params as never)) as {
+          rows: Array<Record<string, string>>;
+        }
+      ).rows
+        .map((r) => Object.values(r)[0] ?? "")
+        .join("\n");
+
+      // The index is what keeps this off a full scan; without a matching
+      // collation the planner cannot use it.
+      expect(plan).toContain("sessions_page_idx");
+      expect(plan).not.toContain("Seq Scan");
+
+      const rowCounts = [...plan.matchAll(/rows=(\d+)/g)].map((m) => Number(m[1]));
+      expect(rowCounts.length).toBeGreaterThan(0);
+      // The TRUE bound. Asserting `<= 10` here would fail for offset > 0, and
+      // asserting nothing would let a full scan through.
+      expect(Math.max(...rowCounts)).toBeLessThanOrEqual(offset + LIMIT);
+    }
+    await store.close();
+  });
+
+  test("an unbounded page still returns everything", async () => {
+    // The bound must not become a silent cap: no `limit` means every session,
+    // which is what existing callers expect.
+    const { store } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 30 }, (_, i) => ({
+        id: `sess-${String(i).padStart(3, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    const all = await store.sessionsPage({});
+    expect(all.sessions.length).toBe(30);
+    expect(all.total).toBe(30);
+    await store.close();
+  });
+});
+
+describe("sessionsPage — the two Store implementations agree (follow-up to BRO-2418)", () => {
+  // Ordering moved INTO the query, so the order is now decided by Postgres for
+  // one implementation and by JS for the other. Nothing makes those agree by
+  // construction: `created_at` and `id` are `text`, so SQL ordering runs under
+  // the database collation while `InMemoryStore` uses JS string compare. Two
+  // implementations of one paging contract that sort differently is how a row
+  // lands on two pages, or none.
+  //
+  // So this checks them against EACH OTHER rather than against a comparator the
+  // test re-implements — a mirror of the code under test would agree with a
+  // wrong implementation just as happily.
+  const corpus = [
+    // Tied timestamps, ids deliberately NOT in insertion order, so the `id`
+    // tiebreaker is what decides and insertion order cannot fake agreement.
+    { id: "s-b", createdAt: "2026-08-31T12:00:00.000Z" },
+    { id: "s-A", createdAt: "2026-08-31T12:00:00.000Z" },
+    { id: "s_1", createdAt: "2026-08-31T12:00:00.000Z" },
+    { id: "s-a", createdAt: "2026-08-31T12:00:00.000Z" },
+    { id: "s-1", createdAt: "2026-08-31T12:00:00.000Z" },
+    // Distinct, interleaved.
+    { id: "s-z", createdAt: "2026-08-31T13:00:00.000Z" },
+    { id: "s-c", createdAt: "2026-08-31T11:00:00.000Z" },
+    { id: "s-d", createdAt: "2026-08-31T13:00:00.000Z" },
+  ];
+
+  const fill = async (store: Store) => {
+    await store.upsertWorkspace(ws);
+    for (const r of corpus) {
+      await store.upsertSession({
+        id: r.id,
+        workspaceId: ws.id,
+        threadId: `t-${r.id}`,
+        phase: "idle",
+        createdAt: r.createdAt,
+      });
+    }
+  };
+
+  test("identical order, and identical pages at every boundary", async () => {
+    const { InMemoryStore } = await import("@genesis/core");
+    const mem = new InMemoryStore();
+    const pg = await createPgliteStore();
+    await fill(mem);
+    await fill(pg);
+
+    const ids = (r: { sessions: Array<{ id: string }> }) => r.sessions.map((s) => s.id);
+    const memAll = ids(await mem.sessionsPage({}));
+    const pgAll = ids(await pg.sessionsPage({}));
+    expect(pgAll).toEqual(memAll);
+    expect(memAll.length).toBe(corpus.length);
+
+    // Every window, not just one: a divergence at a single boundary is exactly
+    // the failure mode, and one sampled page would miss it.
+    for (let limit = 1; limit <= corpus.length; limit++) {
+      for (let offset = 0; offset <= corpus.length; offset++) {
+        const a = await pg.sessionsPage({ limit, offset });
+        const b = await mem.sessionsPage({ limit, offset });
+        expect(ids(a)).toEqual(ids(b));
+        // The TOTAL too, not just the page — comparing only ids left it unchecked,
+        // and `offset === corpus.length` (an empty page with a non-zero total) is
+        // where the two stores could most easily disagree.
+        expect(a.total).toBe(b.total);
+      }
+    }
+    await pg.close();
+  });
+
+  test("invalid windows are rejected identically by BOTH stores", async () => {
+    // Measured divergence before this guard existed, same four sessions:
+    //   {limit: NaN}   -> InMemoryStore []            DrizzleStore ALL FOUR
+    //   {limit: -1}    -> InMemoryStore 3 rows        DrizzleStore 4 rows
+    //   {offset: -2}   -> InMemoryStore the OLDEST two (Array#slice reads a
+    //                     negative index from the end, in a newest-first list)
+    //                     DrizzleStore throws
+    // Two successful calls returning different answers is the worst shape: no
+    // error, no test, and the in-memory store is what every other suite runs on.
+    const { InMemoryStore } = await import("@genesis/core");
+    const mem = new InMemoryStore();
+    const pg = await createPgliteStore();
+    await fill(mem);
+    await fill(pg);
+    const bad = [
+      { limit: -1 },
+      { limit: Number.NaN },
+      { limit: 1.5 },
+      { limit: Number.POSITIVE_INFINITY },
+      { offset: -2 },
+      { limit: 2, offset: -1 },
+    ];
+    for (const opts of bad) {
+      await expect(mem.sessionsPage(opts)).rejects.toThrow(/non-negative integer/);
+      await expect(pg.sessionsPage(opts)).rejects.toThrow(/non-negative integer/);
+    }
+    // and the boundary that IS valid stays valid
+    expect((await mem.sessionsPage({ limit: 0 })).sessions).toEqual([]);
+    expect((await pg.sessionsPage({ limit: 0 })).sessions).toEqual([]);
+    expect((await pg.sessionsPage({ limit: 0 })).total).toBe(corpus.length);
+    await pg.close();
+  });
+
+  test("paging the whole corpus yields each row exactly once", async () => {
+    // A completeness check, and ONLY that. Two successive comments here claimed
+    // more and both were wrong: first that this guards the tiebreaker (it passes
+    // with or without it), then that the conformance test above guards it (it
+    // does not — `sessions_page_idx` supplies the `id` ordering for free, so
+    // dropping the SQL tiebreaker changes no observable order; measured over all
+    // 72 windows, zero differed).
+    //
+    // What actually guards the SQL tiebreaker is the COLLATE count assertion,
+    // which requires two occurrences. That is a syntactic guard, and saying so is
+    // the point: no behavioural test here can distinguish it.
+    const pg = await createPgliteStore();
+    await fill(pg);
+    const seen: string[] = [];
+    for (let offset = 0; offset < corpus.length; offset += 3) {
+      seen.push(...(await pg.sessionsPage({ limit: 3, offset })).sessions.map((s) => s.id));
+    }
+    expect(seen.length).toBe(corpus.length);
+    expect(new Set(seen).size).toBe(corpus.length);
+    expect([...seen].sort()).toEqual(corpus.map((c) => c.id).sort());
+    await pg.close();
   });
 });

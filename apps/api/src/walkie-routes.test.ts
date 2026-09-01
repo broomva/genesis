@@ -1341,7 +1341,24 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
       sessionScans++;
       return origList();
     };
-    return { store, reads: () => turnReads, scans: () => sessionScans };
+    // And the bounded read that replaced it. Counting BOTH is what makes "one scan,
+    // not two" checkable as the stronger "no scan at all". (An earlier version of
+    // this comment justified it by claiming pages() alone cannot see a revert —
+    // false, and retracted at the assertion site: a supervisor-level revert makes
+    // pages() 0. What scans() adds is the narrower case where sessionsPage is
+    // ITSELF implemented over listSessions.)
+    let pageQueries = 0;
+    const origPage = store.sessionsPage.bind(store);
+    (store as unknown as { sessionsPage: (o: unknown) => unknown }).sessionsPage = (o: unknown) => {
+      pageQueries++;
+      return origPage(o as { limit?: number; offset?: number });
+    };
+    return {
+      store,
+      reads: () => turnReads,
+      scans: () => sessionScans,
+      pages: () => pageQueries,
+    };
   };
 
   const pagedApp = (store: unknown) =>
@@ -1515,14 +1532,37 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     expect(reads()).toBe(10);
   });
 
-  test("a request costs ONE session scan, not two", async () => {
+  test("a request makes ONE sessionsPage call and never calls listSessions", async () => {
     // The first version paired listThreads with a separate countThreads and each
     // scanned independently — a paging change that removed the per-session turn
-    // reads and doubled the scan underneath them, on a polled surface.
-    const { store, scans } = seeded(250);
+    // reads and doubled the scan underneath them, on a polled surface. That was
+    // fixed to one scan; this now asserts ZERO, because the page and the total
+    // both come from `sessionsPage`, which bounds the retrieval in SQL.
+    //
+    // NAMED for what it observes. It was called "...and NO full scan", which
+    // `scans()` cannot see: that counter increments on `listSessions` only and is
+    // structurally blind to the `count(*)` the request still issues. The request
+    // does perform a full scan, for the total.
+    //
+    // Both assertions, and NEITHER is redundant — though the first version of
+    // this comment claimed `scans() === 0` was the load-bearing one "because the
+    // page count cannot distinguish a revert". That was wrong: `pages()` counts
+    // `sessionsPage` specifically, so a supervisor-level revert to
+    // `listSessions()`-then-slice makes it 0 and fails on its own.
+    //
+    // What `scans() === 0` actually adds is the narrower case the page count
+    // cannot see: a `sessionsPage` that is itself implemented over
+    // `listSessions()`. That returns a byte-identical response through exactly
+    // one `sessionsPage` call, and only the absence of the unbounded read
+    // distinguishes it.
+    const { store, scans, pages } = seeded(250);
     const app = pagedApp(store);
     await get(app, "/walkie/threads?limit=10", H);
-    expect(scans()).toBe(1);
+    // scans() FIRST. Asserted second it was unreachable: every mutant that could
+    // touch it drives pages() to 0 or 2, so the pages() expect threw and this line
+    // never executed. An assertion that cannot be reached cannot be load-bearing.
+    expect(scans()).toBe(0);
+    expect(pages()).toBe(1);
   });
 
   test("the mirror and its twin page IDENTICALLY", async () => {

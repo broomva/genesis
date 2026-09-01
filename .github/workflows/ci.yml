@@ -146,7 +146,10 @@ jobs:
   #
   # timeout 10: the duration sweep is 8 mutants and ran in 0.9s on the runner.
   # Ten minutes is not a prediction, it is room for the walkie sweep to be added
-  # back (5m33s locally, and a hosted runner is slower) without this line needing
+  # back. NOTE: that reservation no longer holds. The sweep grew to 104 mutants and
+  # its SUITE gained packages/db/src/store.test.ts, which takes the per-mutant suite
+  # run from ~0.6s to ~12s — measured ~20min locally, not the 5m33s this line was
+  # sized for. Wiring it in needs either a larger timeout or a narrower SUITE, and
   # to be revisited in the same breath. The scripts assert their own arity, so a
   # mutant added without updating EXPECTED_MUTANTS fails loudly here rather than
   # shrinking the sweep in silence.

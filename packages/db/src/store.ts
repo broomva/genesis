@@ -8,10 +8,11 @@ import {
   type Turn,
   type TurnPart,
   type Workspace,
+  assertPageOpts,
   isoNow,
   newId,
 } from "@genesis/core";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -120,6 +121,65 @@ export class DrizzleStore implements Store {
   async listSessions(): Promise<Session[]> {
     const r = await this.db.select().from(sessions).orderBy(sessions.createdAt);
     return r.map(toSession);
+  }
+
+  /** See `Store.sessionsPage`.
+   *
+   *  THE BOUND IS `offset + limit`, NOT `limit`. `OFFSET n` makes Postgres walk
+   *  and discard n index tuples before the first returned row, so the work grows
+   *  with how deep the page is. Measured, PGlite, 2000 sessions, limit 10:
+   *
+   *    offset=0     Index Scan, rows=10
+   *    offset=10    Index Scan, rows=20
+   *    offset=1990  Index Scan, rows=2000
+   *
+   *  Which still beats what this replaced — that read every row AND sorted them —
+   *  but "the database stops at the window" is false, and an earlier version of
+   *  this comment said it. Keyset paging is the shape that is actually bounded;
+   *  it is not adopted here.
+   *
+   *  The page depends on `sessions_page_idx`, whose collation must match this
+   *  ORDER BY. Drop the pin and the planner reverts to Seq Scan + Sort.
+   *
+   *  The TOTAL is a full-relation `count(*)` on every call. An exact count costs a
+   *  scan; that is the price of returning `total` at all.
+   *
+   *  REPEATABLE READ makes the page and the total one snapshot — within a call.
+   *  Across calls nothing is stable, which is why `apps/web` de-dupes by threadId.
+   *
+   *  `count()` is drizzle's, carrying `.mapWith(Number)`: `count(*)` is int8 and
+   *  postgres-js registers no parser for OID 20, so it arrives as a STRING there
+   *  and a number on PGlite. */
+  async sessionsPage(opts: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{ sessions: Session[]; total: number }> {
+    assertPageOpts(opts);
+    const offset = opts.offset ?? 0;
+    return this.db.transaction(
+      async (tx: DrizzleDb) => {
+        const ordered = tx
+          .select()
+          .from(sessions)
+          .orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);
+        const rows =
+          opts.limit === undefined
+            ? await ordered.offset(offset)
+            : await ordered.limit(opts.limit).offset(offset);
+        const totals = await tx.select({ n: count() }).from(sessions);
+        // THROWS rather than substituting a sentinel. `?? 0` passed NaN through;
+        // the review-motivated `Number.isFinite(n) ? n : 0` that replaced it was
+        // worse — `hasMore: offset + 0 < 0` is false, exactly like the NaN it
+        // fixed, so the client stopped paging silently AND the anomaly was hidden.
+        // A non-number here is a driver contract violation, not a value to guess at.
+        const n = totals[0]?.n;
+        if (typeof n !== "number" || !Number.isFinite(n)) {
+          throw new TypeError(`sessionsPage: count(*) returned ${typeof n} ${String(n)}`);
+        }
+        return { sessions: rows.map(toSession), total: n };
+      },
+      { isolationLevel: "repeatable read" },
+    );
   }
 
   async upsertSession(s: Session): Promise<Session> {
