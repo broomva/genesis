@@ -80,24 +80,44 @@ If you add anything to a voice route, this is the property to re-check by hand.
 > regenerates it, and it is a claim about Claude Code rather than about this repository.
 > Treat the latency wall as real and unmeasured, per BRO-2390.
 
-### `normalizeCallerId` is duplicated, and the drift guard does not guard drift
+### There is exactly ONE phone normalizer — keep it that way
 
-`normalizeCallerId` (`apps/api/src/voice.ts:32`) and `normalizePhone`
-(`apps/chat-bot/src/allowlist.ts:50`) are two hand-copies of one rule,
-`value.replace(/\D/g, "")`. If they diverge, a caller whose number **is** allowlisted
+`normalizePhoneId` in **`packages/identity`** is the only digit-stripping phone rule in
+this repo. Do not write a second one; import it. `normalizeCallerId` (`voice.ts`),
+`normalizePhone` (`allowlist.ts`) and `normalizeId` (`operator.ts`) are all aliases of it.
+
+It used to exist **five** times under four names, and what held them together was a test
+named `DRIFT GUARD` in `voice.test.ts` that **re-declared the rule inline** rather than
+importing the other implementation. With `normalizePhone` mutated to a completely
+unrelated rule it still reported 14 pass / 0 fail — it could not detect the drift it was
+named for. The consequence it described was real: a caller whose number **is** allowlisted
 resolves as `unknown` and silently drops to take-a-message, with nothing reporting it.
 
-**NOT ENFORCED, despite appearances.** The test named `DRIFT GUARD` at
-`apps/api/src/voice.test.ts:52` **re-declares the rule inline** —
-`const allowlistRule = (v: string) => v.replace(/\D/g, "")` — and never imports or reads
-`allowlist.ts`. A change to `normalizePhone` cannot fail it. There is no reciprocal guard
-in `allowlist.test.ts` either.
+Three pairs had to agree, not one — `isOperator` compares its normalized env var against
+`principal.id`, which comes from the same rule via `canonical()`.
 
-`voice.ts:31`'s own comment says "see the drift test", so the false confidence is already
-in the codebase. **Do not trust it.** Tracked as BRO-2409; the fix shape this repo already
-uses for the same problem is the `readFileSync` + regex comparison at
-`voice-queue.test.ts:279` (`HANDLED_FILE`), because `normalizePhone` is module-private and
-cannot be imported.
+**The guard is now `packages/identity/src/one-copy.test.ts`**, which derives its file list
+from `git ls-files` and fails on a second copy anywhere. It assembles its needle from
+parts so it cannot match itself. Prefer that shape over the `readFileSync` + regex
+comparison at `voice-queue.test.ts` (`HANDLED_FILE`) for this problem: comparing two
+implementations keeps two implementations, and the class only disappears when there is one.
+
+Known limits, so you do not have to rediscover them:
+
+- It matches a fixed list of spellings — the `\D` form, both negated-character-class
+  forms, and the `replaceAll` variant — not the rule's *meaning*. A sufficiently creative
+  rewrite (a hoisted regex constant, a hand-rolled character filter) is not caught: the
+  gate stops accidents, not determined evasion. The list is in `NEEDLES` and its length is
+  pinned, so read it there rather than trusting this sentence — an earlier version of this
+  line claimed `replaceAll` was covered when it was not, and a working sixth copy walked
+  past the gate while this file said otherwise.
+- `normalizePhoneId` is **not a validator**: garbage yields `""`, and `""` is a dangerous
+  id to route on. `voice-queue.ts` says so. One pre-existing site does not check it —
+  `allowlist.ts`'s bare-entry branch in `principalOf` — which is low-reachability but real.
+- It does **not** canonicalise dialling forms. `"0057 301 775 8620"` and
+  `"+57 301 775 8620"` are the same human and normalize to **different** ids. That fails
+  closed (the operator-pasted `0057…` simply never matches) and changing it would merge
+  principals, so it is a deliberate limit with a test pinning it, not an oversight.
 
 ---
 
