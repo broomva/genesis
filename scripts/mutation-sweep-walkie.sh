@@ -57,7 +57,13 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts
           packages/core/src/store.ts packages/db/src/store.ts)
-EXPECTED_MUTANTS=96
+EXPECTED_MUTANTS=98
+
+# Subject paths used by mutants below. Defined HERE, not at first use: the
+# paging mutants sit ~25 lines above where these used to be declared, and with
+# `set -u` an undefined expansion aborts the run rather than mis-targeting.
+CS=packages/core/src/store.ts
+DS=packages/db/src/store.ts
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -658,11 +664,10 @@ echo
 
 M=apps/api/src/ttl-memo.ts
 
-mutate "listThreads pages the RESULT, so the work stays O(box)" "$C" \
-  "    return opts.limit === undefined
-      ? ordered.slice(offset)
-      : ordered.slice(offset, offset + opts.limit);" \
-  "    return ordered.slice(offset);" \
+mutate "listThreads pages the RESULT, so the work stays O(box)" "$CS" \
+  "    const page =
+      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);" \
+  "    const page = ordered.slice(offset);" \
   "bounds the WORK"
 
 mutate "the 200 cap on /threads stops truncating" "$S" \
@@ -684,8 +689,6 @@ mutate "the checks cache stores AFTER resolving, losing in-flight de-duplication
 # supervisor.ts is now `compareSessionsNewestFirst`, and the bound is SQL. The
 # anchor moved with it — a sweep whose anchor no longer exists ERRORs rather
 # than silently scoring nothing, which is how this one was caught.
-CS=packages/core/src/store.ts
-DS=packages/db/src/store.ts
 mutate "listThreads stops ordering newest-first" "$CS" \
   '  a.createdAt < b.createdAt
     ? 1
@@ -708,6 +711,14 @@ mutate "the pg page stops bounding at the source and slices nothing" "$DS" \
   '        : ordered.limit(opts.limit).offset(opts.offset ?? 0);' \
   '        : ordered.offset(opts.offset ?? 0);' \
   "no query retrieves more rows than the window"
+mutate "the page total becomes a stub instead of a count" "$DS" \
+  '.select({ ...getTableColumns(sessions), total: sql<number>`count(*) over()` })' \
+  '.select({ ...getTableColumns(sessions), total: sql<number>`0` })' \
+  "the total describes the page"
+mutate "the empty-page total fallback is removed, so a past-the-end page reports NaN" "$DS" \
+  '    if (rows.length === 0) {' \
+  '    if (false) {' \
+  "identical pages at every boundary"
 mutate "the pg ORDER BY drops COLLATE C and follows the database locale" "$DS" \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
   '.orderBy(sql`${sessions.createdAt} DESC, ${sessions.id} ASC`);' \
@@ -726,7 +737,7 @@ mutate "the default page size drops to 50" "$S" \
 mutate "the route scans sessions twice per request" "$S" \
   "    const { threads, total } = await supervisor.listThreadsPage({ limit, offset });" \
   "    const threads = await supervisor.listThreads({ limit, offset }); const total = (await supervisor.listThreadsPage({})).total;" \
-  "ONE session scan"
+  "NO full scan"
 
 if [ "$total" -ne "$EXPECTED_MUTANTS" ]; then
   echo "$total mutants ran, expected $EXPECTED_MUTANTS — a mutant was added or removed"

@@ -530,6 +530,31 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     await store.close();
   });
 
+  test("a non-empty page costs ONE query, so the total describes the page", async () => {
+    // The code this replaced read every session once, so its page and its total
+    // could not disagree. Splitting them across two statements would lose that:
+    // an insert landing between them yields a total that does not describe the
+    // page, and `hasMore` derived from it is wrong. `count(*) over()` keeps both
+    // in one snapshot.
+    //
+    // Concurrency is not reproducible here, so this asserts the mechanism that
+    // makes the race impossible — one query — rather than trying to lose a race.
+    const { store, seen } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 40 }, (_, i) => ({
+        id: `sess-${String(i).padStart(3, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    seen.length = 0;
+    const page = await store.sessionsPage({ limit: 5 });
+    expect(page.sessions.length).toBe(5);
+    expect(page.total).toBe(40);
+    expect(seen.filter((q) => /select/i.test(q.sql)).length).toBe(1);
+    await store.close();
+  });
+
   test("an unbounded page still returns everything", async () => {
     // The bound must not become a silent cap: no `limit` means every session,
     // which is what existing callers expect.
@@ -603,9 +628,14 @@ describe("sessionsPage — the two Store implementations agree (follow-up to BRO
     // the failure mode, and one sampled page would miss it.
     for (let limit = 1; limit <= corpus.length; limit++) {
       for (let offset = 0; offset <= corpus.length; offset++) {
-        expect(ids(await pg.sessionsPage({ limit, offset }))).toEqual(
-          ids(await mem.sessionsPage({ limit, offset })),
-        );
+        const a = await pg.sessionsPage({ limit, offset });
+        const b = await mem.sessionsPage({ limit, offset });
+        expect(ids(a)).toEqual(ids(b));
+        // The TOTAL too, not just the page. `offset === corpus.length` yields an
+        // empty page, which is the branch where the pg store cannot read the
+        // total off a row and falls back to a count — comparing only ids left
+        // that branch unchecked.
+        expect(a.total).toBe(b.total);
       }
     }
     await pg.close();

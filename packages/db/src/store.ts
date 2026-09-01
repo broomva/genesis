@@ -11,7 +11,7 @@ import {
   isoNow,
   newId,
 } from "@genesis/core";
-import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, count, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -135,7 +135,16 @@ export class DrizzleStore implements Store {
     offset?: number;
   }): Promise<{ sessions: Session[]; total: number }> {
     const ordered = this.db
-      .select()
+      // `count(*) over()` is the total BEFORE the limit, carried on each row of
+      // the page, so the window and the count come from ONE query and therefore
+      // ONE snapshot. Two queries would be a regression against the code this
+      // replaced: that read every session once, so its page and its total could
+      // not disagree. Split across two statements, a concurrent insert between
+      // them yields a total that does not describe the page — `hasMore` computed
+      // from it would be wrong on a polled surface. It is also one round trip
+      // instead of two. `toSession` projects named columns, so the extra field
+      // cannot leak into `Session`.
+      .select({ ...getTableColumns(sessions), total: sql<number>`count(*) over()` })
       .from(sessions)
       // `COLLATE "C"` is load-bearing, not decoration. Both columns are `text`,
       // so ORDER BY runs under the DATABASE's collation while the in-memory
@@ -157,11 +166,16 @@ export class DrizzleStore implements Store {
       opts.limit === undefined
         ? ordered.offset(opts.offset ?? 0)
         : ordered.limit(opts.limit).offset(opts.offset ?? 0);
-    const [rows, totals] = await Promise.all([
-      windowed,
-      this.db.select({ n: count() }).from(sessions),
-    ]);
-    return { sessions: rows.map(toSession), total: Number(totals[0]?.n ?? 0) };
+    const rows = await windowed;
+    // An offset past the end returns no rows, so the window function carries no
+    // total — that is the ONLY case that needs a second query, and it is the one
+    // case where page/total consistency cannot matter (an empty page has no
+    // next page to get wrong).
+    if (rows.length === 0) {
+      const totals = await this.db.select({ n: count() }).from(sessions);
+      return { sessions: [], total: Number(totals[0]?.n ?? 0) };
+    }
+    return { sessions: rows.map(toSession), total: Number(rows[0].total) };
   }
 
   async upsertSession(s: Session): Promise<Session> {
