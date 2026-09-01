@@ -127,13 +127,40 @@ function toDynamicToolPart(p: StoredToolPart): UIMessage["parts"][number] {
   return { ...base, state: "input-available", input: p.input };
 }
 
+/** One request's worth of threads. The engine caps a response at 200 (BRO-2418),
+ *  so the drawer pages rather than showing a truncated list. */
+const THREAD_PAGE = 200;
+
+/** A runaway guard, NOT a display limit. `hasMore` ending the loop is the normal
+ *  exit; this only bounds a server that never says false. */
+const MAX_THREAD_PAGES = 25;
+
 /** Fetch the thread list for the drawer. Returns [] on any non-OK / error so the
- *  UI degrades to "no conversations" rather than throwing. */
+ *  UI degrades to "no conversations" rather than throwing.
+ *
+ *  PAGES, because the engine bounds each response. Without this the drawer would
+ *  silently show the first 200 of N with no control to reach the rest — and the
+ *  drawer filters archived threads and searches CLIENT-SIDE over what it already
+ *  has, so an unfetched thread is invisible to search as well as to scroll. The
+ *  deployed box had 226 threads when this was written, so the truncation was not
+ *  hypothetical. */
 export async function fetchThreads(signal?: AbortSignal): Promise<ThreadSummary[]> {
-  const res = await fetch("/api/threads", { signal });
-  if (!res.ok) return [];
-  const data = (await res.json()) as { threads?: ThreadSummary[] };
-  return data.threads ?? [];
+  const all: ThreadSummary[] = [];
+  for (let page = 0; page < MAX_THREAD_PAGES; page++) {
+    const res = await fetch(`/api/threads?limit=${THREAD_PAGE}&offset=${page * THREAD_PAGE}`, {
+      signal,
+    });
+    // Degrade to what we already have rather than throwing away a good first
+    // page because a later one failed.
+    if (!res.ok) return all;
+    const data = (await res.json()) as { threads?: ThreadSummary[]; hasMore?: boolean };
+    const batch = data.threads ?? [];
+    all.push(...batch);
+    // An empty page also ends it: a server claiming `hasMore` while returning
+    // nothing would otherwise spin until the page cap.
+    if (!data.hasMore || batch.length === 0) return all;
+  }
+  return all;
 }
 
 /** Fetch one thread's transcript and map engine turns → AI SDK UIMessages for

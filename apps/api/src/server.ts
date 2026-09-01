@@ -1175,10 +1175,12 @@ export function build(opts: BuildOpts) {
     // tail UNREACHABLE rather than paged, and the session list only grows.
     const rawOffset = Number(c.req.query("offset"));
     const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
-    const [threads, total] = await Promise.all([
-      supervisor.listThreads({ limit, offset }),
-      supervisor.countThreads(),
-    ]);
+    // ONE session scan for both. Pairing listThreads with a separate count made
+    // a request cost two full `SELECT * FROM sessions` where it used to cost one
+    // — a paging change that removed the per-session turn reads and quietly
+    // doubled the scan underneath them. It also read the two independently, so a
+    // concurrent delete between them could make `hasMore` transiently wrong.
+    const { threads, total } = await supervisor.listThreadsPage({ limit, offset });
     // "IS THERE MORE AFTER THIS PAGE" — computed from where this page ENDS, not
     // from whether it is full, so it is false on the final page.
     return { threads, total, hasMore: offset + threads.length < total };

@@ -1317,8 +1317,11 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
         workspaceId: WS,
         threadId: `thread-${i}`,
         phase: "idle",
-        // Descending, so `thread-0` is newest and page order is checkable.
-        createdAt: `2026-08-${String(31 - (i % 28)).padStart(2, "0")}T12:00:${String(i % 60).padStart(2, "0")}.000Z`,
+        // STRICTLY descending, so `thread-0` really is newest and page order is
+        // checkable. The first version was `31 - (i % 28)`, which wraps every 28
+        // — thread-56 was the newest and thread-0 ranked 9th of 250 — so the
+        // comment was false and no test could assert ordering against it.
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
       });
     }
     let turnReads = 0;
@@ -1329,7 +1332,16 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
       turnReads++;
       return original(id);
     };
-    return { store, reads: () => turnReads };
+    // Counted too: on the pg store `listSessions` is a full `SELECT *` that
+    // hydrates every row, so how many times a request does it is the cost the
+    // turn-read count does not show.
+    let sessionScans = 0;
+    const origList = store.listSessions.bind(store);
+    (store as unknown as { listSessions: () => unknown }).listSessions = () => {
+      sessionScans++;
+      return origList();
+    };
+    return { store, reads: () => turnReads, scans: () => sessionScans };
   };
 
   const pagedApp = (store: unknown) =>
@@ -1355,6 +1367,75 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     expect(r.threads.length).toBe(200);
     expect(r.total).toBe(250);
     expect(r.hasMore).toBe(true);
+  });
+
+  test("pages are ordered newest-first and do not overlap", async () => {
+    // The sort moved above the slice, so ordering and page disjointness are now
+    // properties of the SAME operation — and neither was asserted.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const page = async (q: string) =>
+      (
+        (await (await get(app, `/walkie/threads?${q}`, H)).json()) as {
+          threads: Array<{ threadId: string }>;
+        }
+      ).threads.map((t) => t.threadId);
+    expect(await page("limit=3")).toEqual(["thread-0", "thread-1", "thread-2"]);
+    expect(await page("limit=3&offset=3")).toEqual(["thread-3", "thread-4", "thread-5"]);
+  });
+
+  test("equal timestamps do not make pages overlap or drop rows", async () => {
+    // Ties decide whether a page boundary is stable. `Array#sort` is stable in
+    // both the old and new orders, but nothing asserted it — and the previous
+    // fixture had 250 distinct timestamps, so the case was unreachable.
+    const store = new InMemoryStore();
+    for (let i = 0; i < 10; i++) {
+      store.upsertSession({
+        id: `s-${i}`,
+        workspaceId: WS,
+        threadId: `tie-${i}`,
+        phase: "idle",
+        createdAt: "2026-08-31T12:00:00.000Z", // all identical
+      });
+    }
+    const app = pagedApp(store);
+    const ids = async (q: string) =>
+      (
+        (await (await get(app, `/walkie/threads?${q}`, H)).json()) as {
+          threads: Array<{ threadId: string }>;
+        }
+      ).threads.map((t) => t.threadId);
+    const first = await ids("limit=5");
+    const second = await ids("limit=5&offset=5");
+    expect(first.length).toBe(5);
+    expect(second.length).toBe(5);
+    expect(first.filter((x) => second.includes(x))).toEqual([]); // disjoint
+    expect(new Set([...first, ...second]).size).toBe(10); // and complete
+  });
+
+  test("the DEFAULT is 200, not 50 — the constant the design argument rests on", async () => {
+    // Nothing enforced this: the source comment and the PR body both spend a
+    // paragraph on "200, NOT 50, and the difference is deliberate", and mutating
+    // the default to 50 left every test green. A defended constant with no
+    // assertion is a preference, not a decision.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads", H)).json()) as { threads: unknown[] };
+    expect(r.threads.length).toBe(200);
+  });
+
+  test("hasMore is FALSE past the end, not just at it", async () => {
+    // `offset + threads.length !== total` passes every earlier case and is a live
+    // bug here: at offset beyond total it reports hasMore forever, so a client
+    // paging until false never stops.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?offset=300", H)).json()) as {
+      threads: unknown[];
+      hasMore: boolean;
+    };
+    expect(r.threads.length).toBe(0);
+    expect(r.hasMore).toBe(false);
   });
 
   test("offset reaches the tail the cap would otherwise strand", async () => {
@@ -1399,6 +1480,16 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     };
     expect(r.threads.length).toBe(10);
     expect(reads()).toBe(10);
+  });
+
+  test("a request costs ONE session scan, not two", async () => {
+    // The first version paired listThreads with a separate countThreads and each
+    // scanned independently — a paging change that removed the per-session turn
+    // reads and doubled the scan underneath them, on a polled surface.
+    const { store, scans } = seeded(250);
+    const app = pagedApp(store);
+    await get(app, "/walkie/threads?limit=10", H);
+    expect(scans()).toBe(1);
   });
 
   test("the mirror and its twin page IDENTICALLY", async () => {

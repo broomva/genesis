@@ -1210,15 +1210,33 @@ export class Supervisor {
    *  test expects; the bound lives at the route, like `/walkie/asks`. */
   async listThreads(opts: { limit?: number; offset?: number } = {}): Promise<ThreadSummary[]> {
     await this.ensureWorkspace(); // hydrate the cache so workspaceName resolves (BRO-1629)
-    const sessions = await this.store.listSessions();
-    // Newest-first by createdAt (ISO strings sort lexicographically).
+    return this.summarize(this.orderAndSlice(await this.store.listSessions(), opts));
+  }
+
+  /** Newest-first, then the requested window. Shared by `listThreads` and
+   *  `listThreadsPage` so the two cannot order or slice differently. */
+  private orderAndSlice(
+    sessions: Awaited<ReturnType<Store["listSessions"]>>,
+    opts: { limit?: number; offset?: number },
+  ) {
+    // Newest-first by createdAt (ISO strings sort lexicographically). `sort` is
+    // stable, so equal timestamps keep the store's order and page boundaries
+    // stay disjoint.
     const ordered = [...sessions].sort((a, b) =>
       a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
     );
     const offset = opts.offset ?? 0;
-    const page =
-      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);
-    const summaries = await Promise.all(
+    return opts.limit === undefined
+      ? ordered.slice(offset)
+      : ordered.slice(offset, offset + opts.limit);
+  }
+
+  /** The per-session turn read. This is the O(page) part — one query per row
+   *  returned, which is why the slice above has to happen first. */
+  private async summarize(
+    page: Awaited<ReturnType<Store["listSessions"]>>,
+  ): Promise<ThreadSummary[]> {
+    return Promise.all(
       page.map(async (s): Promise<ThreadSummary> => {
         const turns = await this.store.turnsForSession(s.id);
         return {
@@ -1236,16 +1254,28 @@ export class Supervisor {
         };
       }),
     );
-    // Already ordered: the sort moved above the slice so the page is the right
-    // rows, not an arbitrary window sorted after the fact.
-    return summaries;
   }
 
-  /** How many threads exist, for the route's `hasMore`. A count, not a page —
-   *  it reads the session list and never touches turns, so it does not
-   *  reintroduce the cost the paging above removes. */
-  async countThreads(): Promise<number> {
-    return (await this.store.listSessions()).length;
+  /** A page AND the total, from ONE session scan.
+   *
+   *  The first version paired `listThreads` with a separate `countThreads`, and
+   *  each called `listSessions()` — which on the pg store is a full
+   *  `SELECT * FROM sessions`, hydrating every row. That made a request cost TWO
+   *  full scans where it previously cost one: a paging change that removed the
+   *  per-session turn reads and quietly doubled the thing underneath them. The
+   *  turns cost is what the comment there talked about, and it was silent about
+   *  this.
+   *
+   *  Callers wanting only the page keep using `listThreads`. */
+  async listThreadsPage(
+    opts: { limit?: number; offset?: number } = {},
+  ): Promise<{ threads: ThreadSummary[]; total: number }> {
+    await this.ensureWorkspace();
+    const sessions = await this.store.listSessions();
+    return {
+      threads: await this.summarize(this.orderAndSlice(sessions, opts)),
+      total: sessions.length,
+    };
   }
 
   /** The engine ids registered on this Supervisor (always includes `print`; plus

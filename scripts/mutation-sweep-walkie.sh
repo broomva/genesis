@@ -44,10 +44,15 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts
        apps/api/src/deployment-claims.test.ts
-       apps/api/src/ttl-memo.test.ts)
+       apps/api/src/ttl-memo.test.ts
+       # supervisor.ts is a SUBJECT, so its own tests belong here. Without this the
+       # sweep scored supervisor mutants against a suite that excluded them: a
+       # reversed sort in listThreads survived the sweep and was caught only by
+       # supervisor.test.ts, which the sweep never ran.
+       packages/core/src/supervisor.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=89
+EXPECTED_MUTANTS=91
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -649,8 +654,10 @@ echo
 M=apps/api/src/ttl-memo.ts
 
 mutate "listThreads pages the RESULT, so the work stays O(box)" "$C" \
-  "      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);" \
-  "      ordered.slice(offset);" \
+  "    return opts.limit === undefined
+      ? ordered.slice(offset)
+      : ordered.slice(offset, offset + opts.limit);" \
+  "    return ordered.slice(offset);" \
   "bounds the WORK"
 
 mutate "the 200 cap on /threads stops truncating" "$S" \
@@ -664,9 +671,19 @@ mutate "hasMore inferred from a full page (true on the last one)" "$S" \
   "final page that happens to be exactly full"
 
 mutate "the checks cache stores AFTER resolving, losing in-flight de-duplication" "$M" \
-  "    entries.set(key, { at: now(), value });" \
-  "    value.then(() => entries.set(key, { at: now(), value }));" \
+  "    entries.set(key, entry);" \
+  "    value.then(() => entries.set(key, entry));" \
   "CONCURRENT calls share ONE execution"
+
+mutate "listThreads stops ordering newest-first" "$C" \
+  "      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0," \
+  "      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0," \
+  "ordered newest-first"
+
+mutate "the route scans sessions twice per request" "$S" \
+  "    const { threads, total } = await supervisor.listThreadsPage({ limit, offset });" \
+  "    const threads = await supervisor.listThreads({ limit, offset }); const total = (await supervisor.listThreadsPage({})).total;" \
+  "ONE session scan"
 
 if [ "$total" -ne "$EXPECTED_MUTANTS" ]; then
   echo "$total mutants ran, expected $EXPECTED_MUTANTS — a mutant was added or removed"

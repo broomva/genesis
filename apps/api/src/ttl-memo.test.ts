@@ -47,6 +47,23 @@ describe("ttlMemo", () => {
     expect(c.calls()).toBe(1);
   });
 
+  test("an IN-FLIGHT call is shared even past the TTL", async () => {
+    // The window used to be stamped at START, so a call still running when it
+    // expired was re-executed while pending. The memoized function here can run
+    // longer than the window (three subprocesses, 20s each, against a 10s TTL),
+    // so this was the normal case under a slow network, not an edge one.
+    const c = counting("x");
+    let t = 0;
+    const memo = ttlMemo(c.fn, 1_000, () => t);
+    const first = memo("a");
+    t = 5_000; // long past the window, and the first call has NOT resolved
+    const second = memo("a");
+    expect(c.calls()).toBe(1);
+    c.release();
+    expect(await Promise.all([first, second])).toEqual(["x", "x"]);
+    expect(c.calls()).toBe(1);
+  });
+
   test("distinct keys do not share", async () => {
     const c = counting("x");
     const memo = ttlMemo(c.immediate, 10_000);
