@@ -388,6 +388,9 @@ const { app, websocket } = build({
   walkieSecret,
   askLog,
   askLogDir,
+  // The built walkie client, served from here so it shares an origin with the
+  // API it calls (BRO-2416). Unset → the route does not exist.
+  walkieClientDir: process.env.GENESIS_WALKIE_CLIENT_DIR,
   store,
   hostProvider,
   remoteCwd: process.env.GENESIS_REMOTE_CWD,

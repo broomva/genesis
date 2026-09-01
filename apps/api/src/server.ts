@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   type AgentEvent,
   type ConcurrencyLimits,
@@ -27,6 +29,7 @@ import {
   secretMatches,
 } from "./voice";
 import { readQueueStatus } from "./voice-queue";
+import { resolveAsset } from "./walkie-client";
 import { browseForAdd } from "./workspace-browse";
 import { workspaceChecks } from "./workspace-checks";
 import {
@@ -133,6 +136,17 @@ export interface BuildOpts {
    *  purpose: the two stores must not share a directory, so that an ask can
    *  never be mistaken for caller-originated intake. */
   askLogDir?: string;
+  /** A built walkie client to serve at /walkie/app/* (BRO-2416).
+   *
+   *  OMITTED → the route is not registered, same rule as every other walkie
+   *  option: an unconfigured deploy must 404 rather than answer.
+   *
+   *  Genesis serves the client so that client and API share ONE ORIGIN. There
+   *  are no CORS headers on /walkie/* and no OPTIONS handler — measured — so a
+   *  client hosted elsewhere has its reads withheld by the browser and its
+   *  writes never sent. And it needs no public exposure: the operator's phone is
+   *  on the tailnet, while `tailscale serve` publishes only /voice. */
+  walkieClientDir?: string;
   // NO voiceDelivery OPTION. Three designs failed here and the third failed most
   // instructively: an env string was an operator assertion, so it became a
   // {channel, deliver} object — and `deliver` had zero call sites, so passing
@@ -659,6 +673,43 @@ export function build(opts: BuildOpts) {
         ...(degraded ? { degraded } : {}),
       });
     });
+
+    // THE CLIENT ITSELF, so client and API share one origin (BRO-2416).
+    //
+    // NOT behind walkieDenied. index.html, app.js and app.css carry no
+    // credential — the client reads its secret from localStorage precisely so
+    // the bundle can be served without one — and gating the shell would mean
+    // putting the secret in a URL to fetch the page that asks for it. The API
+    // routes above are what the secret protects.
+    if (opts.walkieClientDir) {
+      const clientDir = opts.walkieClientDir;
+      // IT MUST LOOK LIKE A BUILT CLIENT, checked at BUILD like the sibling
+      // misconfigurations above rather than at request time.
+      //
+      // Not a security boundary — anyone who can set this env var owns the
+      // process — but the realistic failure here is an operator pointing it at
+      // the wrong directory, and the extension allowlist alone would then happily
+      // serve any .html/.json/.png under it. Requiring the two files every walkie
+      // build produces turns "pointed at my home directory" from a quiet
+      // exposure into a refusal at boot.
+      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {
+        throw new Error(
+          `walkieClientDir does not look like a built walkie client (no index.html or app.js in ${clientDir}). Run \`bun run build\` in broomva/walkie and point this at its dist/.`,
+        );
+      }
+      app.get("/walkie/app/*", (c) => {
+        const rest = c.req.path.slice("/walkie/app".length);
+        const asset = resolveAsset(clientDir, rest);
+        if (!asset) return c.text("not found", 404);
+        // no-store on the DOCUMENT only: the shell changes with every deploy and
+        // a stale index.html pointing at a replaced bundle is a white screen.
+        // Hashed assets could be cached, but nothing here is hashed yet, so the
+        // honest setting is the conservative one.
+        c.header("Cache-Control", "no-store");
+        c.header("Content-Type", asset.type);
+        return c.body(Bun.file(asset.path).stream() as unknown as ReadableStream);
+      });
+    }
 
     // The decision coming back.
     app.post("/walkie/answer", async (c) => {

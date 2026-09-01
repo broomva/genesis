@@ -39,13 +39,13 @@ cd "$(dirname "$0")/.." || exit 2
 # to the test written to kill it and SURVIVED for a reason unrelated to coverage.
 # A sweep's suite has to include every file that tests its subjects — this one
 # mutates server.ts, so every server.ts test belongs here.
-SUITE=(apps/api/src/ask-producer.test.ts packages/projection/src/asks-raised.test.ts
+SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts packages/projection/src/asks-raised.test.ts
        apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
-SUBJECTS=(packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
+SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=59
+EXPECTED_MUTANTS=66
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -305,7 +305,8 @@ mutate "the stream is never cancelled past the cap" "$S" \
   '        return null;' \
   "stream is CANCELLED past the cap"
 mutate "no-store header dropped" "$S" \
-  '      c.header("Cache-Control", "no-store");' '      void c;' \
+  '      c.header("Cache-Control", "no-store");
+      c.header("Pragma", "no-cache");' '      void c;' \
   "Cache-Control: no-store"
 mutate "answering twice overwrites again" "$S" \
   '      if (existing.status === "answered") {' '      if (false) {' \
@@ -479,6 +480,35 @@ mutate "a throwing producer takes the turn down with it" "$C" \
                   );' \
   '                  throw e;' \
   "does not fail the turn"
+
+echo "serving the client — a route that maps request text onto a filesystem"
+W=apps/api/src/walkie-client.ts
+mutate "containment checked without the separator, so a sibling dir gets in" "$W" \
+  '  if (candidate !== base && !candidate.startsWith(`${base}${sep}`)) return undefined;' \
+  '  if (candidate !== base && !candidate.startsWith(base)) return undefined;' \
+  "STARTS WITH THE ROOT"
+mutate "resolution stops following symlinks" "$W" \
+  '    candidate = realpathSync(resolve(join(base, rel)));' \
+  '    candidate = resolve(join(base, rel));' \
+  "symlink pointing out of the tree"
+mutate "the content-type allowlist gains a permissive default" "$W" \
+  '  if (!type) return undefined;' \
+  '  if (!type) return { path: candidate, type: "application/octet-stream" };' \
+  "outside the allowlist"
+mutate "a directory is served as an asset" "$W" \
+  '  if (statSync(candidate).isDirectory()) return undefined;' '' \
+  "directory is not an asset"
+mutate "a directory that is not a built client is accepted" "$S" \
+  '      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {' \
+  '      if (false) {' \
+  "not a built client is refused at BUILD"
+mutate "only one of the two marker files is required" "$S" \
+  '      if (!existsSync(join(clientDir, "index.html")) || !existsSync(join(clientDir, "app.js"))) {' \
+  '      if (!existsSync(join(clientDir, "index.html"))) {' \
+  "NO app.js is refused too"
+mutate "the client route is registered even when unconfigured" "$S" \
+  '    if (opts.walkieClientDir) {' '    if (true) {' \
+  "unconfigured deploy has NO such route"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

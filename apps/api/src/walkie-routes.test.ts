@@ -9,7 +9,16 @@
 // this app returns for every unknown path.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ANSWER_FILE, ASK_FILE, type Ask, createAskLog } from "./ask-log";
@@ -995,5 +1004,109 @@ describe("an ask is (threadId, id) — the key that replaced the ambiguity machi
     expect(asks[0]?.id).toBe("real");
     const body = await (await get(app, "/walkie/asks?thread=t-a", H)).text();
     expect(body).toContain("skipped");
+  });
+});
+
+describe("Genesis serves the client, so both share one origin (BRO-2416)", () => {
+  const withClient = () => {
+    const clientDir = join(dir, "client");
+    mkdirSync(clientDir, { recursive: true });
+    writeFileSync(join(clientDir, "index.html"), "<!doctype html><title>walkie</title>");
+    writeFileSync(join(clientDir, "app.js"), "console.log('walkie')");
+    const log = createAskLog(dir);
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      walkieClientDir: clientDir,
+    } as never);
+    return { app: app as App, clientDir, log };
+  };
+
+  test("the shell is served WITHOUT the secret — it carries no credential", async () => {
+    // Gating it would mean putting the secret in a URL to fetch the page that
+    // asks for it. The client reads its secret from localStorage precisely so
+    // the bundle can be served without one.
+    const { app } = withClient();
+    const res = await get(app, "/walkie/app/index.html");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("walkie");
+  });
+
+  test("the directory path serves index.html", async () => {
+    const { app } = withClient();
+    expect((await get(app, "/walkie/app/")).status).toBe(200);
+  });
+
+  test("app.js is served with a JavaScript content type", async () => {
+    // A browser refuses to execute a module served as text/plain, so the type is
+    // load-bearing rather than cosmetic.
+    const { app } = withClient();
+    expect((await get(app, "/walkie/app/app.js")).headers.get("content-type")).toContain(
+      "text/javascript",
+    );
+  });
+
+  test("TRAVERSAL out of the client directory is refused", async () => {
+    // The ask journal lives in `dir`; the client lives in `dir/client`. This is
+    // the request that would read the operator's pending decisions off disk
+    // through a route that serves static files.
+    const { app, log } = withClient();
+    log.append(ask({ question: "SECRET-QUESTION" }));
+    const res = await get(app, "/walkie/app/../asks.jsonl");
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("SECRET-QUESTION");
+  });
+
+  test("a directory that is not a built client is refused at BUILD", async () => {
+    // CodeRabbit's caveat, made mechanical: "the configured directory must
+    // contain only public client assets". The realistic failure is an operator
+    // pointing this at the wrong tree — a home directory, a docs folder — where
+    // the extension allowlist would then serve any .html/.json/.png under it.
+    // Failing at boot is the same rule the sibling misconfigurations follow.
+    const empty = join(dir, "not-a-client");
+    mkdirSync(empty, { recursive: true });
+    expect(() =>
+      build({
+        workspaceRoot: dir,
+        walkieSecret: SECRET,
+        askLog: createAskLog(dir),
+        askLogDir: dir,
+        walkieClientDir: empty,
+      } as never),
+    ).toThrow(/does not look like a built walkie client/);
+  });
+
+  test("a directory with index.html but NO app.js is refused too", async () => {
+    // Both files, not either: a lone index.html is what a docs directory looks
+    // like, and checking one of the two would let exactly that through.
+    const half = join(dir, "half-a-client");
+    mkdirSync(half, { recursive: true });
+    writeFileSync(join(half, "index.html"), "<!doctype html>");
+    expect(() =>
+      build({
+        workspaceRoot: dir,
+        walkieSecret: SECRET,
+        askLog: createAskLog(dir),
+        askLogDir: dir,
+        walkieClientDir: half,
+      } as never),
+    ).toThrow(/does not look like a built walkie client/);
+  });
+
+  test("an unconfigured deploy has NO such route — the negative control", async () => {
+    // Same rule as every other walkie option: unconfigured must 404 rather than
+    // answer. Without this the route could be registered unconditionally and
+    // every test above would still pass.
+    const { app } = configured(); // no walkieClientDir
+    const res = await get(app, "/walkie/app/index.html");
+    expect(res.status).toBe(404);
+    // THE BODY, not just the status. Registering the route with an undefined
+    // directory also 404s — resolveAsset fails closed — so status alone cannot
+    // tell "no such route" from "route present, nothing to serve", and the
+    // mutant that registers it unconditionally SURVIVED a status-only check.
+    // Hono's own 404 says "404 Not Found"; this route's handler says "not found".
+    expect(await res.text()).not.toBe("not found");
   });
 });
