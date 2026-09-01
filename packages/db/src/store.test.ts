@@ -573,9 +573,9 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     // derived from it is wrong on a surface the client polls.
     //
     // An earlier revision bought the single snapshot with `count(*) over()`,
-    // carrying the total on each page row. That was measured to cost 147x the
-    // indexed page (a window function with an empty frame must drain its whole
-    // input), so it is now bought with REPEATABLE READ instead.
+    // carrying the total on each page row. A window function with an empty frame
+    // must drain its whole input, so that forced the full retrieve-and-sort this
+    // exists to avoid; it is now bought with REPEATABLE READ instead.
     //
     // Concurrency is not reproducible here, so this asserts the mechanism rather
     // than trying to lose a race — and the isolation level is directly
@@ -605,8 +605,12 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     // own assertion on its own fixture: offset=10 reads 20 rows, offset=1990
     // reads 2000. `OFFSET n` walks and discards n tuples first.
     //
-    // So it now asserts the real bound, at offsets the only consumer actually
-    // walks (apps/web pages to offset 4800).
+    // So it now asserts the real bound, at the SHAPE the consumer uses:
+    // apps/web walks `offset = page * 200` at limit 200 (threads.ts), so the
+    // offsets here are multiples of 200 at limit 200 rather than the arbitrary
+    // ones this first used. Its deepest real position is offset 4800, which this
+    // 2000-row fixture cannot reach — stated because the coverage claim is
+    // otherwise broader than the test.
     const { store, seen, client } = await instrumented();
     await seed(
       store,
@@ -617,9 +621,15 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     );
     await client.exec("analyze sessions");
 
-    for (const offset of [0, 10, 200, 1000]) {
+    const N = 2000;
+    const LIMIT = 200;
+    for (const offset of [0, 200, 1000]) {
+      // The bound is only a real constraint while it is BELOW the table size:
+      // at offset+limit >= N a full scan satisfies it and the assertion goes
+      // vacuous. Guarded so a later edit deepening the offsets fails loudly.
+      expect(offset + LIMIT).toBeLessThan(N);
       seen.length = 0;
-      await store.sessionsPage({ limit: 10, offset });
+      await store.sessionsPage({ limit: LIMIT, offset });
       const stmt = seen.find((q) => /\blimit\b/i.test(q.sql));
       expect(stmt).toBeDefined();
       if (!stmt) return;
@@ -640,7 +650,7 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
       expect(rowCounts.length).toBeGreaterThan(0);
       // The TRUE bound. Asserting `<= 10` here would fail for offset > 0, and
       // asserting nothing would let a full scan through.
-      expect(Math.max(...rowCounts)).toBeLessThanOrEqual(offset + 10);
+      expect(Math.max(...rowCounts)).toBeLessThanOrEqual(offset + LIMIT);
     }
     await store.close();
   });
@@ -721,10 +731,9 @@ describe("sessionsPage — the two Store implementations agree (follow-up to BRO
         const a = await pg.sessionsPage({ limit, offset });
         const b = await mem.sessionsPage({ limit, offset });
         expect(ids(a)).toEqual(ids(b));
-        // The TOTAL too, not just the page. `offset === corpus.length` yields an
-        // empty page, which is the branch where the pg store cannot read the
-        // total off a row and falls back to a count — comparing only ids left
-        // that branch unchecked.
+        // The TOTAL too, not just the page — comparing only ids left it unchecked,
+        // and `offset === corpus.length` (an empty page with a non-zero total) is
+        // where the two stores could most easily disagree.
         expect(a.total).toBe(b.total);
       }
     }

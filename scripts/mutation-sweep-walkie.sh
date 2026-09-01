@@ -27,8 +27,12 @@
 #   arity           delete every mutant and an unguarded sweep prints
 #                   "0 mutants, 0 survivors" and exits 0
 #
-# Not yet wired into CI: genesis runs a single sequential job and adding a
-# parallel gate is BRO-2407. Run it by hand before touching these files.
+# Not wired into CI, and the reason is NOT the one this line used to give ("genesis
+# runs a single sequential job"): ci.yml has been five parallel jobs since BRO-2407
+# and already runs mutation-sweep-duration.sh. The real reason is in ci.yml — a
+# clean runner gave 85 mutants / 5 SURVIVED where this tree reports 0 locally. Until
+# that is explained, EVERY local verdict from this script, including 0 survivors, is
+# a single-machine claim. Run it by hand before touching these files.
 #
 # Usage: scripts/mutation-sweep-walkie.sh
 set -uo pipefail
@@ -57,7 +61,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts
           packages/core/src/store.ts packages/db/src/store.ts packages/db/src/schema.ts)
-EXPECTED_MUTANTS=101
+EXPECTED_MUTANTS=104
 
 # Subject paths used by mutants below. Defined HERE, not at first use: the
 # paging mutants sit ~25 lines above where these used to be declared, and with
@@ -722,6 +726,25 @@ mutate "the index loses its collation, so the planner cannot use it" "$SC" \
   'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at COLLATE "C" DESC, id COLLATE "C" ASC);' \
   'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at DESC, id ASC);' \
   "the plan reads offset"
+# The narrow case scans() exists for, and the only mutant it can catch: sessionsPage
+# implemented OVER listSessions. pages() stays 1 and the response is byte-identical,
+# so scans() is the sole discriminator.
+mutate "InMemoryStore.sessionsPage is implemented over listSessions" "$CS" \
+  '    const ordered = [...this.sessions.values()].sort(compareSessionsNewestFirst);' \
+  '    const ordered = (await this.listSessions()).sort(compareSessionsNewestFirst);' \
+  "never calls listSessions"
+# C11: the SQL id key had no mutant at all — the COLLATE count is what guards it,
+# and nothing proved the count would actually fall to 1.
+mutate "the SQL tiebreaker key is dropped entirely" "$DS" \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC`);' \
+  "pins COLLATE"
+# C10: the precondition is documented as "enforced identically by every
+# implementation" and the sweep enforced exactly one of the two.
+mutate "the pg store drops the window precondition" "$DS" \
+  '    assertPageOpts(opts);' \
+  '' \
+  "rejected identically by BOTH stores"
 mutate "the id tiebreaker loses its collation and follows the database locale" "$DS" \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} ASC`);' \

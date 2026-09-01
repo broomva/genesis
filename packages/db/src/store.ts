@@ -135,9 +135,8 @@ export class DrizzleStore implements Store {
    *
    *  Which still beats what this replaced — that read every row AND sorted them —
    *  but "the database stops at the window" is false, and an earlier version of
-   *  this comment said it. On a locale-collated production engine the planner also
-   *  abandons the index entirely for a deep enough offset and takes the full scan.
-   *  Keyset paging is the shape that is actually bounded; it is not adopted here.
+   *  this comment said it. Keyset paging is the shape that is actually bounded;
+   *  it is not adopted here.
    *
    *  The page depends on `sessions_page_idx`, whose collation must match this
    *  ORDER BY. Drop the pin and the planner reverts to Seq Scan + Sort.
@@ -168,14 +167,16 @@ export class DrizzleStore implements Store {
             ? await ordered.offset(offset)
             : await ordered.limit(opts.limit).offset(offset);
         const totals = await tx.select({ n: count() }).from(sessions);
-        // `?? 0` catches null/undefined and passes NaN THROUGH, and NaN is the
-        // shape this file already hit once: `hasMore: offset + n < NaN` is false,
-        // so the client stops paging with no error anywhere.
+        // THROWS rather than substituting a sentinel. `?? 0` passed NaN through;
+        // the review-motivated `Number.isFinite(n) ? n : 0` that replaced it was
+        // worse — `hasMore: offset + 0 < 0` is false, exactly like the NaN it
+        // fixed, so the client stopped paging silently AND the anomaly was hidden.
+        // A non-number here is a driver contract violation, not a value to guess at.
         const n = totals[0]?.n;
-        return {
-          sessions: rows.map(toSession),
-          total: Number.isFinite(n) ? (n as number) : 0,
-        };
+        if (typeof n !== "number" || !Number.isFinite(n)) {
+          throw new TypeError(`sessionsPage: count(*) returned ${typeof n} ${String(n)}`);
+        }
+        return { sessions: rows.map(toSession), total: n };
       },
       { isolationLevel: "repeatable read" },
     );

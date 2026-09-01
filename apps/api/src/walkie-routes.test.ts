@@ -1341,10 +1341,12 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
       sessionScans++;
       return origList();
     };
-    // And the bounded read that replaced it (follow-up to BRO-2418). Counting BOTH is what
-    // makes "one scan, not two" checkable as the stronger "no scan at all":
-    // a regression that reverted to listSessions-plus-slice would still make
-    // exactly one bounded-looking request, so counting pages alone cannot see it.
+    // And the bounded read that replaced it. Counting BOTH is what makes "one scan,
+    // not two" checkable as the stronger "no scan at all". (An earlier version of
+    // this comment justified it by claiming pages() alone cannot see a revert —
+    // false, and retracted at the assertion site: a supervisor-level revert makes
+    // pages() 0. What scans() adds is the narrower case where sessionsPage is
+    // ITSELF implemented over listSessions.)
     let pageQueries = 0;
     const origPage = store.sessionsPage.bind(store);
     (store as unknown as { sessionsPage: (o: unknown) => unknown }).sessionsPage = (o: unknown) => {
@@ -1556,8 +1558,11 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     const { store, scans, pages } = seeded(250);
     const app = pagedApp(store);
     await get(app, "/walkie/threads?limit=10", H);
-    expect(pages()).toBe(1);
+    // scans() FIRST. Asserted second it was unreachable: every mutant that could
+    // touch it drives pages() to 0 or 2, so the pages() expect threw and this line
+    // never executed. An assertion that cannot be reached cannot be load-bearing.
     expect(scans()).toBe(0);
+    expect(pages()).toBe(1);
   });
 
   test("the mirror and its twin page IDENTICALLY", async () => {

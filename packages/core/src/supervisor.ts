@@ -1212,7 +1212,7 @@ export class Supervisor {
   /** The per-session turn read. This is the O(page) part — one query per row
    *  returned, which is why the slice above has to happen first. */
   private async summarize(
-    page: Awaited<ReturnType<Store["listSessions"]>>,
+    page: Awaited<ReturnType<Store["sessionsPage"]>>["sessions"],
   ): Promise<ThreadSummary[]> {
     return Promise.all(
       page.map(async (s): Promise<ThreadSummary> => {

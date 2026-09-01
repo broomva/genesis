@@ -61,24 +61,6 @@ export interface Store {
 // Collision-safe across restarts, PIDs, and instances — required now that IDs
 // are primary keys in durable storage (a counter+PID repeats after a restart).
 const id = (p: string) => `${p}-${crypto.randomUUID()}`;
-/** The total order `Store.sessionsPage` promises: newest-first by `createdAt`,
- *  ties broken by `id` ascending.
- *
- *  The tiebreaker is load-bearing, not cosmetic. `createdAt` is millisecond
- *  resolution, so two sessions created in the same millisecond tie — and paging
- *  over a non-unique sort key lets tied rows swap between queries, which makes
- *  the same row appear on two pages or on none. `id` is the primary key, so the
- *  pair is total and the boundary is stable.
- *
- *  Comparison is JS `<` on strings, i.e. UTF-16 code-unit order. The SQL store
- *  pins `COLLATE "C"`, i.e. UTF-8 byte order. Those coincide for ASCII and
- *  DIVERGE above U+FFFF, where a JS surrogate sorts below U+E000..U+FFFF but its
- *  UTF-8 bytes sort above. Unreachable today — ids are `sess-<uuid>` and
- *  `createdAt` is ISO, both ASCII — but the two are NOT the same order, and a
- *  future sort key drawn from user text would make the difference reachable.
- *
- *  Exported as the single definition of the order, so the SQL `ORDER BY` has a
- *  named referent to mirror rather than the two drifting independently. */
 /** The precondition `Store.sessionsPage` puts on its window, enforced identically
  *  by every implementation.
  *
@@ -105,6 +87,25 @@ export function assertPageOpts(opts: { limit?: number; offset?: number }): void 
   }
 }
 
+/** The total order `Store.sessionsPage` promises: newest-first by `createdAt`,
+ *  ties broken by `id` ascending.
+ *
+ *  The tiebreaker is load-bearing, not cosmetic. `createdAt` is millisecond
+ *  resolution, so two sessions created in the same millisecond tie — and paging
+ *  over a non-unique sort key lets tied rows swap between queries, which makes
+ *  the same row appear on two pages or on none. `id` is the primary key, so the
+ *  pair is total and the boundary is stable.
+ *
+ *  Comparison is JS `<` on strings, i.e. UTF-16 code-unit order. The SQL store
+ *  pins `COLLATE "C"`, i.e. UTF-8 byte order. Those coincide for ASCII and
+ *  DIVERGE above U+FFFF, where a JS surrogate sorts below U+E000..U+FFFF but its
+ *  UTF-8 bytes sort above. Unreachable today — ids are `sess-<uuid>` and
+ *  `createdAt` is ISO, both ASCII — but the two are NOT the same order, and a
+ *  future sort key drawn from user text would make the difference reachable.
+ *
+ *  Exported because `InMemoryStore` and the conformance suite both need it. It is
+ *  NOT what keeps the SQL ORDER BY in step — the pg store hand-writes that and
+ *  imports nothing from here. Nothing enforces the mirror. */
 export const compareSessionsNewestFirst = (a: Session, b: Session): number =>
   a.createdAt < b.createdAt
     ? 1

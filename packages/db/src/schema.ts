@@ -125,10 +125,9 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch text;
 -- The thread-list page reads newest-first with an id tiebreaker, both pinned to
 -- COLLATE "C". An index only serves an ORDER BY when its collation MATCHES, so the
 -- pin must be repeated here; without it the planner falls back to a full scan plus
--- sort and the page is not bounded at all. Measured on PGlite, 20k sessions, one
--- page of 10:
---   no index      Seq Scan rows=20000, 217 buffers, 12.7 ms
---   this index    Index Scan rows=10,   13 buffers,  0.17 ms
+-- sort and the page is not bounded at all. The buffer and millisecond figures that
+-- used to sit here did not regenerate across machines or insert orders and were
+-- deleted; the row counts do, and the committed EXPLAIN test asserts them.
 -- Raw SQL rather than drizzle index(), which cannot express a per-column COLLATE.
 -- NOTE: no backticks in this block. MIGRATE_SQL is a template literal and a
 -- backtick here terminates it -- which is exactly how this comment first broke
