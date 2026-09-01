@@ -52,7 +52,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        packages/core/src/supervisor.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=92
+EXPECTED_MUTANTS=93
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -679,6 +679,11 @@ mutate "listThreads stops ordering newest-first" "$C" \
   "      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0," \
   "      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0," \
   "ordered newest-first"
+
+mutate "the memo evicts an entry a later call already replaced" "$M" \
+  "      if (entries.get(key)?.value === value) entries.delete(key);" \
+  "      entries.delete(key);" \
+  "late rejection does not evict"
 
 mutate "the default page size drops to 50" "$S" \
   "Math.min(rawLimit, 200) : 200;" \

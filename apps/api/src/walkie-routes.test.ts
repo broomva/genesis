@@ -1418,13 +1418,20 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     // only visible as order: equal timestamps must keep the store's order.
     //
     // A review flagged that mutating the comparator's tie branch `0` -> `1`
-    // survives this. It does, and the reason is worth recording rather than
-    // chasing: returning a non-zero value for equal elements makes the comparator
-    // INCONSISTENT, and measured across n = 10, 22, 30, 60 and 250 it produces
-    // byte-identical output in this engine. It is an EQUIVALENT mutant, not a
-    // coverage hole — no test can kill it because it changes nothing. The
-    // assertion below still earns its place: it pins the property against a
-    // comparator that genuinely reorders.
+    // survives this. It does, and the precise reason matters — an earlier draft
+    // of this comment said "non-zero", which would tell a future reviewer to
+    // dismiss a live mutant as equivalent.
+    //
+    // The invisible class is NON-NEGATIVE, not non-zero. Sorting here merges by
+    // asking only `cmp(right, left) < 0`, so any tie value >= 0 takes the same
+    // branch as 0 and the output is byte-identical: measured over 514
+    // configurations (all-equal at n = 2..1000, mixed runs, randomised tie
+    // patterns), zero differed. That is an EQUIVALENT mutant through
+    // `Array.prototype.sort` — no test can kill it because it changes nothing.
+    //
+    // `0` -> `-1` is a DIFFERENT story and is killable: it reverses every tie
+    // run at every n. The assertion below is what catches it, and is also what
+    // kills the committed `listThreads stops ordering newest-first` mutant.
     expect([...first, ...second]).toEqual([
       "tie-0",
       "tie-1",

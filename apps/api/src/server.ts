@@ -1243,17 +1243,15 @@ export function build(opts: BuildOpts) {
   //
   // Keyed by workspace, not by (workspace, branch), because the branch is read
   // BY the call being cached — keying on it would require the git spawn this
-  // exists to avoid. The cost is stated rather than hidden: after a branch switch
-  // this serves the previous branch's runs for up to duration + CHECKS_TTL_MS —
-  // not the TTL alone, since the window is measured from when the call settles.
-  // The response carries `branch`, so a client can see which branch it is
-  // looking at rather than having to assume.
-  // 10s of RESULT freshness, measured from when the call settles. The staleness
-  // a client can see is therefore duration + TTL, not TTL: `workspaceChecks`
-  // spawns up to three subprocesses each bounded at 20s, so the worst case is
-  // nearer 70s than 10. Stamping at start instead would expire the window
-  // mid-execution and start a second run while the first was pending, which is
-  // the pile-up this exists to prevent.
+  // exists to avoid. The response carries `branch`, so a client can see which
+  // branch it is looking at rather than having to assume.
+  //
+  // The window is 10s of RESULT freshness, measured from when the call SETTLES.
+  // So the staleness a client can see is duration + TTL, not TTL: the three
+  // subprocesses run sequentially, each bounded at 20s, putting the worst case
+  // nearer 70s. Stamping at start instead would expire the window mid-execution
+  // and begin a second run while the first was pending — the pile-up this exists
+  // to prevent.
   const CHECKS_TTL_MS = 10_000;
   const cachedChecks = ttlMemo(workspaceChecks, CHECKS_TTL_MS);
 

@@ -82,9 +82,16 @@ describe("ttlMemo", () => {
         memo(k).catch(() => {});
         return "outer";
       }
-      return new Promise<string>((_, rej) => {
-        failInner = rej;
-      });
+      if (calls === 2) {
+        return new Promise<string>((_, rej) => {
+          failInner = rej;
+        });
+      }
+      // A THIRD call happens only if the late rejection wrongly evicted the live
+      // entry. Returning a distinct value makes that fail as an ASSERTION —
+      // without it the guard-removal mutant hangs and dies to a 5s timeout, which
+      // reports "timed out" rather than the property that broke.
+      return "evicted";
     }, 10_000);
 
     expect(await memo("a")).toBe("outer");
