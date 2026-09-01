@@ -21,9 +21,26 @@ export interface Store {
   /** Sessions whose stored phase is any of `phases`. Used for boot-time
    *  reconciliation of turns interrupted by a process crash (BRO-1530). */
   findSessionsByPhase(phases: readonly Session["phase"][]): Promise<Session[]>;
-  /** Every session, for the thread-list UI (BRO-1567). Order is unspecified —
-   *  callers (Supervisor.listThreads) sort for display. Includes archived
-   *  sessions; the drawer filters them (BRO-1592). */
+  /** One ordered page of sessions plus the total, **from the source**.
+   *
+   *  `listSessions()` below materialises every row, so a caller that slices its
+   *  result bounds only what it *reads* — never what the store retrieves, sorts
+   *  or holds. This is the bounded form: implementations MUST apply both the
+   *  order and the window at the source (SQL `ORDER BY … LIMIT … OFFSET`).
+   *
+   *  Order is `compareSessionsNewestFirst`. `total` counts every session, not
+   *  the page — it is what a caller needs in order to know a next page exists,
+   *  and it comes from the same call so the two cannot disagree. */
+  sessionsPage(opts: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{ sessions: Session[]; total: number }>;
+  /** EVERY session, unbounded and unordered. The thread-list UI no longer uses
+   *  this — it pages through `sessionsPage` — so the one remaining caller is the
+   *  ask-log phase map in `apps/api/src/server.ts`, which needs every session
+   *  because any ask may belong to any thread; bounding it there would silently
+   *  age live asks. Prefer `sessionsPage` for anything user-facing. Includes
+   *  archived sessions; the drawer filters them (BRO-1592). */
   listSessions(): Promise<Session[]>;
   addTurn(t: Omit<Turn, "id" | "createdAt">): Promise<Turn>;
   turnsForSession(sessionId: string): Promise<Turn[]>;
@@ -35,6 +52,28 @@ export interface Store {
 // Collision-safe across restarts, PIDs, and instances — required now that IDs
 // are primary keys in durable storage (a counter+PID repeats after a restart).
 const id = (p: string) => `${p}-${crypto.randomUUID()}`;
+/** The total order `Store.sessionsPage` promises: newest-first by `createdAt`,
+ *  ties broken by `id` ascending.
+ *
+ *  The tiebreaker is load-bearing, not cosmetic. `createdAt` is millisecond
+ *  resolution, so two sessions created in the same millisecond tie — and paging
+ *  over a non-unique sort key lets tied rows swap between queries, which makes
+ *  the same row appear on two pages or on none. `id` is the primary key, so the
+ *  pair is total and the boundary is stable.
+ *
+ *  Exported so the SQL store's ordering can be checked against this one rather
+ *  than against a third re-implementation written by the test. */
+export const compareSessionsNewestFirst = (a: Session, b: Session): number =>
+  a.createdAt < b.createdAt
+    ? 1
+    : a.createdAt > b.createdAt
+      ? -1
+      : a.id < b.id
+        ? -1
+        : a.id > b.id
+          ? 1
+          : 0;
+
 const now = () => new Date(performance.timeOrigin + performance.now()).toISOString();
 
 export class InMemoryStore implements Store {
@@ -69,6 +108,14 @@ export class InMemoryStore implements Store {
   }
   async listSessions() {
     return [...this.sessions.values()].map((s) => ({ ...s }));
+  }
+
+  async sessionsPage(opts: { limit?: number; offset?: number }) {
+    const ordered = [...this.sessions.values()].sort(compareSessionsNewestFirst);
+    const offset = opts.offset ?? 0;
+    const page =
+      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);
+    return { sessions: page.map((s) => ({ ...s })), total: ordered.length };
   }
   async addTurn(t: Omit<Turn, "id" | "createdAt">) {
     const turn: Turn = { ...t, id: id("turn"), createdAt: now() };

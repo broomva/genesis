@@ -11,7 +11,7 @@ import {
   isoNow,
   newId,
 } from "@genesis/core";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -120,6 +120,48 @@ export class DrizzleStore implements Store {
   async listSessions(): Promise<Session[]> {
     const r = await this.db.select().from(sessions).orderBy(sessions.createdAt);
     return r.map(toSession);
+  }
+
+  /** See `Store.sessionsPage`. ORDER BY, LIMIT and OFFSET all go to Postgres,
+   *  so a bounded request never retrieves, sorts or materialises rows outside
+   *  the window — that is the whole point of the method, and the property the
+   *  `listSessions`-plus-slice form could not provide.
+   *
+   *  The `id` tiebreaker mirrors `compareSessionsNewestFirst`. Without it the
+   *  order of tied `created_at` rows is whatever the planner happens to emit,
+   *  which is not stable across the two queries that make up two pages. */
+  async sessionsPage(opts: {
+    limit?: number;
+    offset?: number;
+  }): Promise<{ sessions: Session[]; total: number }> {
+    const ordered = this.db
+      .select()
+      .from(sessions)
+      // `COLLATE "C"` is load-bearing, not decoration. Both columns are `text`,
+      // so ORDER BY runs under the DATABASE's collation while the in-memory
+      // store uses JS string compare — byte order. Those agree under `C` and
+      // are NOT guaranteed to agree under a locale collation like en_US.UTF-8,
+      // which orders punctuation differently: `id` values and any non-uniform
+      // `created_at` shape could then sort one way here and another there, and
+      // two implementations of one paging contract that disagree on order is
+      // how a row lands on two pages or none.
+      //
+      // Measured, not assumed: PGlite (where the tests run) reports datcollate
+      // `C`, so a conformance test alone would prove agreement only for this
+      // engine and pass while production — Postgres on Railway, created with a
+      // locale collation — diverged. Pinning `C` makes byte order the contract
+      // on every engine. No index on `sessions` is invalidated: the only index
+      // in the schema is `turns_session_idx`.
+      .orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);
+    const windowed =
+      opts.limit === undefined
+        ? ordered.offset(opts.offset ?? 0)
+        : ordered.limit(opts.limit).offset(opts.offset ?? 0);
+    const [rows, totals] = await Promise.all([
+      windowed,
+      this.db.select({ n: count() }).from(sessions),
+    ]);
+    return { sessions: rows.map(toSession), total: Number(totals[0]?.n ?? 0) };
   }
 
   async upsertSession(s: Session): Promise<Session> {

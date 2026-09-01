@@ -49,10 +49,15 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        # sweep scored supervisor mutants against a suite that excluded them: a
        # reversed sort in listThreads survived the sweep and was caught only by
        # supervisor.test.ts, which the sweep never ran.
-       packages/core/src/supervisor.test.ts)
+       packages/core/src/supervisor.test.ts
+       # Same rule, for the paging move (follow-up to BRO-2418): ordering and bounding now live
+       # in the two Store implementations, so their tests have to run here or the
+       # store mutants would be scored against a suite that cannot see them.
+       packages/db/src/store.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
-          packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=93
+          packages/projection/src/reducer.ts packages/core/src/supervisor.ts
+          packages/core/src/store.ts packages/db/src/store.ts)
+EXPECTED_MUTANTS=96
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -675,10 +680,38 @@ mutate "the checks cache stores AFTER resolving, losing in-flight de-duplication
   "    value.then(() => entries.set(key, entry));" \
   "CONCURRENT calls share ONE execution"
 
-mutate "listThreads stops ordering newest-first" "$C" \
-  "      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0," \
-  "      a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0," \
+# Paging moved into the Store (follow-up to BRO-2418): the comparator that used to live in
+# supervisor.ts is now `compareSessionsNewestFirst`, and the bound is SQL. The
+# anchor moved with it — a sweep whose anchor no longer exists ERRORs rather
+# than silently scoring nothing, which is how this one was caught.
+CS=packages/core/src/store.ts
+DS=packages/db/src/store.ts
+mutate "listThreads stops ordering newest-first" "$CS" \
+  '  a.createdAt < b.createdAt
+    ? 1
+    : a.createdAt > b.createdAt
+      ? -1' \
+  '  a.createdAt < b.createdAt
+    ? -1
+    : a.createdAt > b.createdAt
+      ? 1' \
   "ordered newest-first"
+mutate "ties lose their id tiebreaker, so page boundaries stop being stable" "$CS" \
+  '      : a.id < b.id
+        ? -1
+        : a.id > b.id
+          ? 1
+          : 0;' \
+  '      : 0;' \
+  "identical pages at every boundary"
+mutate "the pg page stops bounding at the source and slices nothing" "$DS" \
+  '        : ordered.limit(opts.limit).offset(opts.offset ?? 0);' \
+  '        : ordered.offset(opts.offset ?? 0);' \
+  "no query retrieves more rows than the window"
+mutate "the pg ORDER BY drops COLLATE C and follows the database locale" "$DS" \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
+  '.orderBy(sql`${sessions.createdAt} DESC, ${sessions.id} ASC`);' \
+  "pins COLLATE"
 
 mutate "the memo evicts an entry a later call already replaced" "$M" \
   "      if (entries.get(key)?.value === value) entries.delete(key);" \

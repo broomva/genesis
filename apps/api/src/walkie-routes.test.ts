@@ -1341,7 +1341,22 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
       sessionScans++;
       return origList();
     };
-    return { store, reads: () => turnReads, scans: () => sessionScans };
+    // And the bounded read that replaced it (follow-up to BRO-2418). Counting BOTH is what
+    // makes "one scan, not two" checkable as the stronger "no scan at all":
+    // a regression that reverted to listSessions-plus-slice would still make
+    // exactly one bounded-looking request, so counting pages alone cannot see it.
+    let pageQueries = 0;
+    const origPage = store.sessionsPage.bind(store);
+    (store as unknown as { sessionsPage: (o: unknown) => unknown }).sessionsPage = (o: unknown) => {
+      pageQueries++;
+      return origPage(o as { limit?: number; offset?: number });
+    };
+    return {
+      store,
+      reads: () => turnReads,
+      scans: () => sessionScans,
+      pages: () => pageQueries,
+    };
   };
 
   const pagedApp = (store: unknown) =>
@@ -1515,14 +1530,22 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     expect(reads()).toBe(10);
   });
 
-  test("a request costs ONE session scan, not two", async () => {
+  test("a request costs ONE bounded page query and NO full scan", async () => {
     // The first version paired listThreads with a separate countThreads and each
     // scanned independently — a paging change that removed the per-session turn
-    // reads and doubled the scan underneath them, on a polled surface.
-    const { store, scans } = seeded(250);
+    // reads and doubled the scan underneath them, on a polled surface. That was
+    // fixed to one scan; this now asserts ZERO, because the page and the total
+    // both come from `sessionsPage`, which bounds the retrieval in SQL.
+    //
+    // `scans() === 0` is the load-bearing half. A revert to
+    // `listSessions()`-then-slice would still issue exactly ONE request and
+    // return a byte-identical response, so the page count cannot distinguish it;
+    // only the absence of the unbounded read can.
+    const { store, scans, pages } = seeded(250);
     const app = pagedApp(store);
     await get(app, "/walkie/threads?limit=10", H);
-    expect(scans()).toBe(1);
+    expect(pages()).toBe(1);
+    expect(scans()).toBe(0);
   });
 
   test("the mirror and its twin page IDENTICALLY", async () => {
