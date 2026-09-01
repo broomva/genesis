@@ -13,6 +13,7 @@
   "dependencies": {
     "@chat-adapter/state-memory": "4.30.0",
     "@chat-adapter/telegram": "4.30.0",
+    "@genesis/identity": "workspace:*",
     "@kapso/chat-adapter": "0.1.1",
     "@kapso/whatsapp-cloud-api": "0.2.3",
     "chat": "4.30.0",
