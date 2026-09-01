@@ -157,9 +157,76 @@ echo "▶ backend liveness"
 eq "genesis-api /health is 200" "200" \
   "$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 8 "http://127.0.0.1:$API_PORT/health")"
 
+echo "▶ deployment freshness"
+#
+# A liveness probe reports green on a deployment that is answering perfectly and
+# is six months old. That is not hypothetical here: on 2026-09-01 this host was
+# found serving a checkout SIXTEEN commits behind origin/main, having run for
+# 7d20h. Every ingress leg above passed the whole time, because every one of them
+# was true. The walkie arc — the ask log, /walkie/asks, /walkie/answer, the read
+# mirrors — had been merged for days and was returning 404 in production, and
+# nothing in this file could have said so.
+#
+# Two SEPARATE claims, because they fail independently and a deploy that does the
+# first without the second is the likelier accident:
+#
+#   checkout currency  the working tree is at origin/main
+#   process currency   the RUNNING process started after that commit, i.e. someone
+#                      actually restarted the unit rather than only pulling
+#
+# WHAT THIS IS NOT: it is not a claim that the deployed code is correct, tested,
+# or that origin/main is a good thing to be running. It answers "is this host
+# running what main says" and nothing else.
+FRESHNESS_ASSESSED=0
+if systemctl --user cat genesis-api.service >/dev/null 2>&1 && [ -d "${REPO_DIR:-$PWD}/.git" ]; then
+  FRESHNESS_ASSESSED=1
+  RD="${REPO_DIR:-$PWD}"
+
+  # The fetch is NOT optional and this is the whole trap. `git rev-list
+  # HEAD..origin/main` counts against the LOCAL origin/main ref, which is only as
+  # current as the last fetch — so on a host that has not fetched, a stale
+  # deployment UNDER-REPORTS its own staleness. Measured on this host the same
+  # minute: 12 commits behind before the fetch, 16 after. A freshness check that
+  # skips the fetch is a freshness check that lies in the reassuring direction.
+  if git -C "$RD" fetch -q origin 2>/dev/null; then
+    behind=$(git -C "$RD" rev-list --count HEAD..origin/main 2>/dev/null || echo unknown)
+    eq "checkout is at origin/main" "0 commits behind" "$behind commits behind"
+
+    # Process currency. A pull without a restart leaves the unit executing the
+    # code it loaded at start time, so the checkout can be perfectly current while
+    # the thing answering requests is not. Compare the unit's start to HEAD's
+    # commit time; older start = running pre-pull code.
+    started=$(systemctl --user show genesis-api.service -p ActiveEnterTimestamp --value 2>/dev/null)
+    started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
+    head_epoch=$(git -C "$RD" log -1 --format=%ct 2>/dev/null || echo 0)
+    if [ "$started_epoch" -eq 0 ] || [ "$head_epoch" -eq 0 ]; then
+      bad "genesis-api is running the checked-out commit" "comparable timestamps" \
+          "start=$started head=$head_epoch"
+    elif [ "$started_epoch" -ge "$head_epoch" ]; then
+      ok "genesis-api started after the checked-out commit"
+    else
+      bad "genesis-api is running the checked-out commit" \
+          "unit restarted after HEAD was committed" \
+          "unit started $(( (head_epoch - started_epoch) / 3600 ))h BEFORE HEAD — pulled, never restarted"
+    fi
+  else
+    bad "origin is reachable to assess freshness" "fetch succeeds" "fetch failed"
+  fi
+else
+  # Deliberately not silent, and deliberately not a pass. Run from a laptop, the
+  # git checkout in scope is the DEVELOPER'S, not the deployment's — measuring it
+  # would report the wrong machine's freshness in the reassuring direction. So the
+  # check declines to answer, loudly, and the summary below says it declined.
+  printf '  – freshness NOT assessed: no genesis-api user unit here, so this is not the deployed host\n'
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
   echo "✓ no differential detected, and both routes still refuse anonymous callers"
+  # The summary must not imply a check that did not run.
+  [ "$FRESHNESS_ASSESSED" -eq 1 ] \
+    && echo "✓ and the host is running origin/main" \
+    || echo "– freshness unknown (not run on the deployed host)"
 else
   echo "✗ $FAILED check(s) FAILED"
 fi
