@@ -1194,10 +1194,12 @@ export function build(opts: BuildOpts) {
     // separate countThreads made a request cost two full `SELECT * FROM
     // sessions` where it used to cost one, AND read them independently so a
     // concurrent write between them could make `hasMore` transiently wrong.
-    // `listThreadsPage` collapsed that to a single scan. It is no longer a scan
-    // at all — the store pages in SQL against `sessions_page_idx` — and the two
-    // statements it does issue share a REPEATABLE READ snapshot, so the total
-    // still describes the page.
+    // `listThreadsPage` collapsed that to a single scan, and the store now pages
+    // in SQL against `sessions_page_idx` so the PAGE no longer hydrates the table.
+    // The request still scans it once, for the exact `count(*)`; a previous
+    // version of this comment said "no longer a scan at all" and that was false.
+    // The two statements share a REPEATABLE READ snapshot, so the total describes
+    // the page.
     const { threads, total } = await supervisor.listThreadsPage({ limit, offset });
     // "IS THERE MORE AFTER THIS PAGE" — computed from where this page ENDS, not
     // from whether it is full, so it is false on the final page.

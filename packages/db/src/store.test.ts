@@ -599,17 +599,14 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     await store.close();
   });
 
-  test("EXPLAIN says the DATABASE stops at the window, not just the client", async () => {
-    // The check above counts rows RETURNED. That is a proxy, and an earlier
-    // version of this file's comment presented it as the invariant — claiming
-    // the query "never retrieves, sorts or materialises rows outside the
-    // window". Adversarial review refuted that with EXPLAIN, and it was right:
-    // the then-current implementation used `count(*) over()`, whose window has
-    // to drain the whole relation, so every row WAS retrieved and sorted and
-    // only the transfer was bounded.
+  test("EXPLAIN: the plan reads offset+limit rows, and uses the index", async () => {
+    // This test used to assert `max rows <= limit` at offset 0 ONLY — the single
+    // offset where that is true. Review ran it at other offsets and it fails its
+    // own assertion on its own fixture: offset=10 reads 20 rows, offset=1990
+    // reads 2000. `OFFSET n` walks and discards n tuples first.
     //
-    // So this asserts the real thing, on the real emitted SQL, by re-running the
-    // exact statement the store issued under EXPLAIN (ANALYZE).
+    // So it now asserts the real bound, at offsets the only consumer actually
+    // walks (apps/web pages to offset 4800).
     const { store, seen, client } = await instrumented();
     await seed(
       store,
@@ -619,31 +616,32 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
       })),
     );
     await client.exec("analyze sessions");
-    seen.length = 0;
-    await store.sessionsPage({ limit: 10 });
 
-    const pageStmt = seen.find((q) => /\blimit\b/i.test(q.sql));
-    expect(pageStmt).toBeDefined();
-    if (!pageStmt) return;
-    const plan = (
-      (await client.query(
-        `EXPLAIN (ANALYZE, COSTS OFF) ${pageStmt.sql}`,
-        pageStmt.params as never,
-      )) as { rows: Array<Record<string, string>> }
-    ).rows
-      .map((r) => Object.values(r)[0] ?? "")
-      .join("\n");
+    for (const offset of [0, 10, 200, 1000]) {
+      seen.length = 0;
+      await store.sessionsPage({ limit: 10, offset });
+      const stmt = seen.find((q) => /\blimit\b/i.test(q.sql));
+      expect(stmt).toBeDefined();
+      if (!stmt) return;
+      const plan = (
+        (await client.query(`EXPLAIN (ANALYZE, COSTS OFF) ${stmt.sql}`, stmt.params as never)) as {
+          rows: Array<Record<string, string>>;
+        }
+      ).rows
+        .map((r) => Object.values(r)[0] ?? "")
+        .join("\n");
 
-    // The index is what makes the bound real. Without a matching collation the
-    // planner cannot use it and silently reverts to Seq Scan + Sort.
-    expect(plan).toContain("sessions_page_idx");
-    expect(plan).not.toContain("Seq Scan");
+      // The index is what keeps this off a full scan; without a matching
+      // collation the planner cannot use it.
+      expect(plan).toContain("sessions_page_idx");
+      expect(plan).not.toContain("Seq Scan");
 
-    // And the load-bearing number: no node processed more rows than the window.
-    // With `count(*) over()` this read rows=2000 while returning 10.
-    const rowCounts = [...plan.matchAll(/rows=(\d+)/g)].map((m) => Number(m[1]));
-    expect(rowCounts.length).toBeGreaterThan(0);
-    expect(Math.max(...rowCounts)).toBeLessThanOrEqual(10);
+      const rowCounts = [...plan.matchAll(/rows=(\d+)/g)].map((m) => Number(m[1]));
+      expect(rowCounts.length).toBeGreaterThan(0);
+      // The TRUE bound. Asserting `<= 10` here would fail for offset > 0, and
+      // asserting nothing would let a full scan through.
+      expect(Math.max(...rowCounts)).toBeLessThanOrEqual(offset + 10);
+    }
     await store.close();
   });
 
@@ -767,12 +765,16 @@ describe("sessionsPage — the two Store implementations agree (follow-up to BRO
   });
 
   test("paging the whole corpus yields each row exactly once", async () => {
-    // A completeness check, and ONLY that. An earlier comment here claimed it was
-    // "the property the tiebreaker exists for" — review showed that is false: on
-    // a static table PGlite returns a deterministic plan, so paging yields each
-    // row exactly once WITH or WITHOUT the tiebreaker, and this test passes
-    // either way. The tiebreaker is really guarded by the conformance test above,
-    // which compares the two stores and does catch a dropped SQL tiebreaker.
+    // A completeness check, and ONLY that. Two successive comments here claimed
+    // more and both were wrong: first that this guards the tiebreaker (it passes
+    // with or without it), then that the conformance test above guards it (it
+    // does not — `sessions_page_idx` supplies the `id` ordering for free, so
+    // dropping the SQL tiebreaker changes no observable order; measured over all
+    // 72 windows, zero differed).
+    //
+    // What actually guards the SQL tiebreaker is the COLLATE count assertion,
+    // which requires two occurrences. That is a syntactic guard, and saying so is
+    // the point: no behavioural test here can distinguish it.
     const pg = await createPgliteStore();
     await fill(pg);
     const seen: string[] = [];

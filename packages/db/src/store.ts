@@ -125,43 +125,32 @@ export class DrizzleStore implements Store {
 
   /** See `Store.sessionsPage`.
    *
-   *  What is and is not bounded, measured with EXPLAIN (ANALYZE) on PGlite over
-   *  20k sessions asking for a page of 10:
+   *  THE BOUND IS `offset + limit`, NOT `limit`. `OFFSET n` makes Postgres walk
+   *  and discard n index tuples before the first returned row, so the work grows
+   *  with how deep the page is. Measured, PGlite, 2000 sessions, limit 10:
    *
-   *    no index                          Seq Scan rows=20000, 217 buffers, 12.7 ms
-   *    sessions_page_idx                 Index Scan rows=10,   13 buffers,  0.17 ms
-   *    sessions_page_idx + count() over  Index Scan rows=20000, 20145 buffers, 25.6 ms
+   *    offset=0     Index Scan, rows=10
+   *    offset=10    Index Scan, rows=20
+   *    offset=1990  Index Scan, rows=2000
    *
-   *  The PAGE is bounded — the scan node reports rows=10, so the database really
-   *  does stop at the window. That depends entirely on `sessions_page_idx`, whose
-   *  collation must match this ORDER BY exactly; an index declared without the
-   *  same `COLLATE "C"` cannot serve it and the planner silently reverts to the
-   *  first line.
+   *  Which still beats what this replaced — that read every row AND sorted them —
+   *  but "the database stops at the window" is false, and an earlier version of
+   *  this comment said it. On a locale-collated production engine the planner also
+   *  abandons the index entirely for a deep enough offset and takes the full scan.
+   *  Keyset paging is the shape that is actually bounded; it is not adopted here.
    *
-   *  The TOTAL is not bounded and cannot be: an exact count of a table costs a
-   *  scan of it. That is the price of returning `total` at all.
+   *  The page depends on `sessions_page_idx`, whose collation must match this
+   *  ORDER BY. Drop the pin and the planner reverts to Seq Scan + Sort.
    *
-   *  An earlier revision carried the total on each page row via `count(*) over()`
-   *  to get both from one statement. That is the third line above: a window
-   *  function with an empty frame must drain its whole input before it emits a
-   *  row, so it forced the very full retrieve-and-sort the method exists to
-   *  avoid, and made the page 147x more expensive than the indexed form. It was
-   *  removed. The single-snapshot property it bought is instead bought by a
-   *  REPEATABLE READ transaction, which costs a round trip rather than a scan.
+   *  The TOTAL is a full-relation `count(*)` on every call. An exact count costs a
+   *  scan; that is the price of returning `total` at all.
    *
-   *  Why a transaction at all: the code this replaced read every session once, so
-   *  its page and its total could not disagree. Two independent statements can —
-   *  an insert landing between them yields a total that does not describe the
-   *  page, and `hasMore` derived from it is wrong on a surface the client polls.
-   *  REPEATABLE READ gives both statements one snapshot, restoring the property
-   *  the single scan had for free.
+   *  REPEATABLE READ makes the page and the total one snapshot — within a call.
+   *  Across calls nothing is stable, which is why `apps/web` de-dupes by threadId.
    *
-   *  `count()` is drizzle's, which carries `.mapWith(Number)`. That is
-   *  load-bearing across drivers, not decoration: `count(*)` is `int8`, and
-   *  postgres-js does not register a parser for OID 20, so on Railway it arrives
-   *  as the STRING "250" while PGlite hands back a number. A hand-written
-   *  `Number(...)` would be correct but exercised only on the engine where it is
-   *  a no-op. */
+   *  `count()` is drizzle's, carrying `.mapWith(Number)`: `count(*)` is int8 and
+   *  postgres-js registers no parser for OID 20, so it arrives as a STRING there
+   *  and a number on PGlite. */
   async sessionsPage(opts: {
     limit?: number;
     offset?: number;
@@ -179,7 +168,14 @@ export class DrizzleStore implements Store {
             ? await ordered.offset(offset)
             : await ordered.limit(opts.limit).offset(offset);
         const totals = await tx.select({ n: count() }).from(sessions);
-        return { sessions: rows.map(toSession), total: totals[0]?.n ?? 0 };
+        // `?? 0` catches null/undefined and passes NaN THROUGH, and NaN is the
+        // shape this file already hit once: `hasMore: offset + n < NaN` is false,
+        // so the client stops paging with no error anywhere.
+        const n = totals[0]?.n;
+        return {
+          sessions: rows.map(toSession),
+          total: Number.isFinite(n) ? (n as number) : 0,
+        };
       },
       { isolationLevel: "repeatable read" },
     );

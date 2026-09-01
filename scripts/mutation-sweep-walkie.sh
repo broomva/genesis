@@ -56,12 +56,13 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        packages/db/src/store.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts
-          packages/core/src/store.ts packages/db/src/store.ts)
+          packages/core/src/store.ts packages/db/src/store.ts packages/db/src/schema.ts)
 EXPECTED_MUTANTS=101
 
 # Subject paths used by mutants below. Defined HERE, not at first use: the
 # paging mutants sit ~25 lines above where these used to be declared, and with
 # `set -u` an undefined expansion aborts the run rather than mis-targeting.
+SC=packages/db/src/schema.ts
 CS=packages/core/src/store.ts
 DS=packages/db/src/store.ts
 
@@ -715,13 +716,22 @@ mutate "the page is bounded in JS instead of in SQL — identical response, unbo
   '            : await ordered.limit(opts.limit).offset(offset);' \
   '            : (await ordered.offset(offset)).slice(0, opts.limit);' \
   "no query retrieves more rows than the window"
+# The DDL the page's bound depends on. schema.ts was not a SUBJECT until now, so
+# the index this whole PR rests on was under no mutant at all.
+mutate "the index loses its collation, so the planner cannot use it" "$SC" \
+  'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at COLLATE "C" DESC, id COLLATE "C" ASC);' \
+  'CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at DESC, id ASC);' \
+  "the plan reads offset"
 mutate "the id tiebreaker loses its collation and follows the database locale" "$DS" \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} ASC`);' \
   "pins COLLATE"
+# `{}` was a CRASH mutant: drizzle emits a bare `set transaction ` and every call
+# throws, so the kill proved nothing about the isolation assertion. `read committed`
+# compiles, runs, removes the snapshot property, and is caught by the regex alone.
 mutate "page and total stop sharing a snapshot" "$DS" \
   '      { isolationLevel: "repeatable read" },' \
-  '      {},' \
+  '      { isolationLevel: "read committed" },' \
   "share ONE snapshot"
 mutate "the window precondition is dropped, so the two stores diverge on bad input" "$CS" \
   '    assertPageOpts(opts);' \
@@ -729,7 +739,7 @@ mutate "the window precondition is dropped, so the two stores diverge on bad inp
   "rejected identically by BOTH stores"
 # `listThreads` and `listThreadsPage` need SEPARATE mutants: the /walkie/threads
 # route calls the PAGE form, so a mutant on the other one never reaches the route
-# test at all. The first version of this used `want "NO full scan"` for the
+# test at all. The first version of this used `want "never calls listSessions"` for the
 # listThreads mutant and the sweep reported "red, but not via <want>" — it was
 # killed by supervisor.test.ts instead, which is the correct kill for it.
 mutate "listThreads goes back to scanning every session and slicing in JS" "$C" \
@@ -753,11 +763,7 @@ mutate "listThreadsPage goes back to scanning every session and slicing in JS" "
       ),
       total: all.length,
     };' \
-  "NO full scan"
-mutate "the pg ORDER BY drops COLLATE C and follows the database locale" "$DS" \
-  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
-  '.orderBy(sql`${sessions.createdAt} DESC, ${sessions.id} ASC`);' \
-  "pins COLLATE"
+  "never calls listSessions"
 
 mutate "the memo evicts an entry a later call already replaced" "$M" \
   "      if (entries.get(key)?.value === value) entries.delete(key);" \
@@ -772,7 +778,7 @@ mutate "the default page size drops to 50" "$S" \
 mutate "the route scans sessions twice per request" "$S" \
   "    const { threads, total } = await supervisor.listThreadsPage({ limit, offset });" \
   "    const threads = await supervisor.listThreads({ limit, offset }); const total = (await supervisor.listThreadsPage({})).total;" \
-  "NO full scan"
+  "never calls listSessions"
 
 if [ "$total" -ne "$EXPECTED_MUTANTS" ]; then
   echo "$total mutants ran, expected $EXPECTED_MUTANTS — a mutant was added or removed"

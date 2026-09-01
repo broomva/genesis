@@ -1530,12 +1530,17 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     expect(reads()).toBe(10);
   });
 
-  test("a request costs ONE bounded page query and NO full scan", async () => {
+  test("a request makes ONE sessionsPage call and never calls listSessions", async () => {
     // The first version paired listThreads with a separate countThreads and each
     // scanned independently — a paging change that removed the per-session turn
     // reads and doubled the scan underneath them, on a polled surface. That was
     // fixed to one scan; this now asserts ZERO, because the page and the total
     // both come from `sessionsPage`, which bounds the retrieval in SQL.
+    //
+    // NAMED for what it observes. It was called "...and NO full scan", which
+    // `scans()` cannot see: that counter increments on `listSessions` only and is
+    // structurally blind to the `count(*)` the request still issues. The request
+    // does perform a full scan, for the total.
     //
     // Both assertions, and NEITHER is redundant — though the first version of
     // this comment claimed `scans() === 0` was the load-bearing one "because the

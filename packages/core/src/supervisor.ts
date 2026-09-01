@@ -1234,7 +1234,11 @@ export class Supervisor {
     );
   }
 
-  /** A page AND the total, from ONE session scan.
+  /** A page AND the total, from one call and one snapshot.
+   *
+   *  The route calls THIS, not `listThreads`. The page is served from
+   *  `sessions_page_idx`; the total is a full `count(*)`. Both statements share a
+   *  REPEATABLE READ transaction so the total describes the page.
    *
    *  The first version paired `listThreads` with a separate `countThreads`, and
    *  each called `listSessions()` — which on the pg store is a full
@@ -1244,7 +1248,8 @@ export class Supervisor {
    *  turns cost is what the comment there talked about, and it was silent about
    *  this.
    *
-   *  Callers wanting only the page keep using `listThreads`. */
+   *  `listThreads` returns only the page but pays the same `count(*)` and then
+   *  discards it. It has no production caller left. */
   async listThreadsPage(
     opts: { limit?: number; offset?: number } = {},
   ): Promise<{ threads: ThreadSummary[]; total: number }> {
