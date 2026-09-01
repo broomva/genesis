@@ -38,7 +38,7 @@ describe("secretMatches — the voice surface's only gate", () => {
 });
 
 describe("normalizeCallerId — an alias of the one shared normalizer", () => {
-  test("reduces every spelling of one number to one id", () => {
+  test("punctuation is stripped, so one number written many ways is one id", () => {
     for (const spelling of [
       "+57 301 775 8620",
       "573017758620",

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { normalizePhoneId } from "./index";
 
 describe("normalizePhoneId", () => {
-  test("reduces every spelling of one number to one id", () => {
+  test("punctuation is stripped, so one number written many ways is one id", () => {
     for (const spelling of [
       "+57 301 775 8620",
       "573017758620",

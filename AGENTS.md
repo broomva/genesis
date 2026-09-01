@@ -104,9 +104,13 @@ implementations keeps two implementations, and the class only disappears when th
 
 Known limits, so you do not have to rediscover them:
 
-- It matches one spelling of the rule. `replace(/[^0-9]/g, "")` and `replaceAll` are also
-  scanned for, but a sufficiently creative rewrite is not — the gate stops accidents, not
-  determined evasion.
+- It matches a fixed list of spellings — the `\D` form, both negated-character-class
+  forms, and the `replaceAll` variant — not the rule's *meaning*. A sufficiently creative
+  rewrite (a hoisted regex constant, a hand-rolled character filter) is not caught: the
+  gate stops accidents, not determined evasion. The list is in `NEEDLES` and its length is
+  pinned, so read it there rather than trusting this sentence — an earlier version of this
+  line claimed `replaceAll` was covered when it was not, and a working sixth copy walked
+  past the gate while this file said otherwise.
 - `normalizePhoneId` is **not a validator**: garbage yields `""`, and `""` is a dangerous
   id to route on. `voice-queue.ts` says so. One pre-existing site does not check it —
   `allowlist.ts`'s bare-entry branch in `principalOf` — which is low-reachability but real.

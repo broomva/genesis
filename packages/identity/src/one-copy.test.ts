@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 /**
  * There must be exactly ONE digit-stripping phone normalizer in the repo.
  *
- * There were four, under four names, in three files — and the thing meant to
+ * There were five, under four names, in four files — and the thing meant to
  * hold them together was a test in voice.test.ts named "DRIFT GUARD" that
  * re-implemented the rule inline instead of importing it. Mutating
  * `normalizePhone` to a completely unrelated rule left it reporting 14 pass /
@@ -36,7 +36,16 @@ const NEEDLES = [
   ["replace(/", "\\", "D/g"].join(""),
   ["replace(/[^", "0-9]/g"].join(""),
   ["replace(/[^", "\\", "d]/g"].join(""),
+  // `replaceAll` does NOT contain the `replace(` needle as a substring, so it
+  // was a working copy the gate walked straight past — while AGENTS.md told the
+  // next agent it was covered.
+  ["replaceAll(/", "\\", "D/g"].join(""),
 ];
+
+/** Pinned, because the three needles added after the first were exercised by
+ *  nothing: reducing this list back to one left the suite green, so they could
+ *  be deleted silently. Same shape as the sweep's EXPECTED_MUTANTS. */
+const EXPECTED_NEEDLES = 4;
 
 /** The single legitimate home, relative to the repo root. */
 const HOME = "packages/identity/src/index.ts";
@@ -47,7 +56,7 @@ function trackedTs(): string[] {
   // omitted apps/web's 54 tracked `.tsx` files, which is the app that already
   // renders phone requests and is therefore the likeliest home for copy six.
   const out = Bun.spawnSync(
-    ["git", "ls-files", "--", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs"],
+    ["git", "ls-files", "--", "*.ts", "*.tsx", "*.mts", "*.cts", "*.js", "*.jsx", "*.mjs", "*.cjs"],
     { cwd: ROOT },
   ).stdout.toString();
   return out
@@ -58,6 +67,14 @@ function trackedTs(): string[] {
 
 describe("exactly one phone normalizer", () => {
   const files = trackedTs();
+
+  test("every declared needle is still declared", () => {
+    // Arity, not content: the offender scan iterates NEEDLES, so any test written
+    // over NEEDLES passes trivially after one is deleted. Only a count declared
+    // separately notices.
+    expect(NEEDLES.length).toBe(EXPECTED_NEEDLES);
+    expect(new Set(NEEDLES).size).toBe(EXPECTED_NEEDLES);
+  });
 
   test("the scan sees a real, non-trivial set of files", () => {
     // Without this the two assertions below pass vacuously the moment
