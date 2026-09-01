@@ -243,9 +243,16 @@ if (localHost) {
   // P20 (BRO-1488 round-2 B2): the interactive engine's default permission policy
   // is allow-all (== --dangerously-skip-permissions) — warn if /message is open.
   if (!process.env.GENESIS_TOKEN) {
+    // "Bind to localhost" WAS offered here as a mitigation and is not one: a
+    // Tailscale funnel forwards TO localhost, so binding there is exactly what
+    // the funnel connects to. An operator who chose that option believed they
+    // were protected. The two things that actually bound the exposure are the
+    // token and the funnel's path scope, so those are what it says now.
     console.warn(
       "[genesis] WARNING: the interactive engine auto-allows agent tool permissions and /message is " +
-        "unauthenticated. Bind to localhost only, or set GENESIS_TOKEN.",
+        "unauthenticated. Set GENESIS_TOKEN. Binding to localhost helps against a tailnet or LAN " +
+        "caller but NOT against a Tailscale funnel, which forwards to localhost — if this host is " +
+        "funnelled, scope the funnel to /voice.",
     );
   }
   // Kill live agent tmux sessions + the control socket on shutdown. A hung

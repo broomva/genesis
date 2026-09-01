@@ -28,8 +28,16 @@ authentication (either one):
 required environment:
   GENESIS_PUBLIC_URL    base URL ElevenLabs reaches Genesis on. Scheme required,
                         no path, no trailing slash — /voice/* is appended.
-                        A Tailscale funnel works; do NOT use --set-path, it
-                        strips the prefix and /voice/* stops resolving.
+                        Tailscale: scope the funnel to /voice on its own port.
+                        ONE command — since v2, funnel IS serve with AllowFunnel
+                        set, and there is no on/off form:
+                          tailscale funnel --bg --https=10000 \\
+                            --set-path=/voice http://127.0.0.1:8787/voice
+                        --set-path STRIPS the prefix, so the target repeats
+                        /voice to re-join it. Do NOT funnel the root: that
+                        publishes every route on the port, including POST
+                        /message, which dispatches an agent turn.
+                        Verify with scripts/funnel-scope-probe.sh <host>.
   GENESIS_VOICE_SECRET  must EQUAL the value Genesis is running with, or every
                         tool call returns 401 while sounding like success.
 USAGE
