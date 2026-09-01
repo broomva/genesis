@@ -588,6 +588,32 @@ export function build(opts: BuildOpts) {
           "nothing to read. Pass the same directory createAskLog was given.",
       );
     }
+    // The third invariant, and the one this surface's whole argument rests on
+    // (P20 BRO-2417, Stratum A BLOCKER). `unauthorized()` opens with
+    // `if (!opts.token) return false` — an unset token authorizes EVERYONE. So on
+    // a tokenless deploy every owner verb, including POST /message (which
+    // dispatches an agent turn) and POST /workspaces/:id/git/commit, is already
+    // open, and "the walkie secret is weaker than the owner token" is not a
+    // property of that deployment: there is nothing for it to be weaker than.
+    //
+    // An earlier draft of this comment justified the guard with "before the
+    // mirrors, the client had to hold GENESIS_TOKEN, so the operator had to set
+    // it". That was FALSE and P20 round 2 caught it: /walkie/asks and
+    // /walkie/answer are header-gated, so the walkie loop already ran end to end
+    // on a tokenless deploy. The guard is right anyway and needs no story —
+    // a surface whose gate gates nothing should not boot.
+    //
+    // A build-time throw, like the two above, rather than the voice precedent of
+    // silently not registering: an operator who set GENESIS_WALKIE_SECRET wants
+    // this surface, and a client 404ing with no explanation is the worse failure.
+    if (!opts.token) {
+      throw new Error(
+        "walkieSecret is set but token is not: `unauthorized()` fails open " +
+          "without a token, so every owner route — including POST /message and " +
+          "git commit — would be unauthenticated and the walkie secret would " +
+          "gate nothing. Set GENESIS_TOKEN.",
+      );
+    }
     const askLog = opts.askLog;
     const askLogDir = opts.askLogDir;
     // NOT the shared unauthorized(): that helper opens with
@@ -604,7 +630,7 @@ export function build(opts: BuildOpts) {
     // this. GET /walkie/stream is a later addition on top, not a prerequisite:
     // a client that can poll this can render, and a streaming endpoint carries
     // hazards a read verb does not.
-    // NO-STORE ON BOTH WALKIE ROUTES. The body is the operator's pending
+    // NO-STORE ON EVERY WALKIE ROUTE (there are seven now, not two). The body is the operator's pending
     // decisions, and nothing here set a cache directive — so a shared cache, a
     // service worker or the browser's bfcache may retain it. That matters more
     // than it would for most JSON: the PWA client is the intended consumer, so
@@ -759,6 +785,79 @@ export function build(opts: BuildOpts) {
         return c.body(Bun.file(asset.path).stream() as unknown as ReadableStream);
       });
     }
+
+    // READ MIRRORS (BRO-2417). The client needs /threads, /workspaces and the
+    // per-workspace git verbs, and it cannot call them: those are gated by
+    // `unauthorized()`, which checks GENESIS_TOKEN — a credential the walkie
+    // client must not hold, for two reasons that are properties of that helper
+    // rather than opinions.
+    //
+    // It accepts the token FROM THE QUERY STRING (server.ts, `unauthorized`), so
+    // the natural browser path would put the owner credential in a URL, and from
+    // there into access logs, Referer headers and history. That is the exact
+    // thing the walkie routes use a dedicated header check to avoid.
+    //
+    // And GENESIS_TOKEN is the OWNER credential: it unlocks writes, including
+    // POST /workspaces/:id/git/commit. A phone in a pocket must not carry a
+    // credential that can commit.
+    //
+    // So: mirrors, gated by walkieDenied. Widening `unauthorized()` to accept the
+    // walkie secret was the smaller diff and the wrong one: it would make a
+    // leaked phone credential unlock everything the owner token does.
+    //
+    // READ-ONLY is asserted over the ROUTE TABLE, not asserted in prose: a test
+    // enumerates `app.routes` and requires the non-GET verbs under /walkie to be
+    // exactly `POST /walkie/answer`. Three reviewers independently observed that
+    // the earlier wording ("no write verb here to forget to gate") described a
+    // policy while claiming to describe a construction — a walkie-gated write
+    // added later would have violated it with every test still green. The route
+    // table assertion is what makes the sentence true.
+    //
+    // Note POST /walkie/answer IS a write, and is in scope deliberately: it is
+    // the decision coming back, the reason the surface exists. "Read-only" here
+    // means "unlocks no OWNER write", which is what the tests enumerate.
+    //
+    // Every mirror calls the SAME body function as its owner-gated twin, so the
+    // two cannot drift; the tests assert all five mirrors against their twins.
+    //
+    // WHAT THIS CREDENTIAL CAN READ, stated plainly because the argument above is
+    // only about writes: tracked-file diff bodies (bounded by MAX_DIFF_BYTES),
+    // working-tree file lists, branch and upstream names, CI run metadata, and
+    // every thread's last agent turn — across every registered workspace, under
+    // one shared secret. No MIRROR PAYLOAD carries `rootPath` (listWorkspaces
+    // omits it; the git verbs return repo-relative paths only) — but that claim
+    // is about the mirrors, not the process: GET /health is unauthenticated and
+    // reports the absolute workspace root. `rootPath` is the only thing the
+    // mirrors withhold. Provision the secret accordingly.
+    app.get("/walkie/threads", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return c.json(await threadsBody());
+    });
+
+    app.get("/walkie/workspaces", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return c.json(await workspacesBody());
+    });
+
+    app.get("/walkie/workspaces/:id/git/status", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return gitStatusBody(c, c.req.param("id"));
+    });
+
+    app.get("/walkie/workspaces/:id/git/diff", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return gitDiffBody(c, c.req.param("id"));
+    });
+
+    app.get("/walkie/workspaces/:id/checks", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return checksBody(c, c.req.param("id"));
+    });
 
     // The decision coming back.
     app.post("/walkie/answer", async (c) => {
@@ -1032,9 +1131,54 @@ export function build(opts: BuildOpts) {
   // it exposes thread metadata + last-turn previews. (Hono matches the static
   // `/threads` ahead of the `/threads/:id` param route regardless of order, so
   // the two never collide.)
+  // THE PAYLOADS ARE HOISTED so the owner-gated route and its walkie mirror
+  // (BRO-2417) cannot drift. Two copies of a response shape are two truths, and
+  // the one nobody looks at is the one that rots — so there is one body per verb
+  // and two gates over it.
+  const threadsBody = async () => ({ threads: await supervisor.listThreads() });
+  const workspacesBody = async () => ({
+    workspaces: await supervisor.listWorkspaces(),
+    defaultWorkspace: supervisor.defaultWorkspaceId,
+  });
+  // The three per-workspace git reads take the Context (they need `:id` and, for
+  // diff, the query) and return the RESPONSE, because "unknown workspace" is part
+  // of the body's contract, not the gate's. Hoisted for the same reason as the two
+  // above — and this pair was the P20 finding: the first cut hoisted only threads
+  // and workspaces, leaving three copy-pasted handlers under a comment claiming
+  // every mirror shared a body. Three reviewers found the same false sentence.
+  const gitStatusBody = async (c: Context, id: string) => {
+    const root = await supervisor.resolveWorkspaceRoot(id);
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(await gitStatus(root));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read git status");
+    }
+  };
+  const gitDiffBody = async (c: Context, id: string) => {
+    const root = await supervisor.resolveWorkspaceRoot(id);
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      const cachedQ = c.req.query("cached");
+      const cached = cachedQ === "1" || cachedQ === "true";
+      return c.json(await gitDiff(root, c.req.query("path"), { cached }));
+    } catch (e) {
+      return fsErrorResponse(c, e, "compute diff");
+    }
+  };
+  const checksBody = async (c: Context, id: string) => {
+    const root = await supervisor.resolveWorkspaceRoot(id);
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(await workspaceChecks(root));
+    } catch (e) {
+      return fsErrorResponse(c, e, "read checks");
+    }
+  };
+
   app.get("/threads", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    return c.json({ threads: await supervisor.listThreads() });
+    return c.json(await threadsBody());
   });
 
   // Selectable workspaces (BRO-1627) for the per-thread workspace picker. Same
@@ -1042,10 +1186,7 @@ export function build(opts: BuildOpts) {
   // in" choice (bound sticky on the thread's first turn).
   app.get("/workspaces", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    return c.json({
-      workspaces: await supervisor.listWorkspaces(),
-      defaultWorkspace: supervisor.defaultWorkspaceId,
-    });
+    return c.json(await workspacesBody());
   });
 
   // Re-read the workspace registry without restarting (BRO-2230). Tenant
@@ -1205,26 +1346,12 @@ export function build(opts: BuildOpts) {
   // passed only as a pathspec. Same bearer gate; unknown workspace → 404.
   app.get("/workspaces/:id/git/status", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
-    if (!root) return c.json({ error: "unknown workspace" }, 404);
-    try {
-      return c.json(await gitStatus(root));
-    } catch (e) {
-      return fsErrorResponse(c, e, "read git status");
-    }
+    return gitStatusBody(c, c.req.param("id"));
   });
 
   app.get("/workspaces/:id/git/diff", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
-    if (!root) return c.json({ error: "unknown workspace" }, 404);
-    try {
-      const cachedQ = c.req.query("cached");
-      const cached = cachedQ === "1" || cachedQ === "true";
-      return c.json(await gitDiff(root, c.req.query("path"), { cached }));
-    } catch (e) {
-      return fsErrorResponse(c, e, "compute diff");
-    }
+    return gitDiffBody(c, c.req.param("id"));
   });
 
   // Commit & Push (BRO-1666 Slice 3) — the only WRITE op. OWNER-ONLY, enforced at
@@ -1249,13 +1376,7 @@ export function build(opts: BuildOpts) {
   // Same bearer gate; unknown workspace → 404.
   app.get("/workspaces/:id/checks", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    const root = await supervisor.resolveWorkspaceRoot(c.req.param("id"));
-    if (!root) return c.json({ error: "unknown workspace" }, 404);
-    try {
-      return c.json(await workspaceChecks(root));
-    } catch (e) {
-      return fsErrorResponse(c, e, "read checks");
-    }
+    return checksBody(c, c.req.param("id"));
   });
 
   app.get("/threads/:id", async (c) => {
