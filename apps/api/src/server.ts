@@ -1156,10 +1156,24 @@ export function build(opts: BuildOpts) {
   // mirror serve it and paging one but not the other reintroduces exactly the
   // drift the shared bodies exist to prevent (BRO-2417).
   //
-  // The cost this bounds is not the response — it is the work. Each summary
-  // needs the session's last turn, so an unpaged read is one turns query per
-  // session, on a surface the walkie client polls every 4s. `listThreads` slices
-  // before those reads, so a limit is O(page) rather than O(box).
+  // What this bounds, stated precisely, because the first version of this
+  // comment overclaimed and a review measured it.
+  //
+  // PER REQUEST it bounds both the response and the work: each summary needs the
+  // session's last turn, so an unpaged read is one turns query per session, and
+  // slicing before those reads makes a limit O(page) rather than O(box).
+  //
+  // PER REFRESH it does NOT reduce work, and saying so was wrong. A client that
+  // wants every thread now issues ceil(N/200) requests, so at 226 threads a
+  // refresh costs 2 session scans + 226 turn reads where it used to cost 1 + 226
+  // — one extra scan per 200 threads. What it buys is a bounded RESPONSE and a
+  // bounded worst case; the N+1 turn reads are untouched and remain the dominant
+  // cost. Fixing that needs a batch last-turn read on the Store interface, which
+  // is a change to two implementations and wants its own review.
+  //
+  // Also corrected: the 4s poller of this surface is `apps/web`
+  // (`page.tsx` refreshes while any thread is live). walkie reads it on its 60s
+  // context clock — its 4s loop is the ASK loop, a different route.
   //
   // DEFAULT 200, NOT 50 like `/walkie/asks`, and the difference is deliberate:
   // asks is a poller that wants the oldest-waiting few, while `/threads` is the
@@ -1229,10 +1243,17 @@ export function build(opts: BuildOpts) {
   //
   // Keyed by workspace, not by (workspace, branch), because the branch is read
   // BY the call being cached — keying on it would require the git spawn this
-  // exists to avoid. The cost is stated rather than hidden: for up to
-  // CHECKS_TTL_MS after a branch switch, this serves the previous branch's runs.
+  // exists to avoid. The cost is stated rather than hidden: after a branch switch
+  // this serves the previous branch's runs for up to duration + CHECKS_TTL_MS —
+  // not the TTL alone, since the window is measured from when the call settles.
   // The response carries `branch`, so a client can see which branch it is
   // looking at rather than having to assume.
+  // 10s of RESULT freshness, measured from when the call settles. The staleness
+  // a client can see is therefore duration + TTL, not TTL: `workspaceChecks`
+  // spawns up to three subprocesses each bounded at 20s, so the worst case is
+  // nearer 70s than 10. Stamping at start instead would expire the window
+  // mid-execution and start a second run while the first was pending, which is
+  // the pile-up this exists to prevent.
   const CHECKS_TTL_MS = 10_000;
   const cachedChecks = ttlMemo(workspaceChecks, CHECKS_TTL_MS);
 

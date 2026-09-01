@@ -51,6 +51,31 @@ describe("fetchThreads pages", () => {
     });
   });
 
+  test("a thread created mid-loop does not produce a DUPLICATE row", () => {
+    // Offset paging over a mutating list: inserting at the head shifts the
+    // window, so a naive concatenation returns one row twice — and the drawer
+    // renders `key={t.threadId}`, so that is a duplicate React key. The 4s
+    // refresh runs precisely while an agent is creating sessions.
+    let calls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls++;
+      const offset = Number(new URL(String(input), "http://x").searchParams.get("offset") ?? 0);
+      const threads =
+        offset === 0
+          ? Array.from({ length: 200 }, (_, i) => ({ threadId: `t-${i}` }))
+          : [{ threadId: "t-199" }, { threadId: "t-200" }];
+      return new Response(JSON.stringify({ threads, hasMore: offset === 0 }), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    return fetchThreads().then((all) => {
+      expect(calls).toBe(2);
+      const ids = all.map((t) => t.threadId);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids).toContain("t-200");
+    });
+  });
+
   test("a single page ends the loop — no wasted request", () => {
     const s = serverWith(5);
     return fetchThreads().then((all) => {

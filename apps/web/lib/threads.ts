@@ -131,12 +131,19 @@ function toDynamicToolPart(p: StoredToolPart): UIMessage["parts"][number] {
  *  so the drawer pages rather than showing a truncated list. */
 const THREAD_PAGE = 200;
 
-/** A runaway guard, NOT a display limit. `hasMore` ending the loop is the normal
- *  exit; this only bounds a server that never says false. */
+/** A runaway guard: `hasMore` ending the loop is the normal exit, and this only
+ *  bounds a server that never says false.
+ *
+ *  Honestly, it IS a display limit above 25 x 200 = 5000 threads, and a silent
+ *  one — which is the failure this whole change exists to remove, merely moved
+ *  two orders of magnitude out. Left as a guard rather than raised because a box
+ *  with 5000 threads has a different problem than this loop; if that stops being
+ *  true, the fix is a signal to the UI, not a bigger number. */
 const MAX_THREAD_PAGES = 25;
 
-/** Fetch the thread list for the drawer. Returns [] on any non-OK / error so the
- *  UI degrades to "no conversations" rather than throwing.
+/** Fetch the thread list for the drawer. Degrades rather than throwing: a
+ *  non-OK FIRST page yields [] ("no conversations"), and a non-OK LATER page
+ *  keeps the pages already fetched rather than discarding a good first page.
  *
  *  PAGES, because the engine bounds each response. Without this the drawer would
  *  silently show the first 200 of N with no control to reach the rest — and the
@@ -145,22 +152,28 @@ const MAX_THREAD_PAGES = 25;
  *  deployed box had 226 threads when this was written, so the truncation was not
  *  hypothetical. */
 export async function fetchThreads(signal?: AbortSignal): Promise<ThreadSummary[]> {
-  const all: ThreadSummary[] = [];
+  // Keyed by threadId, not concatenated: offset paging over a list that mutates
+  // between requests returns a row TWICE when a thread is created mid-loop (the
+  // window shifts), and the drawer renders `key={t.threadId}` — so a duplicate
+  // is a duplicate React key. The 4s refresh runs precisely while an agent is
+  // creating sessions, so this is the normal case, not an exotic one. A row lost
+  // to a concurrent delete is left alone: the next refresh restores it.
+  const byId = new Map<string, ThreadSummary>();
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
     const res = await fetch(`/api/threads?limit=${THREAD_PAGE}&offset=${page * THREAD_PAGE}`, {
       signal,
     });
     // Degrade to what we already have rather than throwing away a good first
     // page because a later one failed.
-    if (!res.ok) return all;
+    if (!res.ok) return [...byId.values()];
     const data = (await res.json()) as { threads?: ThreadSummary[]; hasMore?: boolean };
     const batch = data.threads ?? [];
-    all.push(...batch);
+    for (const t of batch) byId.set(t.threadId, t);
     // An empty page also ends it: a server claiming `hasMore` while returning
     // nothing would otherwise spin until the page cap.
-    if (!data.hasMore || batch.length === 0) return all;
+    if (!data.hasMore || batch.length === 0) break;
   }
-  return all;
+  return [...byId.values()];
 }
 
 /** Fetch one thread's transcript and map engine turns → AI SDK UIMessages for

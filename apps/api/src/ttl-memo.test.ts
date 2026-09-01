@@ -64,6 +64,37 @@ describe("ttlMemo", () => {
     expect(c.calls()).toBe(1);
   });
 
+  test("a late rejection does not evict the entry that REPLACED it", async () => {
+    // Reachable, contrary to a comment I wrote saying it was not — though not by
+    // the route I first guessed. `entries.set` runs AFTER the fetcher returns its
+    // promise, so a fetcher that re-enters the memo before its first await
+    // creates an inner entry which the outer call then overwrites. The outer
+    // entry is the live one; if the INNER promise later rejects, its handler
+    // finds an entry it does not own. Without the identity check it deletes the
+    // live result.
+    let calls = 0;
+    let failInner!: (e: Error) => void;
+    const memo: (k: string) => Promise<string> = ttlMemo(async (k) => {
+      calls++;
+      if (calls === 1) {
+        // Re-enter synchronously: this creates the inner entry, which the outer
+        // call is about to replace.
+        memo(k).catch(() => {});
+        return "outer";
+      }
+      return new Promise<string>((_, rej) => {
+        failInner = rej;
+      });
+    }, 10_000);
+
+    expect(await memo("a")).toBe("outer");
+    failInner(new Error("late"));
+    await new Promise((r) => setTimeout(r, 5));
+    // The outer result must still be cached.
+    expect(await memo("a")).toBe("outer");
+    expect(calls).toBe(2);
+  });
+
   test("distinct keys do not share", async () => {
     const c = counting("x");
     const memo = ttlMemo(c.immediate, 10_000);

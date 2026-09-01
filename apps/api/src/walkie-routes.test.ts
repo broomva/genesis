@@ -1411,6 +1411,32 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     expect(second.length).toBe(5);
     expect(first.filter((x) => second.includes(x))).toEqual([]); // disjoint
     expect(new Set([...first, ...second]).size).toBe(10); // and complete
+
+    // ORDER, because disjointness and completeness follow from slice arithmetic
+    // for ANY deterministic comparator — the two checks above hold even if ties
+    // are ordered arbitrarily. What ties decide is stability, and stability is
+    // only visible as order: equal timestamps must keep the store's order.
+    //
+    // A review flagged that mutating the comparator's tie branch `0` -> `1`
+    // survives this. It does, and the reason is worth recording rather than
+    // chasing: returning a non-zero value for equal elements makes the comparator
+    // INCONSISTENT, and measured across n = 10, 22, 30, 60 and 250 it produces
+    // byte-identical output in this engine. It is an EQUIVALENT mutant, not a
+    // coverage hole — no test can kill it because it changes nothing. The
+    // assertion below still earns its place: it pins the property against a
+    // comparator that genuinely reorders.
+    expect([...first, ...second]).toEqual([
+      "tie-0",
+      "tie-1",
+      "tie-2",
+      "tie-3",
+      "tie-4",
+      "tie-5",
+      "tie-6",
+      "tie-7",
+      "tie-8",
+      "tie-9",
+    ]);
   });
 
   test("the DEFAULT is 200, not 50 — the constant the design argument rests on", async () => {

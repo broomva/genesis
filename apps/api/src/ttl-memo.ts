@@ -45,14 +45,12 @@ export function ttlMemo<T>(
       () => {},
     );
     value.catch(() => {
-      // Only evict OUR entry, defensively. A review flagged this guard as
-      // unproven, and the honest answer is that it is now UNREACHABLE rather
-      // than untested: sharing in-flight promises means no second entry can be
-      // created for a key while its promise is pending, so a rejection can never
-      // arrive to find itself replaced. It is kept because it costs one
-      // comparison and stops that from silently becoming false if the in-flight
-      // sharing above is ever narrowed — but there is deliberately no test for
-      // it, because a test for an unreachable defect asserts nothing.
+      // Only evict OUR entry. I claimed this was unreachable once in-flight
+      // promises are shared; that was wrong, and a review constructed the case:
+      // a fetcher that re-enters the memo for the same key BEFORE its first
+      // await replaces the entry while the outer call is still pending, so a
+      // later rejection arrives to find a live newer entry. Without the identity
+      // check it deletes that one. Tested.
       if (entries.get(key)?.value === value) entries.delete(key);
     });
     return value;
