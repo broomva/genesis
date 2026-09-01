@@ -120,7 +120,11 @@ export interface BuildOpts {
   /** The ask log's write half. REQUIRED whenever walkieSecret is set; build()
    *  throws otherwise — a configured surface with no store would acknowledge an
    *  answer and discard it, which is the exact shape voiceSecret/enqueueVoice
-   *  already failed in once. */
+   *  already failed in once.
+   *
+   *  Passing it also WIRES THE PRODUCER: the Supervisor's `onAsk` is derived from
+   *  it below, so an AskUserQuestion in a live session appends here. Until
+   *  BRO-2413 nothing did, and asks.jsonl stayed empty in every real deploy. */
   askLog?: {
     append(ask: Ask): void;
     answer(answer: AskAnswer): void;
@@ -259,6 +263,7 @@ export async function readBounded(req: Request, max: number): Promise<string | n
 
 export function build(opts: BuildOpts) {
   const hub = new Hub();
+  const askStore = opts.askLog;
   const supervisor = new Supervisor({
     defaultWorkspace: {
       id: "ws-default",
@@ -276,6 +281,16 @@ export function build(opts: BuildOpts) {
     turnIdleTimeoutMs: opts.turnIdleTimeoutMs,
     turnMaxMs: opts.turnMaxMs,
     trace: opts.trace,
+    // THE ASK LOG'S PRODUCER (BRO-2413). Derived from askLog rather than taken as
+    // a separate option, so a deploy cannot configure a producer without a store
+    // or a store without a producer — the two-optional-fields shape that shipped
+    // /voice with a sink nothing drained, and shipped these routes with no
+    // producer at all.
+    // Bound to a local so the call site reads `askStore.append(...)` rather than
+    // an optional chain: TS will not carry the narrowing into the closure, and an
+    // `opts.askLog?.append` there would be a silent no-op if the field were ever
+    // cleared between build and dispatch.
+    ...(askStore ? { onAsk: (ask) => askStore.append(ask) } : {}),
     store: opts.store,
     run: opts.run,
     control: opts.control,

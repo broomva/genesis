@@ -39,11 +39,13 @@ cd "$(dirname "$0")/.." || exit 2
 # to the test written to kill it and SURVIVED for a reason unrelated to coverage.
 # A sweep's suite has to include every file that tests its subjects — this one
 # mutates server.ts, so every server.ts test belongs here.
-SUITE=(apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
+SUITE=(apps/api/src/ask-producer.test.ts packages/projection/src/asks-raised.test.ts
+       apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts)
-SUBJECTS=(apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts)
-EXPECTED_MUTANTS=52
+SUBJECTS=(packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
+          packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
+EXPECTED_MUTANTS=59
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -246,10 +248,14 @@ mutate "pre-parse body guard removed" "$S" \
 # 0 survivors", because that number was measured BEFORE the formatter ran. The
 # anchor guard is the only reason this is a caught error rather than a silent
 # false pass. A formatter is a code change.
-mutate "the producer-gap caveat removed from the boot line" "$I" \
-  '${join(askLogDir, "asks.jsonl")} (routes live; no producer yet — asks are not written by anything)`,' \
+# RE-AIMED, not deleted. It used to pin the "no producer yet" caveat; the producer
+# exists now, so it pins the claim that replaced it. A mutant whose subject stops
+# existing is a mutant that tests nothing, and deleting it would quietly drop the
+# boot line out of the measured set.
+mutate "the boot line stops naming the producer" "$I" \
+  '${join(askLogDir, "asks.jsonl")} (producer live — an AskUserQuestion in any session appends here)`,' \
   '${join(askLogDir, "asks.jsonl")}`,' \
-  "no producer"
+  "producer is live"
 
 echo "malformed-record accounting — silence must not mean 'nothing pending'"
 mutate "the skipped-record message is never emitted" "$A" \
@@ -435,6 +441,44 @@ mutate "POST matches on the id alone, joining another thread's ask" "$S" \
   '      const existing = known.entries.find((a) => a.id === body.id && a.threadId === body.threadId);' \
   '      const existing = known.entries.find((a) => a.id === body.id);' \
   "WRONG thread is 404"
+
+echo "the producer — the reason any of this writes anything (BRO-2413)"
+P=packages/projection/src/reducer.ts
+C=packages/core/src/supervisor.ts
+mutate "the producer fires on the STATE, not the edge, and re-appends forever" "$C" \
+  '            if (this.onAsk && !wasAwaiting && state.phase === "awaiting") {' \
+  '            if (this.onAsk && state.phase === "awaiting") {' \
+  "do not re-append"
+mutate "a tool_use with no id yields an unanswerable ask" "$P" \
+  '    if (typeof id !== "string" || !id) continue;' '' \
+  "NO id raises nothing"
+mutate "several questions in one call collapse onto one id" "$P" \
+  '        toolUseId: qs.length > 1 ? `${id}#${i}` : id,' \
+  '        toolUseId: id,' \
+  "DISTINCT ids"
+mutate "the single-question case grows a suffix the answer must reproduce" "$P" \
+  '        toolUseId: qs.length > 1 ? `${id}#${i}` : id,' \
+  '        toolUseId: `${id}#${i}`,' \
+  "keeps the bare tool_use id"
+mutate "only the camelCase tool name is recognised" "$P" \
+  'const AWAIT_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);' \
+  'const AWAIT_TOOLS = new Set(["AskUserQuestion"]);' \
+  "snake_case tool name"
+mutate "the parser drops the tool_use id again" "packages/projection/src/parser.ts" \
+  '      id: typeof b.id === "string" ? b.id : undefined,' \
+  '      id: undefined,' \
+  "extracts the tool_use id"
+# MUTATE THE HANDLER, NOT THE `try`. Removing `try {` leaves a dangling `catch`,
+# so the file no longer parses and EVERY test goes red — the harness scores that
+# as killed, but it is a crash and not a behaviour change. Re-throwing inside the
+# catch reproduces the actual defect (a side-channel failure taking the turn down)
+# while leaving the program valid.
+mutate "a throwing producer takes the turn down with it" "$C" \
+  '                  console.error(
+                    `[genesis] ask producer failed (session=${session.id}): ${e instanceof Error ? e.message : String(e)}`,
+                  );' \
+  '                  throw e;' \
+  "does not fail the turn"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

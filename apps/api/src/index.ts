@@ -327,10 +327,12 @@ const askLogDir = process.env.GENESIS_ASK_LOG_DIR ?? join(defaultDataDir(), "wal
 // directory nothing will ever write to.
 const askLog = walkieSecret ? createAskLog(askLogDir) : undefined;
 if (walkieSecret) {
-  // Says "no producer" out loud: the routes answer, but nothing writes an ask
-  // yet, so an operator seeing this line must not read it as a live channel.
+  // Says the producer is LIVE out loud, and that is now a claim the boot line can
+  // make: server.ts derives Supervisor.onAsk from this same askLog, so a deploy
+  // that prints this line has a producer by construction. The line it replaces
+  // said the opposite for exactly as long as that was true.
   console.log(
-    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} (routes live; no producer yet — asks are not written by anything)`,
+    `[genesis] walkie: ask log at ${join(askLogDir, "asks.jsonl")} (producer live — an AskUserQuestion in any session appends here)`,
   );
 }
 if (voiceSecret) {

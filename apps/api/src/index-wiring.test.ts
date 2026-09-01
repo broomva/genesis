@@ -154,17 +154,32 @@ describe("index.ts wires walkie into build() (BRO-2387)", () => {
 });
 
 describe("the ask producer gap is declared, not silent (BRO-2387)", () => {
-  test("the boot line says there is no producer", () => {
+  test("the boot line says the producer is live, and the caveat is gone", () => {
     // A surface that answers 200 while being permanently empty reads as working.
     // If someone lands the producer, this test fails and they remove the caveat
     // deliberately rather than leaving a stale disclaimer behind.
     const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
-    expect(src).toContain("no producer yet");
+    // The caveat is GONE, deliberately, in the change that made it false
+    // (BRO-2413). Asserting its ABSENCE as well as the new line's presence: a
+    // stale caveat that outlives its condition is the defect this arc filed
+    // three times, and "the string I expected is present" does not catch a
+    // second, contradictory line left behind next to it.
+    expect(src).not.toContain("no producer yet");
+    expect(src).toContain("producer live");
   });
 
-  test("nothing outside tests calls askLog.append", () => {
-    // The claim the caveat rests on, checked rather than asserted. When a
-    // producer lands, this goes red and the caveat comes out with it.
+  test("PRODUCTION code calls askLog.append — the gap is closed", () => {
+    // INVERTED, deliberately, by the change that closed the gap (BRO-2413).
+    //
+    // It was written the other way round — "nothing outside tests calls
+    // askLog.append" — precisely so that landing a producer would turn it red and
+    // force the caveat out with it. That is exactly what happened: this test was
+    // the only failure in the suite when the producer landed. A declaration of a
+    // temporary state is only honest if something breaks when the state ends.
+    //
+    // It now asserts the opposite, and still by GREPPING production sources
+    // rather than by trusting a call in a test — 25 test call sites coexisted
+    // with zero production ones for the whole of BRO-2387.
     const dir = join(import.meta.dir, "..", "..", "..");
     const out = Bun.spawnSync(
       [
@@ -172,7 +187,7 @@ describe("the ask producer gap is declared, not silent (BRO-2387)", () => {
         "-rn",
         "--include=*.ts",
         "-e",
-        "askLog.append",
+        "onAsk",
         "-e",
         "createAskLog(",
         join(dir, "apps"),
@@ -183,7 +198,14 @@ describe("the ask producer gap is declared, not silent (BRO-2387)", () => {
     const callers = out
       .split("\n")
       .filter((l) => l.trim() && !l.includes(".test.ts") && !l.includes("/node_modules/"));
-    // index.ts constructs the store; server.ts holds it. Neither appends.
-    expect(callers.filter((l) => l.includes("askLog.append"))).toEqual([]);
+    // server.ts derives Supervisor.onAsk from the store, so the append lives
+    // there. At least one non-test caller is the whole point.
+    // Grepping `onAsk` — the producer's wiring — rather than a particular spelling
+    // of the append. The first version searched for `askLog.append` and the code
+    // said `askLog?.append`, so the test failed for a reason unrelated to the
+    // property: a grep is only as good as the string, and the string was mine.
+    const wired = callers.filter((l) => l.includes("onAsk"));
+    expect(wired.length).toBeGreaterThan(0);
+    expect(wired.join("\n")).toContain("server.ts");
   });
 });

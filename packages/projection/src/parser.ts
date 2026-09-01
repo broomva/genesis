@@ -122,10 +122,27 @@ export function textBlocks(msg: AgentMessage): string[] {
 }
 
 /** All tool_use blocks in a message. */
-export function toolUses(msg: AgentMessage): Array<{ name: string; input: unknown }> {
-  return blocks(msg)
-    .filter((b) => b.type === "tool_use" && typeof b.name === "string")
-    .map((b) => ({ name: b.name as string, input: b.input }));
+export function toolUses(
+  msg: AgentMessage,
+): Array<{ id: string | undefined; name: string; input: unknown }> {
+  return (
+    blocks(msg)
+      .filter((b) => b.type === "tool_use" && typeof b.name === "string")
+      // `id` CARRIED, additively (BRO-2413). It was dropped here, and the ask
+      // producer needs it as the ask's identity — the SDK's own id for the tool
+      // call, so a re-parsed event yields the same ask rather than a duplicate.
+      // Left `string | undefined` rather than asserted: this parses agent output,
+      // so the field's presence is an input and not an invariant, and a consumer
+      // that needs it must say what it does without one. The first version of the
+      // producer read `id` off the OLD return type through a cast, got undefined
+      // for every ask, and silently emitted nothing — tsc was satisfied because the
+      // cast invented the field.
+      .map((b) => ({
+        id: typeof b.id === "string" ? b.id : undefined,
+        name: b.name as string,
+        input: b.input,
+      }))
+  );
 }
 
 /** The ordered content blocks of a COMPLETE assistant/user message, with a plain

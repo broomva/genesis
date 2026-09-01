@@ -16,7 +16,7 @@ import {
   LocalHost,
   StaticHostProvider,
 } from "@genesis/host";
-import type { AgentEvent, RunState } from "@genesis/projection";
+import { type AgentEvent, type RunState, asksRaisedBy } from "@genesis/projection";
 // BRO-2235: `tenantEnv` moved to @genesis/runner, beside `scrubAgentEnv` — the
 // spawn it shapes lives there, and `core` cannot be imported from `runner` (the
 // dependency runs core -> runner). Re-exported so the name keeps working.
@@ -137,6 +137,25 @@ export interface SupervisorConfig {
    *  engines coexist (BRO-1620) — interactive turns get both this AgentEvent trace
    *  (a distinct *.events.jsonl file) and the engine's richer IR observer. */
   trace?: (sessionId: string, event: AgentEvent) => void;
+  /** Called once per ask when a turn transitions INTO `awaiting` (BRO-2413).
+   *
+   *  This is the ask log's producer. Until it existed `askLog.append` had zero
+   *  non-test callers, so `asks.jsonl` stayed empty in every real deploy and
+   *  GET /walkie/asks answered `{"asks":[]}` forever.
+   *
+   *  Structurally typed rather than importing `Ask` from apps/api: core cannot
+   *  depend on an app, and the shape is the contract. Optional and side-channel,
+   *  exactly like `trace` — a throwing producer must not fail the turn. */
+  onAsk?: (ask: {
+    id: string;
+    sessionId: string;
+    threadId: string;
+    question: string;
+    header?: string;
+    options?: readonly { readonly label: string; readonly description?: string }[];
+    multiSelect?: boolean;
+    createdAt: string;
+  }) => void;
   /** Extra agent CLI flags applied to every run (e.g. permission mode). */
   extraArgs?: string[];
   /** Working dir inside a microVM host (forwarded to the runner; ignored on
@@ -398,6 +417,7 @@ export class Supervisor {
   private readonly controls: Record<string, EngineControl>;
   private readonly defaultEngine: string;
   private readonly trace?: (sessionId: string, event: AgentEvent) => void;
+  private readonly onAsk?: SupervisorConfig["onAsk"];
   private readonly hostProvider: HostProvider;
   private readonly extraArgs?: string[];
   private readonly remoteCwd?: string;
@@ -445,6 +465,7 @@ export class Supervisor {
     if (!this.runners[this.defaultEngine]) this.defaultEngine = "print";
     this.generateTitles = cfg.generateTitles ?? false;
     this.trace = cfg.trace;
+    this.onAsk = cfg.onAsk;
     this.hostProvider =
       cfg.hostProvider ?? new StaticHostProvider(cfg.host ?? new LocalHost(), cfg.remoteCwd);
     this.extraArgs = cfg.extraArgs;
@@ -908,7 +929,45 @@ export class Supervisor {
           // resolved cwd and appends their paths to the prompt.
           attachments: turnOpts?.attachments,
           onState: (state, event) => {
+            // THE EDGE, not the state. `onState` fires per event, so emitting
+            // whenever the phase IS "awaiting" would re-append the same ask on
+            // every subsequent event of a blocked turn. Captured before the
+            // assignment below, which is the only place the previous phase still
+            // exists.
+            const wasAwaiting = session.phase === "awaiting";
             session.phase = state.phase;
+            // The ask log's producer (BRO-2413). Hooked HERE and nowhere else:
+            // all three runners (index.ts, interactive.ts, codex.ts) call
+            // `onState` immediately after `reduce`, so this one site sees every
+            // engine. Hooking the three reduce call sites instead would be a rule
+            // spelled per-site, which is the shape that cost the ask log four
+            // review rounds.
+            if (this.onAsk && !wasAwaiting && state.phase === "awaiting") {
+              const createdAt = new Date().toISOString();
+              for (const raised of asksRaisedBy(event)) {
+                // Guarded like `trace` above, and for the same reason: a
+                // side-channel that throws must not fail the turn the operator
+                // is waiting on. A lost ask is bad; a lost turn is worse.
+                try {
+                  this.onAsk({
+                    id: raised.toolUseId,
+                    sessionId: session.id,
+                    threadId: session.threadId,
+                    question: raised.question,
+                    ...(raised.header !== undefined ? { header: raised.header } : {}),
+                    ...(raised.options !== undefined ? { options: raised.options } : {}),
+                    ...(raised.multiSelect !== undefined
+                      ? { multiSelect: raised.multiSelect }
+                      : {}),
+                    createdAt,
+                  });
+                } catch (e) {
+                  console.error(
+                    `[genesis] ask producer failed (session=${session.id}): ${e instanceof Error ? e.message : String(e)}`,
+                  );
+                }
+              }
+            }
             // Tracing is side-channel — a throwing trace hook must NOT fail the
             // turn (CodeRabbit #18). Guard at the call site, not just in the impl.
             if (this.trace) {

@@ -216,6 +216,73 @@ export const initialState: RunState = { phase: "running", turns: 0, parts: [] };
 /** Tool names that pause the run for human input (Phase 3 HITL seam). */
 const AWAIT_TOOLS = new Set(["AskUserQuestion", "ask_user_question"]);
 
+/** One AskUserQuestion the agent raised, in the shape a durable ask log needs.
+ *
+ *  PURE, AND HERE RATHER THAN IN THE SUPERVISOR, because it is parsing — the same
+ *  parsing `extractQuestion` below already does, over the same tool_use blocks,
+ *  against the same AWAIT_TOOLS set. Splitting it across packages is how the two
+ *  drift into disagreeing about what an ask is.
+ *
+ *  `toolUseId` IS the ask's identity. It is the SDK's own id for the tool call, so
+ *  a replayed or re-parsed event yields the same ask rather than a duplicate —
+ *  which matters because the store is append-only and a duplicate id under a
+ *  second thread would be a different ask entirely. A genuinely retried tool call
+ *  gets a NEW id from the SDK, and that is correct: the agent asked again. */
+export interface RaisedAsk {
+  readonly toolUseId: string;
+  readonly question: string;
+  readonly header?: string;
+  readonly options?: readonly { readonly label: string; readonly description?: string }[];
+  readonly multiSelect?: boolean;
+}
+
+/** The asks an assistant message raised, or [] for any other event.
+ *
+ *  Returns a LIST because AskUserQuestion carries `questions[]` — an agent may ask
+ *  several things in one tool call, and collapsing them (as `extractQuestion` does
+ *  for the projection's single-line summary, joining with " | ") would give the
+ *  operator one undifferentiated blob to answer. */
+export function asksRaisedBy(event: AgentEvent): RaisedAsk[] {
+  if (event.type !== "assistant") return [];
+  const out: RaisedAsk[] = [];
+  for (const t of toolUses(event.message)) {
+    if (!AWAIT_TOOLS.has(t.name)) continue;
+    const id = t.id;
+    // No id, no ask. An ask the answer cannot refer to is worse than no ask: it
+    // would sit in the operator's list permanently unanswerable.
+    if (typeof id !== "string" || !id) continue;
+    const qs = (t.input as { questions?: unknown })?.questions;
+    if (!Array.isArray(qs)) continue;
+    qs.forEach((q, i) => {
+      if (!q || typeof q !== "object") return;
+      const r = q as Record<string, unknown>;
+      if (typeof r.question !== "string" || !r.question) return;
+      // Suffixed per question so several in one tool call stay distinct — and
+      // deterministically, so a re-parse of the same event yields the same ids.
+      const opts = Array.isArray(r.options)
+        ? r.options.flatMap((o) => {
+            if (!o || typeof o !== "object") return [];
+            const oo = o as Record<string, unknown>;
+            if (typeof oo.label !== "string" || !oo.label) return [];
+            return [
+              typeof oo.description === "string"
+                ? { label: oo.label, description: oo.description }
+                : { label: oo.label },
+            ];
+          })
+        : [];
+      out.push({
+        toolUseId: qs.length > 1 ? `${id}#${i}` : id,
+        question: r.question,
+        ...(typeof r.header === "string" ? { header: r.header } : {}),
+        ...(opts.length > 0 ? { options: opts } : {}),
+        ...(typeof r.multiSelect === "boolean" ? { multiSelect: r.multiSelect } : {}),
+      });
+    });
+  }
+  return out;
+}
+
 function isTerminal(phase: RunPhase): boolean {
   return phase === "done" || phase === "blocked";
 }
