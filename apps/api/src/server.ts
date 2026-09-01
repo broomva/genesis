@@ -18,6 +18,7 @@ import { eventStream } from "./channel/bridge";
 import { ChatSdkConnector } from "./channel/chat-sdk";
 import type { IncomingMessage } from "./channel/types";
 import { Hub } from "./hub";
+import { ttlMemo } from "./ttl-memo";
 import { PAGE } from "./ui";
 import {
   type DeliverablePrincipal,
@@ -848,7 +849,7 @@ export function build(opts: BuildOpts) {
     app.get("/walkie/threads", async (c) => {
       noStore(c);
       if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
-      return c.json(await threadsBody());
+      return c.json(await threadsBody(c));
     });
 
     app.get("/walkie/workspaces", async (c) => {
@@ -1151,7 +1152,37 @@ export function build(opts: BuildOpts) {
   // (BRO-2417) cannot drift. Two copies of a response shape are two truths, and
   // the one nobody looks at is the one that rots — so there is one body per verb
   // and two gates over it.
-  const threadsBody = async () => ({ threads: await supervisor.listThreads() });
+  // BOUNDED, from ONE body, because both `/threads` and its `/walkie/threads`
+  // mirror serve it and paging one but not the other reintroduces exactly the
+  // drift the shared bodies exist to prevent (BRO-2417).
+  //
+  // The cost this bounds is not the response — it is the work. Each summary
+  // needs the session's last turn, so an unpaged read is one turns query per
+  // session, on a surface the walkie client polls every 4s. `listThreads` slices
+  // before those reads, so a limit is O(page) rather than O(box).
+  //
+  // DEFAULT 200, NOT 50 like `/walkie/asks`, and the difference is deliberate:
+  // asks is a poller that wants the oldest-waiting few, while `/threads` is the
+  // navigation surface apps/web renders. Defaulting it to 50 would silently hide
+  // threads from the owner's own UI with no signal that anything was withheld —
+  // trading a size bound for a correctness bug. 200 is the hard cap either way,
+  // and `hasMore` is how a client learns to page rather than inferring it from a
+  // full page (which stays true on the last page).
+  const threadsBody = async (c: Context) => {
+    const rawLimit = Number(c.req.query("limit"));
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 200;
+    // OFFSET, for the reason the asks route records: a cap without one makes the
+    // tail UNREACHABLE rather than paged, and the session list only grows.
+    const rawOffset = Number(c.req.query("offset"));
+    const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+    const [threads, total] = await Promise.all([
+      supervisor.listThreads({ limit, offset }),
+      supervisor.countThreads(),
+    ]);
+    // "IS THERE MORE AFTER THIS PAGE" — computed from where this page ENDS, not
+    // from whether it is full, so it is false on the final page.
+    return { threads, total, hasMore: offset + threads.length < total };
+  };
   const workspacesBody = async () => ({
     workspaces: await supervisor.listWorkspaces(),
     defaultWorkspace: supervisor.defaultWorkspaceId,
@@ -1182,11 +1213,32 @@ export function build(opts: BuildOpts) {
       return fsErrorResponse(c, e, "compute diff");
     }
   };
+  // CACHED, and the cache stores the PROMISE rather than the result.
+  //
+  // `workspaceChecks` spawns three subprocesses — `git branch`, `gh repo view`,
+  // `gh run list` — and two of those are network calls that spend the owner's
+  // GitHub API quota. This route is on a polled surface, and a client looping
+  // over the ids from `/walkie/workspaces` multiplies it by the workspace count.
+  //
+  // Caching the promise gives in-flight de-duplication for free: N concurrent
+  // requests for the same workspace await ONE execution instead of spawning N
+  // sets of subprocesses. That is the half that bounds the worst case; the TTL
+  // only bounds the steady state.
+  //
+  // Keyed by workspace, not by (workspace, branch), because the branch is read
+  // BY the call being cached — keying on it would require the git spawn this
+  // exists to avoid. The cost is stated rather than hidden: for up to
+  // CHECKS_TTL_MS after a branch switch, this serves the previous branch's runs.
+  // The response carries `branch`, so a client can see which branch it is
+  // looking at rather than having to assume.
+  const CHECKS_TTL_MS = 10_000;
+  const cachedChecks = ttlMemo(workspaceChecks, CHECKS_TTL_MS);
+
   const checksBody = async (c: Context, id: string) => {
     const root = await supervisor.resolveWorkspaceRoot(id);
     if (!root) return c.json({ error: "unknown workspace" }, 404);
     try {
-      return c.json(await workspaceChecks(root));
+      return c.json(await cachedChecks(root));
     } catch (e) {
       return fsErrorResponse(c, e, "read checks");
     }
@@ -1194,7 +1246,7 @@ export function build(opts: BuildOpts) {
 
   app.get("/threads", async (c) => {
     if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);
-    return c.json(await threadsBody());
+    return c.json(await threadsBody(c));
   });
 
   // Selectable workspaces (BRO-1627) for the per-thread workspace picker. Same

@@ -43,10 +43,11 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        apps/api/src/ask-log.test.ts apps/api/src/ask-log-fsync.test.ts
        apps/api/src/walkie-routes.test.ts apps/api/src/index-wiring.test.ts
        apps/api/src/server.test.ts
-       apps/api/src/deployment-claims.test.ts)
-SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
+       apps/api/src/deployment-claims.test.ts
+       apps/api/src/ttl-memo.test.ts)
+SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=85
+EXPECTED_MUTANTS=89
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -558,7 +559,7 @@ mutate "the source stops stating the /voice model" "$S" \
 
 echo "read mirrors — the client's own gate, and only reads (BRO-2417)"
 mutate "a mirror re-implements its body instead of sharing the twin's" "$S" \
-  '      return c.json(await threadsBody());
+  '      return c.json(await threadsBody(c));
     });
 
     app.get("/walkie/workspaces"' \
@@ -638,6 +639,35 @@ mutate "walkie unwired from build()" "$I" \
   askLogDir,' '' "build() receives"
 
 echo
+# --- BRO-2418: the polled surface is bounded ------------------------------
+#
+# Four guards, each with a mutant, because a bound nobody can see fail is a
+# comment. The first is the one that matters: paging the RESULT instead of the
+# source produces an identical response while still reading every turn of every
+# session, so only a test that counts the reads can tell them apart.
+
+M=apps/api/src/ttl-memo.ts
+
+mutate "listThreads pages the RESULT, so the work stays O(box)" "$C" \
+  "      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);" \
+  "      ordered.slice(offset);" \
+  "bounds the WORK"
+
+mutate "the 200 cap on /threads stops truncating" "$S" \
+  "Math.min(rawLimit, 200) : 200;" \
+  "rawLimit : 200;" \
+  "cap TRUNCATES"
+
+mutate "hasMore inferred from a full page (true on the last one)" "$S" \
+  "    return { threads, total, hasMore: offset + threads.length < total };" \
+  "    return { threads, total, hasMore: threads.length === limit };" \
+  "final page that happens to be exactly full"
+
+mutate "the checks cache stores AFTER resolving, losing in-flight de-duplication" "$M" \
+  "    entries.set(key, { at: now(), value });" \
+  "    value.then(() => entries.set(key, { at: now(), value }));" \
+  "CONCURRENT calls share ONE execution"
+
 if [ "$total" -ne "$EXPECTED_MUTANTS" ]; then
   echo "$total mutants ran, expected $EXPECTED_MUTANTS — a mutant was added or removed"
   exit 1

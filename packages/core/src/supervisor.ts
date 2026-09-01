@@ -1192,11 +1192,34 @@ export class Supervisor {
   /** Every thread, newest-first, for the PWA thread drawer (BRO-1567). Reads the
    *  last turn per session for a preview — N+1 over sessions, fine at single-user
    *  scale (one owner, a handful of threads); revisit with a JOIN if it grows. */
-  async listThreads(): Promise<ThreadSummary[]> {
+  /** Thread summaries, newest first.
+   *
+   *  PAGED AT THE SOURCE, not at the route. Each summary needs the session's
+   *  last turn, and the store has no "last turn" read — so this does one
+   *  `turnsForSession` per session and uses `turns.at(-1)` of each. Slicing the
+   *  RESULT would have bounded the response while leaving the work O(all
+   *  sessions): a client asking for ten rows would still have paid for every
+   *  turn of every session on the box. Sorting the sessions first and slicing
+   *  BEFORE the reads makes the cost O(page).
+   *
+   *  Sorting on `session.createdAt` rather than on the built summary is
+   *  equivalent — `ThreadSummary.createdAt` is copied from it — and is what
+   *  makes the early slice possible.
+   *
+   *  No `limit` means every session, which is what every existing caller and
+   *  test expects; the bound lives at the route, like `/walkie/asks`. */
+  async listThreads(opts: { limit?: number; offset?: number } = {}): Promise<ThreadSummary[]> {
     await this.ensureWorkspace(); // hydrate the cache so workspaceName resolves (BRO-1629)
     const sessions = await this.store.listSessions();
+    // Newest-first by createdAt (ISO strings sort lexicographically).
+    const ordered = [...sessions].sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
+    const offset = opts.offset ?? 0;
+    const page =
+      opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);
     const summaries = await Promise.all(
-      sessions.map(async (s): Promise<ThreadSummary> => {
+      page.map(async (s): Promise<ThreadSummary> => {
         const turns = await this.store.turnsForSession(s.id);
         return {
           threadId: s.threadId,
@@ -1213,10 +1236,16 @@ export class Supervisor {
         };
       }),
     );
-    // Newest-first by createdAt (ISO strings sort lexicographically).
-    return summaries.sort((a, b) =>
-      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
-    );
+    // Already ordered: the sort moved above the slice so the page is the right
+    // rows, not an arbitrary window sorted after the fact.
+    return summaries;
+  }
+
+  /** How many threads exist, for the route's `hasMore`. A count, not a page —
+   *  it reads the session list and never touches turns, so it does not
+   *  reintroduce the cost the paging above removes. */
+  async countThreads(): Promise<number> {
+    return (await this.store.listSessions()).length;
   }
 
   /** The engine ids registered on this Supervisor (always includes `print`; plus
