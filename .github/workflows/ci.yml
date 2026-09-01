@@ -43,6 +43,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The checkout token is persisted into .git/config by default and
+          # stays there for every later step. No job in this workflow does an
+          # authenticated git operation — verified: no push/fetch/pull/clone,
+          # no GITHUB_TOKEN, no secrets — and the sweep only runs LOCAL git
+          # (status, checkout to revert a mutant). So the credential is pure
+          # surface: anything that reads the workspace, including a mutated
+          # script, can read it.
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
@@ -77,6 +86,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The checkout token is persisted into .git/config by default and
+          # stays there for every later step. No job in this workflow does an
+          # authenticated git operation — verified: no push/fetch/pull/clone,
+          # no GITHUB_TOKEN, no secrets — and the sweep only runs LOCAL git
+          # (status, checkout to revert a mutant). So the credential is pure
+          # surface: anything that reads the workspace, including a mutated
+          # script, can read it.
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
@@ -91,6 +109,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The checkout token is persisted into .git/config by default and
+          # stays there for every later step. No job in this workflow does an
+          # authenticated git operation — verified: no push/fetch/pull/clone,
+          # no GITHUB_TOKEN, no secrets — and the sweep only runs LOCAL git
+          # (status, checkout to revert a mutant). So the credential is pure
+          # surface: anything that reads the workspace, including a mutated
+          # script, can read it.
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
@@ -105,13 +132,82 @@ jobs:
       # apps/api/src/test-coverage.test.ts asserts it stays one.
       - run: bun test
 
+  # The mutation sweeps: would the gates above notice if the code broke?
+  #
+  # These existed, were committed, and CI never ran them — so every "0 survivors"
+  # in this repo's history was a claim from somebody's terminal, reproducible only
+  # by someone who thought to try. A gate nobody runs is a ritual, and the sweeps
+  # are the only thing that distinguishes a suite that passes from a suite that
+  # would notice a defect (BRO-2419).
+  #
+  # Both, not just the big one. The duration sweep is 8 mutants and about four
+  # seconds; leaving it out to save that would be choosing which of two committed
+  # gates counts.
+  #
+  # timeout 10: the duration sweep is 8 mutants and ran in 0.9s on the runner.
+  # Ten minutes is not a prediction, it is room for the walkie sweep to be added
+  # back (5m33s locally, and a hosted runner is slower) without this line needing
+  # to be revisited in the same breath. The scripts assert their own arity, so a
+  # mutant added without updating EXPECTED_MUTANTS fails loudly here rather than
+  # shrinking the sweep in silence.
+  discriminates:
+    name: discriminates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The checkout token is persisted into .git/config by default and
+          # stays there for every later step. No job in this workflow does an
+          # authenticated git operation — verified: no push/fetch/pull/clone,
+          # no GITHUB_TOKEN, no secrets — and the sweep only runs LOCAL git
+          # (status, checkout to revert a mutant). So the credential is pure
+          # surface: anything that reads the workspace, including a mutated
+          # script, can read it.
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - name: bun.lock must be committed
+        run: test -f bun.lock
+      - run: bun install --frozen-lockfile
+      # Each script refuses to run on a dirty tree — it reverts files between
+      # mutants — and re-checks the tree is restored at the end. On a fresh
+      # checkout that guard is trivially satisfied; it is here for the case where
+      # a future step edits the tree before this one.
+      - run: ./scripts/mutation-sweep-duration.sh
+
+      # `mutation-sweep-walkie.sh` is DELIBERATELY NOT RUN HERE YET, and that is
+      # the finding this PR produced rather than a gap in it.
+      #
+      # Wiring it in and watching a runner gave: **85 mutants, 5 SURVIVED** — on a
+      # tree where the same script reports 0 survivors locally. All five are
+      # "red, but not via <want>": the mutation does redden the suite, but the
+      # test the mutant names as its detector does not fire, while unrelated
+      # tests do (the ask-producer group, the default-workspace-name group). The
+      # five are the durability mutants (buffered append, truncating open, fsync)
+      # and the route-registration ones — the checks whose subject is filesystem
+      # or boot behaviour, which is exactly the class a different machine changes.
+      #
+      # So the local "0 survivors" does not reproduce on a clean runner. That is
+      # worth more than a green job: it means the sweep's evidence is
+      # machine-dependent, and the honest response is to say so rather than to
+      # mark it `continue-on-error` (an advisory gate teaches people to scroll
+      # past red) or to relax the `want` strings until it passes (which would
+      # delete the sweep's only claim — that a NAMED check catches a NAMED
+      # defect).
+      #
+      # Shipping the duration sweep now is not a consolation prize: it is the
+      # half that was proven to run here, and it makes the wiring itself real, so
+      # the walkie sweep is one line away once its five mutants are stable.
+
   # Everything above asks "does the code pass the gates". This asks the question
   # the gates exist to make answerable: would they notice if it didn't.
   gates:
     name: gates
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [lint, typecheck, test]
+    needs: [lint, typecheck, test, discriminates]
     # Without this the job is SKIPPED when a dependency fails — and GitHub counts a
     # skipped required check as PASSING, so the aggregate would go green precisely
     # when a gate had failed. This line is what makes the gate a gate.
@@ -122,6 +218,15 @@ jobs:
       # `echo "all gates succeeded"` during review and neither its suite nor its
       # mutation sweep noticed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The checkout token is persisted into .git/config by default and
+          # stays there for every later step. No job in this workflow does an
+          # authenticated git operation — verified: no push/fetch/pull/clone,
+          # no GITHUB_TOKEN, no secrets — and the sweep only runs LOCAL git
+          # (status, checkout to revert a mutant). So the credential is pure
+          # surface: anything that reads the workspace, including a mutated
+          # script, can read it.
+          persist-credentials: false
       - name: every gate succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
