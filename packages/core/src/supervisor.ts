@@ -1192,11 +1192,52 @@ export class Supervisor {
   /** Every thread, newest-first, for the PWA thread drawer (BRO-1567). Reads the
    *  last turn per session for a preview — N+1 over sessions, fine at single-user
    *  scale (one owner, a handful of threads); revisit with a JOIN if it grows. */
-  async listThreads(): Promise<ThreadSummary[]> {
+  /** Thread summaries, newest first.
+   *
+   *  PAGED AT THE SOURCE, not at the route. Each summary needs the session's
+   *  last turn, and the store has no "last turn" read — so this does one
+   *  `turnsForSession` per session and uses `turns.at(-1)` of each. Slicing the
+   *  RESULT would have bounded the response while leaving the work O(all
+   *  sessions): a client asking for ten rows would still have paid for every
+   *  turn of every session on the box. Sorting the sessions first and slicing
+   *  BEFORE the reads makes the cost O(page).
+   *
+   *  Sorting on `session.createdAt` rather than on the built summary is
+   *  equivalent — `ThreadSummary.createdAt` is copied from it — and is what
+   *  makes the early slice possible.
+   *
+   *  No `limit` means every session, which is what every existing caller and
+   *  test expects; the bound lives at the route, like `/walkie/asks`. */
+  async listThreads(opts: { limit?: number; offset?: number } = {}): Promise<ThreadSummary[]> {
     await this.ensureWorkspace(); // hydrate the cache so workspaceName resolves (BRO-1629)
-    const sessions = await this.store.listSessions();
-    const summaries = await Promise.all(
-      sessions.map(async (s): Promise<ThreadSummary> => {
+    return this.summarize(this.orderAndSlice(await this.store.listSessions(), opts));
+  }
+
+  /** Newest-first, then the requested window. Shared by `listThreads` and
+   *  `listThreadsPage` so the two cannot order or slice differently. */
+  private orderAndSlice(
+    sessions: Awaited<ReturnType<Store["listSessions"]>>,
+    opts: { limit?: number; offset?: number },
+  ) {
+    // Newest-first by createdAt (ISO strings sort lexicographically). `sort` is
+    // stable, so equal timestamps keep the store's order and page boundaries
+    // stay disjoint.
+    const ordered = [...sessions].sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
+    const offset = opts.offset ?? 0;
+    return opts.limit === undefined
+      ? ordered.slice(offset)
+      : ordered.slice(offset, offset + opts.limit);
+  }
+
+  /** The per-session turn read. This is the O(page) part — one query per row
+   *  returned, which is why the slice above has to happen first. */
+  private async summarize(
+    page: Awaited<ReturnType<Store["listSessions"]>>,
+  ): Promise<ThreadSummary[]> {
+    return Promise.all(
+      page.map(async (s): Promise<ThreadSummary> => {
         const turns = await this.store.turnsForSession(s.id);
         return {
           threadId: s.threadId,
@@ -1213,10 +1254,28 @@ export class Supervisor {
         };
       }),
     );
-    // Newest-first by createdAt (ISO strings sort lexicographically).
-    return summaries.sort((a, b) =>
-      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
-    );
+  }
+
+  /** A page AND the total, from ONE session scan.
+   *
+   *  The first version paired `listThreads` with a separate `countThreads`, and
+   *  each called `listSessions()` — which on the pg store is a full
+   *  `SELECT * FROM sessions`, hydrating every row. That made a request cost TWO
+   *  full scans where it previously cost one: a paging change that removed the
+   *  per-session turn reads and quietly doubled the thing underneath them. The
+   *  turns cost is what the comment there talked about, and it was silent about
+   *  this.
+   *
+   *  Callers wanting only the page keep using `listThreads`. */
+  async listThreadsPage(
+    opts: { limit?: number; offset?: number } = {},
+  ): Promise<{ threads: ThreadSummary[]; total: number }> {
+    await this.ensureWorkspace();
+    const sessions = await this.store.listSessions();
+    return {
+      threads: await this.summarize(this.orderAndSlice(sessions, opts)),
+      total: sessions.length,
+    };
   }
 
   /** The engine ids registered on this Supervisor (always includes `print`; plus

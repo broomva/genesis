@@ -1307,6 +1307,236 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
   };
   const owner = (app: App, path: string) => get(app, path, { authorization: `Bearer ${TOKEN}` });
 
+  /** A store holding `n` sessions, counting the per-session turn reads so a test
+   *  can assert the WORK is bounded and not merely the response. */
+  const seeded = (n: number) => {
+    const store = new InMemoryStore();
+    for (let i = 0; i < n; i++) {
+      store.upsertSession({
+        id: `sess-${i}`,
+        workspaceId: WS,
+        threadId: `thread-${i}`,
+        phase: "idle",
+        // STRICTLY descending, so `thread-0` really is newest and page order is
+        // checkable. The first version was `31 - (i % 28)`, which wraps every 28
+        // — thread-56 was the newest and thread-0 ranked 9th of 250 — so the
+        // comment was false and no test could assert ordering against it.
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      });
+    }
+    let turnReads = 0;
+    const original = store.turnsForSession.bind(store);
+    (store as unknown as { turnsForSession: (id: string) => unknown }).turnsForSession = (
+      id: string,
+    ) => {
+      turnReads++;
+      return original(id);
+    };
+    // Counted too: on the pg store `listSessions` is a full `SELECT *` that
+    // hydrates every row, so how many times a request does it is the cost the
+    // turn-read count does not show.
+    let sessionScans = 0;
+    const origList = store.listSessions.bind(store);
+    (store as unknown as { listSessions: () => unknown }).listSessions = () => {
+      sessionScans++;
+      return origList();
+    };
+    return { store, reads: () => turnReads, scans: () => sessionScans };
+  };
+
+  const pagedApp = (store: unknown) =>
+    build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: createAskLog(dir),
+      askLogDir: dir,
+      token: TOKEN,
+      store,
+    } as never).app as App;
+
+  test("the 200 cap TRUNCATES — not merely parses (BRO-2418)", async () => {
+    // The DoD's distinction: a route can accept `?limit=` and honour nothing. So
+    // this seeds MORE than the cap and asserts on the row count returned.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?limit=1000", H)).json()) as {
+      threads: unknown[];
+      total: number;
+      hasMore: boolean;
+    };
+    expect(r.threads.length).toBe(200);
+    expect(r.total).toBe(250);
+    expect(r.hasMore).toBe(true);
+  });
+
+  test("pages are ordered newest-first and do not overlap", async () => {
+    // The sort moved above the slice, so ordering and page disjointness are now
+    // properties of the SAME operation — and neither was asserted.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const page = async (q: string) =>
+      (
+        (await (await get(app, `/walkie/threads?${q}`, H)).json()) as {
+          threads: Array<{ threadId: string }>;
+        }
+      ).threads.map((t) => t.threadId);
+    expect(await page("limit=3")).toEqual(["thread-0", "thread-1", "thread-2"]);
+    expect(await page("limit=3&offset=3")).toEqual(["thread-3", "thread-4", "thread-5"]);
+  });
+
+  test("equal timestamps do not make pages overlap or drop rows", async () => {
+    // Ties decide whether a page boundary is stable. `Array#sort` is stable in
+    // both the old and new orders, but nothing asserted it — and the previous
+    // fixture had 250 distinct timestamps, so the case was unreachable.
+    const store = new InMemoryStore();
+    for (let i = 0; i < 10; i++) {
+      store.upsertSession({
+        id: `s-${i}`,
+        workspaceId: WS,
+        threadId: `tie-${i}`,
+        phase: "idle",
+        createdAt: "2026-08-31T12:00:00.000Z", // all identical
+      });
+    }
+    const app = pagedApp(store);
+    const ids = async (q: string) =>
+      (
+        (await (await get(app, `/walkie/threads?${q}`, H)).json()) as {
+          threads: Array<{ threadId: string }>;
+        }
+      ).threads.map((t) => t.threadId);
+    const first = await ids("limit=5");
+    const second = await ids("limit=5&offset=5");
+    expect(first.length).toBe(5);
+    expect(second.length).toBe(5);
+    expect(first.filter((x) => second.includes(x))).toEqual([]); // disjoint
+    expect(new Set([...first, ...second]).size).toBe(10); // and complete
+
+    // ORDER, because disjointness and completeness follow from slice arithmetic
+    // for ANY deterministic comparator — the two checks above hold even if ties
+    // are ordered arbitrarily. What ties decide is stability, and stability is
+    // only visible as order: equal timestamps must keep the store's order.
+    //
+    // A review flagged that mutating the comparator's tie branch `0` -> `1`
+    // survives this. It does, and the precise reason matters — an earlier draft
+    // of this comment said "non-zero", which would tell a future reviewer to
+    // dismiss a live mutant as equivalent.
+    //
+    // The invisible class is NON-NEGATIVE, not non-zero. Sorting here merges by
+    // asking only `cmp(right, left) < 0`, so any tie value >= 0 takes the same
+    // branch as 0 and the output is byte-identical: measured over 514
+    // configurations (all-equal at n = 2..1000, mixed runs, randomised tie
+    // patterns), zero differed. That is an EQUIVALENT mutant through
+    // `Array.prototype.sort` — no test can kill it because it changes nothing.
+    //
+    // `0` -> `-1` is a DIFFERENT story and is killable: it reverses every tie
+    // run at every n. The assertion below is what catches it, and is also what
+    // kills the committed `listThreads stops ordering newest-first` mutant.
+    expect([...first, ...second]).toEqual([
+      "tie-0",
+      "tie-1",
+      "tie-2",
+      "tie-3",
+      "tie-4",
+      "tie-5",
+      "tie-6",
+      "tie-7",
+      "tie-8",
+      "tie-9",
+    ]);
+  });
+
+  test("the DEFAULT is 200, not 50 — the constant the design argument rests on", async () => {
+    // Nothing enforced this: the source comment and the PR body both spend a
+    // paragraph on "200, NOT 50, and the difference is deliberate", and mutating
+    // the default to 50 left every test green. A defended constant with no
+    // assertion is a preference, not a decision.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads", H)).json()) as { threads: unknown[] };
+    expect(r.threads.length).toBe(200);
+  });
+
+  test("hasMore is FALSE past the end, not just at it", async () => {
+    // `offset + threads.length !== total` passes every earlier case and is a live
+    // bug here: at offset beyond total it reports hasMore forever, so a client
+    // paging until false never stops.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?offset=300", H)).json()) as {
+      threads: unknown[];
+      hasMore: boolean;
+    };
+    expect(r.threads.length).toBe(0);
+    expect(r.hasMore).toBe(false);
+  });
+
+  test("offset reaches the tail the cap would otherwise strand", async () => {
+    // A cap without an offset does not page the tail, it makes it UNREACHABLE —
+    // the lesson `/walkie/asks` records, applied here before it could bite.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?offset=200", H)).json()) as {
+      threads: unknown[];
+      hasMore: boolean;
+    };
+    expect(r.threads.length).toBe(50);
+    // FALSE on the final page — computed from where this page ends, not from
+    // whether it happens to be full.
+    expect(r.hasMore).toBe(false);
+  });
+
+  test("hasMore is FALSE on a final page that happens to be exactly full", async () => {
+    // The case the naive form gets wrong: `threads.length === limit` is true on
+    // a full last page, so a client paging until hasMore is false loops forever
+    // — or, believing there is more, shows a control that returns nothing. Found
+    // by mutation: the earlier tests all had a short or an over-cap final page,
+    // so both formulas agreed and the assertion proved nothing.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?limit=50&offset=200", H)).json()) as {
+      threads: unknown[];
+      hasMore: boolean;
+    };
+    expect(r.threads.length).toBe(50); // exactly full
+    expect(r.hasMore).toBe(false); // and yet the last
+  });
+
+  test("a limit bounds the WORK, not just the response (BRO-2418)", async () => {
+    // The point of paging at the source. Slicing the result would have produced
+    // an identical response while still reading every turn of every session, so
+    // this counts the reads rather than trusting the row count.
+    const { store, reads } = seeded(250);
+    const app = pagedApp(store);
+    const r = (await (await get(app, "/walkie/threads?limit=10", H)).json()) as {
+      threads: unknown[];
+    };
+    expect(r.threads.length).toBe(10);
+    expect(reads()).toBe(10);
+  });
+
+  test("a request costs ONE session scan, not two", async () => {
+    // The first version paired listThreads with a separate countThreads and each
+    // scanned independently — a paging change that removed the per-session turn
+    // reads and doubled the scan underneath them, on a polled surface.
+    const { store, scans } = seeded(250);
+    const app = pagedApp(store);
+    await get(app, "/walkie/threads?limit=10", H);
+    expect(scans()).toBe(1);
+  });
+
+  test("the mirror and its twin page IDENTICALLY", async () => {
+    // Paging one side and not the other is exactly the drift the shared body
+    // exists to prevent, and it would not show on an unpaged request.
+    const { store } = seeded(250);
+    const app = pagedApp(store);
+    for (const q of ["?limit=7", "?limit=7&offset=13", "?limit=1000", ""]) {
+      const a = await (await get(app, `/walkie/threads${q}`, H)).text();
+      const b = await (await owner(app, `/threads${q}`)).text();
+      expect(`${q}:${a}`).toBe(`${q}:${b}`);
+    }
+  });
+
   test("every mirror returns exactly what its OWNER-GATED twin returns", async () => {
     // Asserted against the twin, not a fixture: two copies of a response shape
     // are two truths, and the one nobody looks at is the one that rots. All five
