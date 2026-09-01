@@ -8,10 +8,11 @@ import {
   type Turn,
   type TurnPart,
   type Workspace,
+  assertPageOpts,
   isoNow,
   newId,
 } from "@genesis/core";
-import { and, count, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import { sessions, turns, workspaces } from "./schema";
 
 // drizzle db type varies by driver (pglite vs postgres-js); kept loose on purpose.
@@ -122,60 +123,66 @@ export class DrizzleStore implements Store {
     return r.map(toSession);
   }
 
-  /** See `Store.sessionsPage`. ORDER BY, LIMIT and OFFSET all go to Postgres,
-   *  so a bounded request never retrieves, sorts or materialises rows outside
-   *  the window — that is the whole point of the method, and the property the
-   *  `listSessions`-plus-slice form could not provide.
+  /** See `Store.sessionsPage`.
    *
-   *  The `id` tiebreaker mirrors `compareSessionsNewestFirst`. Without it the
-   *  order of tied `created_at` rows is whatever the planner happens to emit,
-   *  which is not stable across the two queries that make up two pages. */
+   *  What is and is not bounded, measured with EXPLAIN (ANALYZE) on PGlite over
+   *  20k sessions asking for a page of 10:
+   *
+   *    no index                          Seq Scan rows=20000, 217 buffers, 12.7 ms
+   *    sessions_page_idx                 Index Scan rows=10,   13 buffers,  0.17 ms
+   *    sessions_page_idx + count() over  Index Scan rows=20000, 20145 buffers, 25.6 ms
+   *
+   *  The PAGE is bounded — the scan node reports rows=10, so the database really
+   *  does stop at the window. That depends entirely on `sessions_page_idx`, whose
+   *  collation must match this ORDER BY exactly; an index declared without the
+   *  same `COLLATE "C"` cannot serve it and the planner silently reverts to the
+   *  first line.
+   *
+   *  The TOTAL is not bounded and cannot be: an exact count of a table costs a
+   *  scan of it. That is the price of returning `total` at all.
+   *
+   *  An earlier revision carried the total on each page row via `count(*) over()`
+   *  to get both from one statement. That is the third line above: a window
+   *  function with an empty frame must drain its whole input before it emits a
+   *  row, so it forced the very full retrieve-and-sort the method exists to
+   *  avoid, and made the page 147x more expensive than the indexed form. It was
+   *  removed. The single-snapshot property it bought is instead bought by a
+   *  REPEATABLE READ transaction, which costs a round trip rather than a scan.
+   *
+   *  Why a transaction at all: the code this replaced read every session once, so
+   *  its page and its total could not disagree. Two independent statements can —
+   *  an insert landing between them yields a total that does not describe the
+   *  page, and `hasMore` derived from it is wrong on a surface the client polls.
+   *  REPEATABLE READ gives both statements one snapshot, restoring the property
+   *  the single scan had for free.
+   *
+   *  `count()` is drizzle's, which carries `.mapWith(Number)`. That is
+   *  load-bearing across drivers, not decoration: `count(*)` is `int8`, and
+   *  postgres-js does not register a parser for OID 20, so on Railway it arrives
+   *  as the STRING "250" while PGlite hands back a number. A hand-written
+   *  `Number(...)` would be correct but exercised only on the engine where it is
+   *  a no-op. */
   async sessionsPage(opts: {
     limit?: number;
     offset?: number;
   }): Promise<{ sessions: Session[]; total: number }> {
-    const ordered = this.db
-      // `count(*) over()` is the total BEFORE the limit, carried on each row of
-      // the page, so the window and the count come from ONE query and therefore
-      // ONE snapshot. Two queries would be a regression against the code this
-      // replaced: that read every session once, so its page and its total could
-      // not disagree. Split across two statements, a concurrent insert between
-      // them yields a total that does not describe the page — `hasMore` computed
-      // from it would be wrong on a polled surface. It is also one round trip
-      // instead of two. `toSession` projects named columns, so the extra field
-      // cannot leak into `Session`.
-      .select({ ...getTableColumns(sessions), total: sql<number>`count(*) over()` })
-      .from(sessions)
-      // `COLLATE "C"` is load-bearing, not decoration. Both columns are `text`,
-      // so ORDER BY runs under the DATABASE's collation while the in-memory
-      // store uses JS string compare — byte order. Those agree under `C` and
-      // are NOT guaranteed to agree under a locale collation like en_US.UTF-8,
-      // which orders punctuation differently: `id` values and any non-uniform
-      // `created_at` shape could then sort one way here and another there, and
-      // two implementations of one paging contract that disagree on order is
-      // how a row lands on two pages or none.
-      //
-      // Measured, not assumed: PGlite (where the tests run) reports datcollate
-      // `C`, so a conformance test alone would prove agreement only for this
-      // engine and pass while production — Postgres on Railway, created with a
-      // locale collation — diverged. Pinning `C` makes byte order the contract
-      // on every engine. No index on `sessions` is invalidated: the only index
-      // in the schema is `turns_session_idx`.
-      .orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);
-    const windowed =
-      opts.limit === undefined
-        ? ordered.offset(opts.offset ?? 0)
-        : ordered.limit(opts.limit).offset(opts.offset ?? 0);
-    const rows = await windowed;
-    // An offset past the end returns no rows, so the window function carries no
-    // total — that is the ONLY case that needs a second query, and it is the one
-    // case where page/total consistency cannot matter (an empty page has no
-    // next page to get wrong).
-    if (rows.length === 0) {
-      const totals = await this.db.select({ n: count() }).from(sessions);
-      return { sessions: [], total: Number(totals[0]?.n ?? 0) };
-    }
-    return { sessions: rows.map(toSession), total: Number(rows[0].total) };
+    assertPageOpts(opts);
+    const offset = opts.offset ?? 0;
+    return this.db.transaction(
+      async (tx: DrizzleDb) => {
+        const ordered = tx
+          .select()
+          .from(sessions)
+          .orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);
+        const rows =
+          opts.limit === undefined
+            ? await ordered.offset(offset)
+            : await ordered.limit(opts.limit).offset(offset);
+        const totals = await tx.select({ n: count() }).from(sessions);
+        return { sessions: rows.map(toSession), total: totals[0]?.n ?? 0 };
+      },
+      { isolationLevel: "repeatable read" },
+    );
   }
 
   async upsertSession(s: Session): Promise<Session> {

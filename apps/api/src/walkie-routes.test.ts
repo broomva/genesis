@@ -1537,10 +1537,17 @@ describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)",
     // fixed to one scan; this now asserts ZERO, because the page and the total
     // both come from `sessionsPage`, which bounds the retrieval in SQL.
     //
-    // `scans() === 0` is the load-bearing half. A revert to
-    // `listSessions()`-then-slice would still issue exactly ONE request and
-    // return a byte-identical response, so the page count cannot distinguish it;
-    // only the absence of the unbounded read can.
+    // Both assertions, and NEITHER is redundant — though the first version of
+    // this comment claimed `scans() === 0` was the load-bearing one "because the
+    // page count cannot distinguish a revert". That was wrong: `pages()` counts
+    // `sessionsPage` specifically, so a supervisor-level revert to
+    // `listSessions()`-then-slice makes it 0 and fails on its own.
+    //
+    // What `scans() === 0` actually adds is the narrower case the page count
+    // cannot see: a `sessionsPage` that is itself implemented over
+    // `listSessions()`. That returns a byte-identical response through exactly
+    // one `sessionsPage` call, and only the absence of the unbounded read
+    // distinguishes it.
     const { store, scans, pages } = seeded(250);
     const app = pagedApp(store);
     await get(app, "/walkie/threads?limit=10", H);

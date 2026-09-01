@@ -452,25 +452,44 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     const { DrizzleStore } = await import("./store");
     const client = new PGlite();
     await client.exec(MIGRATE_SQL);
-    const seen: Array<{ sql: string; rows: number }> = [];
-    const origQuery = client.query.bind(client);
-    // Forward EVERY argument. The first draft of this wrapper took (sql, params)
-    // and dropped drizzle's third argument — the row-mode/parser options — so
-    // `count(*)` came back in a shape the store read as NaN. The instrument was
-    // corrupting the thing it measured, and it failed loudly only because the
-    // assertion happened to cover the count; a wrapper that merely perturbed
-    // ORDERING would have been invisible.
-    (client as unknown as { query: (...a: unknown[]) => Promise<unknown> }).query = async (
-      ...args: unknown[]
-    ) => {
-      const r = (await (origQuery as (...a: unknown[]) => Promise<unknown>)(...args)) as {
-        rows?: unknown[];
+    const seen: Array<{ sql: string; params: unknown[]; rows: number }> = [];
+    const record = (args: unknown[], r: { rows?: unknown[] }) =>
+      seen.push({
+        sql: String(args[0] ?? ""),
+        params: (args[1] as unknown[]) ?? [],
+        rows: r.rows?.length ?? 0,
+      });
+    // Forward EVERY argument. The first draft took (sql, params) and dropped
+    // drizzle's third argument — the row-mode/parser options — so `count(*)`
+    // came back in a shape the store read as NaN. The instrument was corrupting
+    // the thing it measured.
+    const wrap = (target: { query: (...a: unknown[]) => Promise<unknown> }) => {
+      const orig = target.query.bind(target);
+      target.query = async (...args: unknown[]) => {
+        const r = (await orig(...args)) as { rows?: unknown[] };
+        record(args, r);
+        return r;
       };
-      seen.push({ sql: String(args[0] ?? ""), rows: r.rows?.length ?? 0 });
-      return r;
     };
+    wrap(client as unknown as { query: (...a: unknown[]) => Promise<unknown> });
+    // And inside transactions. drizzle's pglite driver runs a transaction's
+    // statements through `client.transaction(cb)`, binding a NEW session to the
+    // Transaction object rather than to the client — so patching `client.query`
+    // alone observes NOTHING once `sessionsPage` became transactional, and
+    // `Math.max(...[])` is `-Infinity`, which is <= any bound. That is not
+    // hypothetical: this exact wrapper silently passed the window assertion on
+    // the first transactional revision. Hence both the patch below and the
+    // non-emptiness guard every caller of `seen` now makes.
+    const origTxn = client.transaction.bind(client);
+    (
+      client as unknown as { transaction: (cb: (tx: unknown) => unknown) => Promise<unknown> }
+    ).transaction = (cb: (tx: unknown) => unknown) =>
+      origTxn(((tx: { query: (...a: unknown[]) => Promise<unknown> }) => {
+        wrap(tx);
+        return cb(tx);
+      }) as never) as Promise<unknown>;
     const store = new DrizzleStore(drizzle(client), () => client.close());
-    return { store, seen };
+    return { store, seen, client };
   };
 
   const seed = async (store: Store, rows: Array<{ id: string; createdAt: string }>) => {
@@ -502,11 +521,22 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     seen.length = 0;
 
     const page = await store.sessionsPage({ limit: 5 });
-    expect(page.sessions.length).toBe(5);
-    expect(page.total).toBe(250); // the total is exact despite the bound
 
+    // The bound FIRST. `expect(page.sessions.length).toBe(5)` below is satisfied
+    // by the unbounded implementation too, so asserting it first would shadow
+    // this one for any mutant that removes the limit — the assertion would never
+    // be reached and the check that matters would never have failed.
+    //
+    // And the non-emptiness guard, because `Math.max(...[])` is `-Infinity`,
+    // which is <= any bound. An instrument that stops observing does not fail
+    // here, it PASSES. That happened: when this method became transactional the
+    // wrapper went blind and this test went green on its own vacuity.
+    expect(seen.length).toBeGreaterThan(0);
     const widest = Math.max(...seen.map((q) => q.rows));
     expect(widest).toBeLessThanOrEqual(5);
+
+    expect(page.sessions.length).toBe(5);
+    expect(page.total).toBe(250); // the total is exact despite the bound
     await store.close();
   });
 
@@ -526,19 +556,30 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     await store.sessionsPage({ limit: 1 });
     const ordering = seen.filter((q) => /order\s+by/i.test(q.sql));
     expect(ordering.length).toBeGreaterThan(0);
-    for (const q of ordering) expect(q.sql).toContain('COLLATE "C"');
+    for (const q of ordering) {
+      // BOTH keys, counted. `toContain` is satisfied by one occurrence, so it
+      // passes for `created_at COLLATE "C" DESC, id ASC` — the likeliest hand
+      // edit, and the one that abandons the tiebreaker to the database locale
+      // while looking fixed. The contract needs two.
+      expect((q.sql.match(/COLLATE "C"/g) ?? []).length).toBe(2);
+    }
     await store.close();
   });
 
-  test("a non-empty page costs ONE query, so the total describes the page", async () => {
+  test("the page and the total share ONE snapshot", async () => {
     // The code this replaced read every session once, so its page and its total
-    // could not disagree. Splitting them across two statements would lose that:
-    // an insert landing between them yields a total that does not describe the
-    // page, and `hasMore` derived from it is wrong. `count(*) over()` keeps both
-    // in one snapshot.
+    // could not disagree. Two independent statements can: an insert landing
+    // between them yields a total that does not describe the page, and `hasMore`
+    // derived from it is wrong on a surface the client polls.
     //
-    // Concurrency is not reproducible here, so this asserts the mechanism that
-    // makes the race impossible — one query — rather than trying to lose a race.
+    // An earlier revision bought the single snapshot with `count(*) over()`,
+    // carrying the total on each page row. That was measured to cost 147x the
+    // indexed page (a window function with an empty frame must drain its whole
+    // input), so it is now bought with REPEATABLE READ instead.
+    //
+    // Concurrency is not reproducible here, so this asserts the mechanism rather
+    // than trying to lose a race — and the isolation level is directly
+    // observable, so dropping it is a visible regression rather than a silent one.
     const { store, seen } = await instrumented();
     await seed(
       store,
@@ -551,7 +592,58 @@ describe("DrizzleStore (pglite) — sessionsPage is bounded AT THE SOURCE (follo
     const page = await store.sessionsPage({ limit: 5 });
     expect(page.sessions.length).toBe(5);
     expect(page.total).toBe(40);
-    expect(seen.filter((q) => /select/i.test(q.sql)).length).toBe(1);
+
+    expect(seen.some((q) => /isolation level repeatable read/i.test(q.sql))).toBe(true);
+    // Exactly two: the page and the count. Three would mean something re-read.
+    expect(seen.filter((q) => /^\s*select/i.test(q.sql)).length).toBe(2);
+    await store.close();
+  });
+
+  test("EXPLAIN says the DATABASE stops at the window, not just the client", async () => {
+    // The check above counts rows RETURNED. That is a proxy, and an earlier
+    // version of this file's comment presented it as the invariant — claiming
+    // the query "never retrieves, sorts or materialises rows outside the
+    // window". Adversarial review refuted that with EXPLAIN, and it was right:
+    // the then-current implementation used `count(*) over()`, whose window has
+    // to drain the whole relation, so every row WAS retrieved and sorted and
+    // only the transfer was bounded.
+    //
+    // So this asserts the real thing, on the real emitted SQL, by re-running the
+    // exact statement the store issued under EXPLAIN (ANALYZE).
+    const { store, seen, client } = await instrumented();
+    await seed(
+      store,
+      Array.from({ length: 2000 }, (_, i) => ({
+        id: `sess-${String(i).padStart(5, "0")}`,
+        createdAt: new Date(Date.UTC(2026, 7, 31, 12, 0, 0) - i * 1000).toISOString(),
+      })),
+    );
+    await client.exec("analyze sessions");
+    seen.length = 0;
+    await store.sessionsPage({ limit: 10 });
+
+    const pageStmt = seen.find((q) => /\blimit\b/i.test(q.sql));
+    expect(pageStmt).toBeDefined();
+    if (!pageStmt) return;
+    const plan = (
+      (await client.query(
+        `EXPLAIN (ANALYZE, COSTS OFF) ${pageStmt.sql}`,
+        pageStmt.params as never,
+      )) as { rows: Array<Record<string, string>> }
+    ).rows
+      .map((r) => Object.values(r)[0] ?? "")
+      .join("\n");
+
+    // The index is what makes the bound real. Without a matching collation the
+    // planner cannot use it and silently reverts to Seq Scan + Sort.
+    expect(plan).toContain("sessions_page_idx");
+    expect(plan).not.toContain("Seq Scan");
+
+    // And the load-bearing number: no node processed more rows than the window.
+    // With `count(*) over()` this read rows=2000 while returning 10.
+    const rowCounts = [...plan.matchAll(/rows=(\d+)/g)].map((m) => Number(m[1]));
+    expect(rowCounts.length).toBeGreaterThan(0);
+    expect(Math.max(...rowCounts)).toBeLessThanOrEqual(10);
     await store.close();
   });
 
@@ -641,10 +733,46 @@ describe("sessionsPage — the two Store implementations agree (follow-up to BRO
     await pg.close();
   });
 
+  test("invalid windows are rejected identically by BOTH stores", async () => {
+    // Measured divergence before this guard existed, same four sessions:
+    //   {limit: NaN}   -> InMemoryStore []            DrizzleStore ALL FOUR
+    //   {limit: -1}    -> InMemoryStore 3 rows        DrizzleStore 4 rows
+    //   {offset: -2}   -> InMemoryStore the OLDEST two (Array#slice reads a
+    //                     negative index from the end, in a newest-first list)
+    //                     DrizzleStore throws
+    // Two successful calls returning different answers is the worst shape: no
+    // error, no test, and the in-memory store is what every other suite runs on.
+    const { InMemoryStore } = await import("@genesis/core");
+    const mem = new InMemoryStore();
+    const pg = await createPgliteStore();
+    await fill(mem);
+    await fill(pg);
+    const bad = [
+      { limit: -1 },
+      { limit: Number.NaN },
+      { limit: 1.5 },
+      { limit: Number.POSITIVE_INFINITY },
+      { offset: -2 },
+      { limit: 2, offset: -1 },
+    ];
+    for (const opts of bad) {
+      await expect(mem.sessionsPage(opts)).rejects.toThrow(/non-negative integer/);
+      await expect(pg.sessionsPage(opts)).rejects.toThrow(/non-negative integer/);
+    }
+    // and the boundary that IS valid stays valid
+    expect((await mem.sessionsPage({ limit: 0 })).sessions).toEqual([]);
+    expect((await pg.sessionsPage({ limit: 0 })).sessions).toEqual([]);
+    expect((await pg.sessionsPage({ limit: 0 })).total).toBe(corpus.length);
+    await pg.close();
+  });
+
   test("paging the whole corpus yields each row exactly once", async () => {
-    // The property the tiebreaker exists for. Without a total order, tied rows
-    // can shift between the two queries that make up two pages, so a row is
-    // served twice or skipped — and the response looks well-formed either way.
+    // A completeness check, and ONLY that. An earlier comment here claimed it was
+    // "the property the tiebreaker exists for" — review showed that is false: on
+    // a static table PGlite returns a deterministic plan, so paging yields each
+    // row exactly once WITH or WITHOUT the tiebreaker, and this test passes
+    // either way. The tiebreaker is really guarded by the conformance test above,
+    // which compares the two stores and does catch a dropped SQL tiebreaker.
     const pg = await createPgliteStore();
     await fill(pg);
     const seen: string[] = [];

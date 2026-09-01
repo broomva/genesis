@@ -122,6 +122,18 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engine text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS no_worktree boolean;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch text;
+-- The thread-list page reads newest-first with an id tiebreaker, both pinned to
+-- COLLATE "C". An index only serves an ORDER BY when its collation MATCHES, so the
+-- pin must be repeated here; without it the planner falls back to a full scan plus
+-- sort and the page is not bounded at all. Measured on PGlite, 20k sessions, one
+-- page of 10:
+--   no index      Seq Scan rows=20000, 217 buffers, 12.7 ms
+--   this index    Index Scan rows=10,   13 buffers,  0.17 ms
+-- Raw SQL rather than drizzle index(), which cannot express a per-column COLLATE.
+-- NOTE: no backticks in this block. MIGRATE_SQL is a template literal and a
+-- backtick here terminates it -- which is exactly how this comment first broke
+-- the build.
+CREATE INDEX IF NOT EXISTS sessions_page_idx ON sessions (created_at COLLATE "C" DESC, id COLLATE "C" ASC);
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS input_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS output_tokens integer;
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS cache_read_tokens integer;

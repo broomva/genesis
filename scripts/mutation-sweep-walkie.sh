@@ -57,7 +57,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts
           packages/core/src/store.ts packages/db/src/store.ts)
-EXPECTED_MUTANTS=98
+EXPECTED_MUTANTS=100
 
 # Subject paths used by mutants below. Defined HERE, not at first use: the
 # paging mutants sit ~25 lines above where these used to be declared, and with
@@ -664,7 +664,7 @@ echo
 
 M=apps/api/src/ttl-memo.ts
 
-mutate "listThreads pages the RESULT, so the work stays O(box)" "$CS" \
+mutate "InMemoryStore.sessionsPage returns the whole ordered list" "$CS" \
   "    const page =
       opts.limit === undefined ? ordered.slice(offset) : ordered.slice(offset, offset + opts.limit);" \
   "    const page = ordered.slice(offset);" \
@@ -707,18 +707,34 @@ mutate "ties lose their id tiebreaker, so page boundaries stop being stable" "$C
           : 0;' \
   '      : 0;' \
   "identical pages at every boundary"
-mutate "the pg page stops bounding at the source and slices nothing" "$DS" \
-  '        : ordered.limit(opts.limit).offset(opts.offset ?? 0);' \
-  '        : ordered.offset(opts.offset ?? 0);' \
+# THE NEGATIVE CONTROL, as a committed mutant. It was run by hand and reported in
+# a commit message — which is the thing this file's header says never to do again:
+# a claim from a script in /tmp is reproducible by nobody. It bounds in JS instead
+# of in SQL, so it returns a byte-identical page while retrieving everything.
+mutate "the page is bounded in JS instead of in SQL — identical response, unbounded work" "$DS" \
+  '            : await ordered.limit(opts.limit).offset(offset);' \
+  '            : (await ordered.offset(offset)).slice(0, opts.limit);' \
   "no query retrieves more rows than the window"
-mutate "the page total becomes a stub instead of a count" "$DS" \
-  '.select({ ...getTableColumns(sessions), total: sql<number>`count(*) over()` })' \
-  '.select({ ...getTableColumns(sessions), total: sql<number>`0` })' \
-  "the total describes the page"
-mutate "the empty-page total fallback is removed, so a past-the-end page reports NaN" "$DS" \
-  '    if (rows.length === 0) {' \
-  '    if (false) {' \
-  "identical pages at every boundary"
+mutate "the id tiebreaker loses its collation and follows the database locale" "$DS" \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
+  '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} ASC`);' \
+  "pins COLLATE"
+mutate "page and total stop sharing a snapshot" "$DS" \
+  '      { isolationLevel: "repeatable read" },' \
+  '      {},' \
+  "share ONE snapshot"
+mutate "the window precondition is dropped, so the two stores diverge on bad input" "$CS" \
+  '    assertPageOpts(opts);' \
+  '' \
+  "rejected identically by BOTH stores"
+mutate "listThreads goes back to scanning every session and slicing in JS" "$C" \
+  '    return this.summarize((await this.store.sessionsPage(opts)).sessions);' \
+  '    const all = await this.store.listSessions();
+    const off = opts.offset ?? 0;
+    return this.summarize(
+      opts.limit === undefined ? all.slice(off) : all.slice(off, off + opts.limit),
+    );' \
+  "NO full scan"
 mutate "the pg ORDER BY drops COLLATE C and follows the database locale" "$DS" \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
   '.orderBy(sql`${sessions.createdAt} DESC, ${sessions.id} ASC`);' \

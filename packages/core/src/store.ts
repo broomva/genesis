@@ -24,9 +24,15 @@ export interface Store {
   /** One ordered page of sessions plus the total, **from the source**.
    *
    *  `listSessions()` below materialises every row, so a caller that slices its
-   *  result bounds only what it *reads* — never what the store retrieves, sorts
-   *  or holds. This is the bounded form: implementations MUST apply both the
-   *  order and the window at the source (SQL `ORDER BY … LIMIT … OFFSET`).
+   *  result bounds only what it *reads*. A DURABLE implementation must apply the
+   *  order and the window in the query, and must be backed by an index that can
+   *  serve that exact order — without one the database still scans and sorts the
+   *  whole table, and only the wire payload is bounded. `InMemoryStore` sorts
+   *  its whole map and slices, which is the shape this paragraph warns about;
+   *  that is acceptable there because the map IS the working set, and it is
+   *  stated rather than left to be discovered.
+   *
+   *  Callers must satisfy `assertPageOpts`.
    *
    *  Order is `compareSessionsNewestFirst`. `total` counts every session, not
    *  the page — it is what a caller needs in order to know a next page exists,
@@ -35,7 +41,10 @@ export interface Store {
     limit?: number;
     offset?: number;
   }): Promise<{ sessions: Session[]; total: number }>;
-  /** EVERY session, unbounded and unordered. The thread-list UI no longer uses
+  /** EVERY session, unbounded. Order is unspecified BY CONTRACT — `DrizzleStore`
+   *  happens to return them `ORDER BY created_at` and a test pins that, so do not
+   *  read this as "arbitrary"; read it as "callers may not depend on it". The
+   *  thread-list UI no longer uses
    *  this — it pages through `sessionsPage` — so the one remaining caller is the
    *  ask-log phase map in `apps/api/src/server.ts`, which needs every session
    *  because any ask may belong to any thread; bounding it there would silently
@@ -61,8 +70,41 @@ const id = (p: string) => `${p}-${crypto.randomUUID()}`;
  *  the same row appear on two pages or on none. `id` is the primary key, so the
  *  pair is total and the boundary is stable.
  *
- *  Exported so the SQL store's ordering can be checked against this one rather
- *  than against a third re-implementation written by the test. */
+ *  Comparison is JS `<` on strings, i.e. UTF-16 code-unit order. The SQL store
+ *  pins `COLLATE "C"`, i.e. UTF-8 byte order. Those coincide for ASCII and
+ *  DIVERGE above U+FFFF, where a JS surrogate sorts below U+E000..U+FFFF but its
+ *  UTF-8 bytes sort above. Unreachable today — ids are `sess-<uuid>` and
+ *  `createdAt` is ISO, both ASCII — but the two are NOT the same order, and a
+ *  future sort key drawn from user text would make the difference reachable.
+ *
+ *  Exported as the single definition of the order, so the SQL `ORDER BY` has a
+ *  named referent to mirror rather than the two drifting independently. */
+/** The precondition `Store.sessionsPage` puts on its window, enforced identically
+ *  by every implementation.
+ *
+ *  It THROWS rather than clamping because the two implementations disagree on
+ *  what invalid input means and both answers look plausible: `Array#slice`
+ *  reads a negative offset as "from the end" and a `NaN` limit as "nothing",
+ *  while Postgres rejects both outright. Measured on the same four sessions,
+ *  `{limit: NaN}` returned [] in memory and ALL FOUR rows from pg — two
+ *  successful calls, different answers, no error on either side. Clamping would
+ *  have picked one of those meanings and hidden the caller's bug; throwing puts
+ *  it at the boundary. No live caller is affected: the HTTP route sanitises
+ *  before it gets here. */
+export function assertPageOpts(opts: { limit?: number; offset?: number }): void {
+  for (const [name, v] of [
+    ["limit", opts.limit],
+    ["offset", opts.offset],
+  ] as const) {
+    if (v === undefined) continue;
+    if (!Number.isInteger(v) || v < 0) {
+      throw new TypeError(
+        `sessionsPage: ${name} must be a non-negative integer or undefined, got ${String(v)}`,
+      );
+    }
+  }
+}
+
 export const compareSessionsNewestFirst = (a: Session, b: Session): number =>
   a.createdAt < b.createdAt
     ? 1
@@ -111,6 +153,7 @@ export class InMemoryStore implements Store {
   }
 
   async sessionsPage(opts: { limit?: number; offset?: number }) {
+    assertPageOpts(opts);
     const ordered = [...this.sessions.values()].sort(compareSessionsNewestFirst);
     const offset = opts.offset ?? 0;
     const page =
