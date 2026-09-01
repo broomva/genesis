@@ -21,11 +21,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { InMemoryStore } from "@genesis/core";
 import { ANSWER_FILE, ASK_FILE, type Ask, createAskLog } from "./ask-log";
 import { build } from "./server";
 
 const SECRET = "walkie-test-secret";
 const H: Record<string, string> = { "x-genesis-walkie-secret": SECRET };
+// Walkie now REFUSES to build without an owner token (BRO-2417): `unauthorized()`
+// fails open without one, so the walkie secret would gate nothing.
+const OWNER_TOKEN = "owner-token";
 
 /** The house shape: build() returns { app }, requests go through app.fetch. */
 type App = { fetch: (r: Request) => Promise<Response> };
@@ -66,6 +70,7 @@ function configured() {
     walkieSecret: SECRET,
     askLog: log,
     askLogDir: dir,
+    token: OWNER_TOKEN,
   } as never);
   return { app: app as App, log };
 }
@@ -1019,6 +1024,7 @@ describe("Genesis serves the client, so both share one origin (BRO-2416)", () =>
       walkieSecret: SECRET,
       askLog: log,
       askLogDir: dir,
+      token: OWNER_TOKEN,
       walkieClientDir: clientDir,
     } as never);
     return { app: app as App, clientDir, log };
@@ -1073,6 +1079,7 @@ describe("Genesis serves the client, so both share one origin (BRO-2416)", () =>
         walkieSecret: SECRET,
         askLog: createAskLog(dir),
         askLogDir: dir,
+        token: OWNER_TOKEN,
         walkieClientDir: empty,
       } as never),
     ).toThrow(/does not look like a built walkie client/);
@@ -1090,6 +1097,7 @@ describe("Genesis serves the client, so both share one origin (BRO-2416)", () =>
         walkieSecret: SECRET,
         askLog: createAskLog(dir),
         askLogDir: dir,
+        token: OWNER_TOKEN,
         walkieClientDir: half,
       } as never),
     ).toThrow(/does not look like a built walkie client/);
@@ -1125,6 +1133,7 @@ describe("an ask whose session moved on is stale, not pending (BRO-2415)", () =>
       walkieSecret: SECRET,
       askLog: log,
       askLogDir: dir,
+      token: OWNER_TOKEN,
       store: storeWith(sessions),
     } as never);
     return { app: app as App, log };
@@ -1215,6 +1224,7 @@ describe("an ask whose session moved on is stale, not pending (BRO-2415)", () =>
       walkieSecret: SECRET,
       askLog: log,
       askLogDir: dir,
+      token: OWNER_TOKEN,
       store: {
         listSessions: async () => {
           throw new Error("store on fire");
@@ -1240,6 +1250,7 @@ describe("an ask whose session moved on is stale, not pending (BRO-2415)", () =>
       walkieSecret: SECRET,
       askLog: log,
       askLogDir: dir,
+      token: OWNER_TOKEN,
       store: {
         listSessions: async () => {
           throw new Error("store on fire");
@@ -1251,5 +1262,270 @@ describe("an ask whose session moved on is stale, not pending (BRO-2415)", () =>
     const body = (await (await get(app as App, "/walkie/asks", H)).json()) as { degraded?: string };
     expect(body.degraded).toContain("skipped");
     expect(body.degraded).toContain("sessions could not be read");
+  });
+});
+
+describe("read mirrors: the client's own gate, and only OWNER-reads (BRO-2417)", () => {
+  const TOKEN = "owner-token";
+
+  // All FIVE mirrors, with a REGISTERED workspace id. The first cut of this block
+  // enumerated two of five in every structural test; three independent P20 strata
+  // each proved the same thing by mutation — deleting the three git mirrors, or
+  // stripping `walkieDenied` from them, left the whole 198-test suite green. A
+  // test named for "the mirrors" that iterates 40% of them is a coverage claim
+  // that is simply false, so the list is hoisted and every test iterates IT.
+  const WS = "ws-default"; // auto-registered from `workspaceRoot`
+  const MIRRORS = [
+    "/walkie/threads",
+    "/walkie/workspaces",
+    `/walkie/workspaces/${WS}/git/status`,
+    `/walkie/workspaces/${WS}/git/diff`,
+    `/walkie/workspaces/${WS}/checks`,
+  ] as const;
+  const TWIN = (m: string) => m.replace("/walkie", "");
+
+  const both = () => {
+    const log = createAskLog(dir);
+    const store = new InMemoryStore();
+    store.upsertSession({
+      id: "sess-1",
+      workspaceId: WS,
+      threadId: "thread-1",
+      phase: "awaiting",
+      createdAt: "2026-08-31T12:00:00.000Z",
+      title: "Wire $40,000 — approve?",
+    });
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      token: TOKEN,
+      store,
+    } as never);
+    return app as App;
+  };
+  const owner = (app: App, path: string) => get(app, path, { authorization: `Bearer ${TOKEN}` });
+
+  test("every mirror returns exactly what its OWNER-GATED twin returns", async () => {
+    // Asserted against the twin, not a fixture: two copies of a response shape
+    // are two truths, and the one nobody looks at is the one that rots. All five
+    // pairs — the earlier two-pair loop let three copy-pasted git handlers sit
+    // under a comment claiming every mirror shared a body function.
+    const app = both();
+    for (const m of MIRRORS) {
+      const a = await (await get(app, m, H)).text();
+      const b = await (await owner(app, TWIN(m))).text();
+      expect(`${m}:${a}`).toBe(`${m}:${b}`);
+    }
+  });
+
+  test("the compared payloads are NOT EMPTY — the equality above is not vacuous", async () => {
+    // The guard that caught this block's first defect, now pinned to DATA rather
+    // than to schema. Its first version checked the workspaces payload for the
+    // literal "defaultWorkspace" — a KEY the body always emits, so it could not
+    // detect the emptiness it existed to detect. Two strata found that
+    // independently. Both sentinels below are values the fixture seeds.
+    const app = both();
+    const threads = (await (await get(app, "/walkie/threads", H)).json()) as {
+      threads: Array<{ threadId: string }>;
+    };
+    expect(threads.threads.length).toBeGreaterThan(0);
+    expect(threads.threads[0]?.threadId).toBe("thread-1");
+    const ws = (await (await get(app, "/walkie/workspaces", H)).json()) as {
+      workspaces: Array<{ id: string }>;
+    };
+    expect(ws.workspaces.length).toBeGreaterThan(0);
+    expect(ws.workspaces.map((w) => w.id)).toContain(WS);
+  });
+
+  test("NO MIRROR PAYLOAD carries the workspace rootPath", async () => {
+    // `server.ts` claims this and, until P20 round 3, nothing checked it: the
+    // dogfood grepped for a path built from an env var the entrypoint does not
+    // read, so the needle was never present and the grep was a guaranteed pass.
+    // A shell check alone also dies with the shell — this pins it in the suite.
+    const app = both();
+    for (const m of MIRRORS) {
+      const body = await (await get(app, m, H)).text();
+      expect(`${m} leaks dir:${body.includes(dir)}`).toBe(`${m} leaks dir:false`);
+      // The property, not one platform's spelling.
+      expect(`${m} absolute path:${/"\/(Users|home|root|opt|private|var)\//.test(body)}`).toBe(
+        `${m} absolute path:false`,
+      );
+    }
+  });
+
+  test("EVERY mirror is no-store — a phone must not cache a working-tree diff", async () => {
+    // `noStore(c)` is the first line of all five, and nothing asserted it: P20
+    // round 2 dropped it from a mirror and 202 tests stayed green. The existing
+    // cache assertion covers /walkie/asks and /walkie/answer only, and the
+    // rationale applies MORE strongly here — these carry diff bodies, thread
+    // titles and last agent turns, not ask ids.
+    const app = both();
+    for (const m of MIRRORS) {
+      const res = await get(app, m, H);
+      expect(`${m}:${res.headers.get("cache-control")}`).toBe(`${m}:no-store`);
+    }
+  });
+
+  test("the walkie secret opens EVERY mirror", async () => {
+    // The positive control. Without it "404 on an unknown workspace" was the only
+    // assertion touching the git mirrors, and Hono 404s any unregistered path —
+    // so deleting the routes outright was indistinguishable from a pass.
+    const app = both();
+    for (const m of MIRRORS) {
+      const res = await get(app, m, H);
+      // diff without ?path is a 400 by contract (its twin does the same); what
+      // matters here is that the route EXISTS and the gate let us through.
+      expect(`${m}:${res.status !== 401 && res.status !== 404}`).toBe(`${m}:true`);
+    }
+  });
+
+  test("EVERY mirror is 401 with no credential, and with a WRONG secret", async () => {
+    // The gate, per mirror. Mutation-proven necessary: stripping `walkieDenied`
+    // from a single git mirror previously left 198/198 green while turning a
+    // working-tree diff read into an unauthenticated one.
+    const app = both();
+    for (const m of MIRRORS) {
+      expect(`${m} bare:${(await get(app, m)).status}`).toBe(`${m} bare:401`);
+      const wrong = await get(app, m, { "x-genesis-walkie-secret": "not-the-secret" });
+      expect(`${m} wrong:${wrong.status}`).toBe(`${m} wrong:401`);
+    }
+  });
+
+  test("the OWNER TOKEN opens no mirror, and the walkie secret opens no twin", async () => {
+    // Neither credential is a superset of the other, so a leak of one is not a
+    // leak of the other's surface.
+    const app = both();
+    for (const m of MIRRORS) {
+      expect(`${m}:${(await owner(app, m)).status}`).toBe(`${m}:401`);
+      expect(`${TWIN(m)}:${(await get(app, TWIN(m), H)).status}`).toBe(`${TWIN(m)}:401`);
+    }
+  });
+
+  test("READ-ONLY BY CONSTRUCTION: the only non-GET verb under /walkie is the answer", async () => {
+    // The PR's central security argument, asserted over the ROUTE TABLE instead
+    // of in prose. The previous negative control probed three OWNER-gated writes,
+    // which never consult `walkieDenied` at all — a stratum proved it stays green
+    // with a walkie-gated `POST /walkie/workspaces/:id/git/commit` registered and
+    // answering 200. This assertion is what makes the sentence true: a write verb
+    // added to the namespace fails HERE, at the claim, not somewhere downstream.
+    const app = both() as unknown as {
+      routes: Array<{ path: string; method: string }>;
+    };
+    const writes = [
+      ...new Set(
+        app.routes
+          .filter((r) => r.path.startsWith("/walkie") && r.method !== "GET")
+          .map((r) => `${r.method} ${r.path}`),
+      ),
+    ].sort();
+    expect(writes).toEqual(["POST /walkie/answer"]);
+  });
+
+  test("the walkie secret unlocks no OWNER write — every registered one, DERIVED", async () => {
+    // DERIVED from the route table, not hand-listed. The first version listed
+    // three verbs against nine registered, omitting POST /message and
+    // POST /api/chat — which DISPATCH AN AGENT TURN, i.e. arbitrary command
+    // execution in a workspace, a strictly larger blast radius than the git
+    // commit the comment named as its worst case. A hand list also goes stale the
+    // day someone adds the tenth verb, which is exactly when it matters.
+    //
+    // Deriving also removes a vacuity: a route that is NOT registered in this
+    // fixture answers 404, and a 404 would satisfy a "not 200" assertion while
+    // proving nothing about the gate. Only routes actually in the table are
+    // probed, so every 401 here is a gate rejecting a real request.
+    const app = both();
+    const table = (app as unknown as { routes: Array<{ path: string; method: string }> }).routes;
+    const writes = [
+      ...new Set(
+        table
+          .filter((r) => r.method !== "GET" && r.method !== "ALL")
+          .map((r) => `${r.method} ${r.path}`),
+      ),
+    ]
+      .sort()
+      .filter((r) => !r.includes(" /walkie/")); // the answer verb is walkie's own
+
+    // The derivation must not silently collapse to nothing.
+    expect(writes.length).toBeGreaterThanOrEqual(8);
+
+    for (const entry of writes) {
+      const [method, template] = entry.split(" ");
+      if (!method || !template) throw new Error(`unparsable route entry: ${entry}`);
+      const path = template.replace(/:\w+/g, WS);
+      const res = await app.fetch(
+        new Request(`http://x${path}`, {
+          method,
+          headers: { ...H, "content-type": "application/json" },
+          body: JSON.stringify({ message: "nope", text: "nope", threadId: "thread-1" }),
+        }),
+      );
+      expect(`${method} ${path}:${res.status}`).toBe(`${method} ${path}:401`);
+    }
+  });
+
+  test("no mirror accepts its credential from the QUERY STRING, under any param name", async () => {
+    // `unauthorized()` reads `c.req.query("token")`, which is half the reason the
+    // client cannot use it. The realistic defect is that fallback being copied
+    // into `walkieDenied` — so `token` is the load-bearing name here. The first
+    // version tested only `?secret=`, a string that appears NOWHERE in this
+    // codebase, and a mutant adding the real `c.req.query("token")` fallback
+    // sailed through it.
+    const app = both();
+    for (const m of MIRRORS) {
+      for (const q of ["token", "secret", "walkieSecret", "x-genesis-walkie-secret"]) {
+        const res = await get(app, `${m}${m.includes("?") ? "&" : "?"}${q}=${SECRET}`);
+        expect(`${m}?${q}:${res.status}`).toBe(`${m}?${q}:401`);
+      }
+    }
+  });
+
+  test("EVERY mirror is ABSENT (not merely closed) when walkie is unconfigured", async () => {
+    const app = build({ workspaceRoot: dir, token: TOKEN } as never).app as App;
+    for (const m of MIRRORS) {
+      expect(`${m}:${(await get(app, m, H)).status}`).toBe(`${m}:404`);
+    }
+    // The companion the file's header demands: 404 must mean ABSENT, not "this
+    // app 404s everything". A route that IS registered on the same build answers.
+    expect((await get(app, "/health")).status).toBe(200);
+  });
+
+  test("an unknown workspace is 404 WITH THE BODY, not Hono's default 404", async () => {
+    // Status alone cannot distinguish "route present, workspace unknown" from
+    // "route absent" — Hono returns 404 for any unregistered path. The body can:
+    // ours is JSON, Hono's default is the literal text "404 Not Found". This is
+    // the same discriminator the /walkie/app route already uses, for the same
+    // reason (a status-only check there let a mutant survive).
+    const app = both();
+    for (const p of [
+      "/walkie/workspaces/nope/git/status",
+      "/walkie/workspaces/nope/git/diff",
+      "/walkie/workspaces/nope/checks",
+    ]) {
+      const res = await get(app, p, H);
+      expect(`${p}:${res.status}`).toBe(`${p}:404`);
+      expect(`${p}:${await res.text()}`).toBe(`${p}:{"error":"unknown workspace"}`);
+    }
+  });
+
+  test("walkieSecret without a token throws at BUILD, naming the fail-open helper", () => {
+    // `unauthorized()` opens with `if (!opts.token) return false`, so on a
+    // tokenless deploy every owner verb is already open and the walkie secret
+    // gates nothing. A surface whose gate gates nothing should not boot.
+    //
+    // (An earlier draft added a "before the mirrors this was self-correcting"
+    // rationale here. It was false — /walkie/asks and /walkie/answer are
+    // header-gated, so the loop already ran tokenless — and it was retracted in
+    // server.ts while surviving verbatim HERE for a full review round. Deleting
+    // a claim at one of its two sites is not deleting it.)
+    expect(() =>
+      build({
+        workspaceRoot: dir,
+        walkieSecret: SECRET,
+        askLog: createAskLog(dir),
+        askLogDir: dir,
+      } as never),
+    ).toThrow(/walkieSecret is set but token is not/);
   });
 });

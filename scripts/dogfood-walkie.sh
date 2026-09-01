@@ -27,6 +27,7 @@ RUN=$(mktemp -d)
 LOG="$RUN/server.log"
 ASKDIR="$RUN/walkie"
 SECRET="dogfood-secret-$$"
+OWNER_TOKEN="dogfood-owner-$$"
 FAIL=0
 
 # THE SCRIPT COUNTS ITSELF. The commit that added it claimed "27 checks" from a
@@ -56,11 +57,16 @@ say "port $PORT is free (bind-tested, nothing answers)"
 # --- 2. boot the REAL entrypoint --------------------------------------------
 cd "$WT" || { bad "worktree missing"; exit 1; }
 echo "  tip: $(git rev-parse --short HEAD)  clean: $(git -c core.fsmonitor=false status --porcelain | wc -l | tr -d ' ') dirty files"
+# GENESIS_TOKEN is REQUIRED alongside the walkie secret (BRO-2417): `build()`
+# refuses to boot without it, because `unauthorized()` fails open on an unset
+# token and the walkie secret would then be gating a server that is already
+# wide open. This script is the surface that caught the omission.
 PORT=$PORT \
+GENESIS_TOKEN="$OWNER_TOKEN" \
 GENESIS_WALKIE_SECRET="$SECRET" \
 GENESIS_ASK_LOG_DIR="$ASKDIR" \
 GENESIS_DATA_DIR="$RUN/data" \
-GENESIS_WORKSPACE_ROOT="$RUN/ws" \
+GENESIS_WORKSPACE="$RUN/ws" \
   bun apps/api/src/index.ts >"$LOG" 2>&1 &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; wait $SRV 2>/dev/null' EXIT
@@ -127,6 +133,15 @@ chk "POST 70KB body"          413 "$(code -X POST -H "$S" -H 'content-type: appl
 # leaving the reader to infer the producer is still missing from this comment.
 say "round trip (ask hand-written — see the note; the producer IS live)"
 mkdir -p "$ASKDIR"
+# The workspace the server runs against. It has to be a real git repo with a
+# real modification, or the git mirrors answer `isGitRepo:false` and an EMPTY
+# diff — and a mirror compared against its twin on an empty payload cannot be
+# told apart from a stub that returns a constant. (P20 round 3 proved exactly
+# that: the /walkie/threads pair passed against a hard-coded `{threads:[]}`.)
+mkdir -p "$RUN/ws"
+( cd "$RUN/ws" && git init -q && git config user.email d@d && git config user.name d \
+  && printf 'one\ntwo\n' > README.md && git add -A && git commit -qm init \
+  && printf 'one\nCHANGED\n' > README.md ) >/dev/null 2>&1
 cat >> "$ASKDIR/asks.jsonl" <<'JSON'
 {"id":"ask-1","threadId":"t-alpha","question":"Ship BRO-2387 or hold for the producer?","askedAt":"2026-08-31T12:00:00.000Z","options":["ship","hold"]}
 {"id":"ask-2","threadId":"t-beta","question":"SECRET-OF-THREAD-BETA","askedAt":"2026-08-31T12:01:00.000Z"}
@@ -172,8 +187,8 @@ echo "  answers.jsonl: $(cat "$ASKDIR/answers.jsonl" 2>/dev/null)"
 # --- 6. restart survival ------------------------------------------------------
 say "restart survival (kill -9, not a graceful close)"
 kill -9 $SRV 2>/dev/null; wait $SRV 2>/dev/null
-PORT=$PORT GENESIS_WALKIE_SECRET="$SECRET" GENESIS_ASK_LOG_DIR="$ASKDIR" \
-GENESIS_DATA_DIR="$RUN/data" GENESIS_WORKSPACE_ROOT="$RUN/ws" \
+PORT=$PORT GENESIS_TOKEN="$OWNER_TOKEN" GENESIS_WALKIE_SECRET="$SECRET" GENESIS_ASK_LOG_DIR="$ASKDIR" \
+GENESIS_DATA_DIR="$RUN/data" GENESIS_WORKSPACE="$RUN/ws" \
   bun apps/api/src/index.ts >>"$LOG" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do curl -s -m 1 "$B/health" >/dev/null 2>&1 && break; sleep 0.5; done
@@ -198,6 +213,70 @@ fi
 chk "POST refuses while degraded" 503 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"threadId":"t-beta","id":"ask-2","answer":"x"}' "$B/walkie/answer")"
 chmod 644 "$ASKDIR/asks.jsonl"
 
+say "read mirrors — each must equal its OWNER-GATED twin, and open to neither the other's credential (BRO-2417)"
+# The PR body claimed this comparison; a claim nobody can regenerate is not
+# evidence, which is this script's whole premise. So it lives here now.
+O="authorization: Bearer $OWNER_TOKEN"
+# Seed a REAL thread through the owner surface. Without it /walkie/threads and
+# its twin both serve `{"threads":[]}` and the comparison cannot distinguish the
+# mirror from a stub returning that constant.
+curl -s -X POST -H "$O" -H 'content-type: application/json' \
+  -d '{"threadId":"thread-dogfood","text":"seed a thread for the mirror comparison"}' \
+  "$B/message" >/dev/null
+for pair in "/walkie/threads /threads thread-dogfood" "/walkie/workspaces /workspaces ws-default"; do
+  set -- $pair
+  M=$(curl -s -H "$S" "$B$1"); T=$(curl -s -H "$O" "$B$2")
+  # `[ -n "$M" ]` rejects only an EMPTY STRING — `{"threads":[]}` is 14 non-empty
+  # bytes, and a stub mirror returning that constant is byte-identical to a twin
+  # with nothing to report. So the payload must also carry the seeded content.
+  if [ "$M" = "$T" ] && echo "$M" | grep -qF "$3"; then ok "$1 is byte-identical to $2, on a NON-EMPTY payload"; else bad "$1 DIFFERS from $2 or is degenerate — mirror[$M] twin[$T]"; fi
+done
+WSID=$(curl -s -H "$S" "$B/walkie/workspaces" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("defaultWorkspace",""))')
+# Without this, an empty WSID makes the three per-workspace URLs collapse to
+# `/walkie/workspaces//git/status`, which 404s on BOTH sides — equal, non-empty,
+# and silently vacuous.
+if [ -n "$WSID" ]; then ok "defaultWorkspace resolved ($WSID)"; else bad "could not resolve defaultWorkspace — the pair checks below would be vacuous"; fi
+for pair in "/walkie/workspaces/$WSID/git/status /workspaces/$WSID/git/status README.md" "/walkie/workspaces/$WSID/checks /workspaces/$WSID/checks available"; do
+  set -- $pair
+  M=$(curl -s -H "$S" "$B$1"); T=$(curl -s -H "$O" "$B$2")
+  if [ "$M" = "$T" ] && echo "$M" | grep -qF "$3"; then ok "$1 is byte-identical to $2, on a NON-EMPTY payload"; else bad "$1 DIFFERS from $2 or is degenerate — mirror[$M]"; fi
+done
+M=$(curl -s -H "$S" "$B/walkie/workspaces/$WSID/git/diff?path=README.md")
+T=$(curl -s -H "$O" "$B/workspaces/$WSID/git/diff?path=README.md")
+if [ "$M" = "$T" ] && echo "$M" | grep -qF "CHANGED"; then ok "git/diff mirror is byte-identical to its twin, on a REAL diff hunk"; else bad "git/diff mirror DIFFERS or carries no hunk — mirror[$M]"; fi
+
+# The credentials must not be interchangeable in EITHER direction. Without both
+# halves this section would pass against a server with one shared credential.
+chk "the owner token opens no mirror" 401 "$(code -H "$O" "$B/walkie/threads")"
+chk "the walkie secret opens no twin" 401 "$(code -H "$S" "$B/threads")"
+chk "the walkie secret cannot commit" 401 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"message":"no"}' "$B/workspaces/$WSID/git/commit")"
+chk "the walkie secret cannot dispatch a turn" 401 "$(code -X POST -H "$S" -H 'content-type: application/json' -d '{"text":"no","threadId":"t"}' "$B/message")"
+chk "a mirror refuses a query-string credential" 401 "$(code "$B/walkie/threads?token=$SECRET")"
+chk "an unknown workspace is 404 on a mirror" 404 "$(code -H "$S" "$B/walkie/workspaces/nope/git/status")"
+
+# No mirror may carry the server-only rootPath.
+#
+# POSITIVE CONTROL FIRST. The previous version of this check grepped for
+# "$RUN/ws" while the server was started with GENESIS_WORKSPACE_ROOT — a
+# variable the entrypoint does not read (it reads GENESIS_WORKSPACE), so the
+# server ran against the checkout and the needle could never appear. P20 round 3
+# patched the server to actively leak every rootPath and this check still said
+# PASS. A needle that is never present makes any grep for it a guaranteed pass,
+# so prove the needle IS findable somewhere before trusting its absence.
+if curl -s "$B/health" | grep -qF "$RUN/ws"; then
+  ok "positive control: the workspace root IS findable (unauthenticated /health publishes it)"
+else
+  bad "positive control FAILED: \"$RUN/ws\" appears nowhere, so the leak check below proves nothing"
+fi
+LEAK=0
+for pth in "/walkie/threads" "/walkie/workspaces" "/walkie/workspaces/$WSID/git/status" "/walkie/workspaces/$WSID/git/diff?path=README.md" "/walkie/workspaces/$WSID/checks"; do
+  BODY=$(curl -s -H "$S" "$B$pth")
+  echo "$BODY" | grep -qF "$RUN/ws" && { bad "rootPath LEAKED in $pth"; LEAK=1; }
+  # The property, not one platform's spelling: no absolute host path at all.
+  echo "$BODY" | grep -qE '"/(Users|home|root|opt|private|var)/' && { bad "absolute host path in $pth"; LEAK=1; }
+done
+[ $LEAK -eq 0 ] && ok "no mirror payload carries the workspace rootPath or any absolute host path"
+
 say "server log (stderr from the run)"
 grep -i 'error\|walkie\|degraded' "$LOG" | head -20
 
@@ -205,6 +284,6 @@ say "RESULT"
 if [ $FAIL -eq 0 ]; then echo "  $CHECKS checks, all passed"; else echo "  $CHECKS checks, THERE WERE FAILURES"; fi
 # An empty run must not read as success: with every check deleted, FAIL stays 0
 # and the line above would happily report "0 checks, all passed".
-if [ "$CHECKS" -lt 20 ]; then echo "  REFUSING: only $CHECKS checks ran — the script has been gutted"; exit 2; fi
+if [ "$CHECKS" -lt 38 ]; then echo "  REFUSING: only $CHECKS checks ran — the script has been gutted"; exit 2; fi
 echo "  artifacts: $RUN"
 exit $FAIL

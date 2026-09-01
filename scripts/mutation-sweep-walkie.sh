@@ -45,7 +45,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
        apps/api/src/server.test.ts)
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts)
-EXPECTED_MUTANTS=74
+EXPECTED_MUTANTS=83
 
 if [ -n "$(git -c core.fsmonitor=false status --porcelain -- "${SUBJECTS[@]}" "${SUITE[@]}")" ]; then
   echo "REFUSING: the files under test are not clean — this script reverts them between mutants."
@@ -544,6 +544,81 @@ mutate "a throwing store retires every ask" "$S" \
   '        console.error("[walkie] could not read sessions; asks not aged:", e);' \
   '        throw e;' \
   "throws ages NOTHING"
+
+echo "read mirrors — the client's own gate, and only reads (BRO-2417)"
+mutate "a mirror re-implements its body instead of sharing the twin's" "$S" \
+  '      return c.json(await threadsBody());
+    });
+
+    app.get("/walkie/workspaces"' \
+  '      return c.json({ threads: [] });
+    });
+
+    app.get("/walkie/workspaces"' \
+  "exactly what its OWNER-GATED twin returns"
+mutate "a mirror is gated by the owner token instead of the walkie secret" "$S" \
+  '    app.get("/walkie/threads", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);' \
+  '    app.get("/walkie/threads", async (c) => {
+      noStore(c);
+      if (unauthorized(c)) return c.json({ error: "unauthorized" }, 401);' \
+  "the OWNER TOKEN opens no mirror"
+mutate "noStore dropped from the checks MIRROR (P20 round-2 survivor)" "$S" \
+  '    app.get("/walkie/workspaces/:id/checks", async (c) => {
+      noStore(c);' \
+  '    app.get("/walkie/workspaces/:id/checks", async (c) => {' \
+  "EVERY mirror is no-store"
+mutate "walkieDenied stripped from the git/diff MIRROR (the A+B+C blocker)" "$S" \
+  '    app.get("/walkie/workspaces/:id/git/diff", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);' \
+  '    app.get("/walkie/workspaces/:id/git/diff", async (c) => {
+      noStore(c);' \
+  "EVERY mirror is 401 with no credential"
+mutate "walkieDenied stripped from the checks MIRROR" "$S" \
+  '    app.get("/walkie/workspaces/:id/checks", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);' \
+  '    app.get("/walkie/workspaces/:id/checks", async (c) => {
+      noStore(c);' \
+  "EVERY mirror is 401 with no credential"
+mutate "a git mirror is deleted outright" "$S" \
+  '    app.get("/walkie/workspaces/:id/git/status", async (c) => {
+      noStore(c);
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return gitStatusBody(c, c.req.param("id"));
+    });' \
+  '' \
+  "the walkie secret opens EVERY mirror"
+mutate "a WRITE verb is added to the walkie namespace" "$S" \
+  '    // The decision coming back.
+    app.post("/walkie/answer", async (c) => {' \
+  '    app.post("/walkie/workspaces/:id/git/commit", async (c) => {
+      if (walkieDenied(c)) return c.json({ error: "unauthorized" }, 401);
+      return c.json({ committed: true });
+    });
+
+    // The decision coming back.
+    app.post("/walkie/answer", async (c) => {' \
+  "the only non-GET verb under /walkie is the answer"
+mutate "the walkie-without-token build invariant removed" "$S" \
+  '    if (!opts.token) {
+      throw new Error(
+        "walkieSecret is set but token is not:' \
+  '    if (opts.token === "\x00never") {
+      throw new Error(
+        "walkieSecret is set but token is not:' \
+  "walkieSecret without a token throws at BUILD"
+mutate "the shared git body stops checking the workspace exists" "$S" \
+  '    const root = await supervisor.resolveWorkspaceRoot(id);
+    if (!root) return c.json({ error: "unknown workspace" }, 404);
+    try {
+      return c.json(await gitStatus(root));' \
+  '    const root = (await supervisor.resolveWorkspaceRoot(id)) ?? "/";
+    try {
+      return c.json(await gitStatus(root));' \
+  "an unknown workspace is 404 WITH THE BODY"
 
 echo "the entrypoint — routes wired only in tests do not exist in a deploy"
 mutate "walkie unwired from build()" "$I" \

@@ -121,6 +121,16 @@ describe("DrizzleStore (pglite) — Store contract", () => {
 });
 
 describe("DrizzleStore (pglite) — FS-as-truth continuity", () => {
+  // EXPLICIT TIMEOUT, and the only two tests in this repo that need one.
+  // Both open PGlite TWICE (write, close, reopen, read back) — that is the
+  // property under test, so the cost is not incidental. Single-instance pglite
+  // tests in this file run ~460ms; these two measured 12.7s and 7.6s on a loaded
+  // CI runner and tripped bun's 5000ms default, reddening a required check on a
+  // commit that touches no store code (genesis run 33475904352).
+  //
+  // 20s is chosen to sit far above the observed worst case and far below a real
+  // hang: a deadlocked reopen still fails, it just fails honestly instead of
+  // being indistinguishable from a slow one.
   test("a session + turns survive a close/reopen on the same data dir", async () => {
     const dir = mkdtempSync(join(tmpdir(), "genesis-db-"));
     const s1 = await createPgliteStore(dir);
@@ -141,7 +151,7 @@ describe("DrizzleStore (pglite) — FS-as-truth continuity", () => {
     expect(got?.agentSessionId).toBe("claude-sid"); // continuity recovered
     expect((await s2.turnsForSession("sX")).map((t) => t.text)).toEqual(["remember me"]);
     await s2.close();
-  });
+  }, 20_000);
 });
 
 describe("Supervisor + DrizzleStore — sessions become selves", () => {
@@ -183,7 +193,7 @@ describe("Supervisor + DrizzleStore — sessions become selves", () => {
       "again",
     ]);
     await store2.close();
-  });
+  }, 20_000);
 });
 
 describe("DrizzleStore (pglite) — deterministic ordering (P20 #4)", () => {
