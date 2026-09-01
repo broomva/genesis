@@ -57,7 +57,7 @@ SUITE=(apps/api/src/walkie-client.test.ts apps/api/src/ask-producer.test.ts pack
 SUBJECTS=(apps/api/src/walkie-client.ts packages/projection/src/parser.ts apps/api/src/ask-log.ts apps/api/src/server.ts apps/api/src/index.ts apps/api/src/ttl-memo.ts
           packages/projection/src/reducer.ts packages/core/src/supervisor.ts
           packages/core/src/store.ts packages/db/src/store.ts)
-EXPECTED_MUTANTS=100
+EXPECTED_MUTANTS=101
 
 # Subject paths used by mutants below. Defined HERE, not at first use: the
 # paging mutants sit ~25 lines above where these used to be declared, and with
@@ -727,6 +727,11 @@ mutate "the window precondition is dropped, so the two stores diverge on bad inp
   '    assertPageOpts(opts);' \
   '' \
   "rejected identically by BOTH stores"
+# `listThreads` and `listThreadsPage` need SEPARATE mutants: the /walkie/threads
+# route calls the PAGE form, so a mutant on the other one never reaches the route
+# test at all. The first version of this used `want "NO full scan"` for the
+# listThreads mutant and the sweep reported "red, but not via <want>" — it was
+# killed by supervisor.test.ts instead, which is the correct kill for it.
 mutate "listThreads goes back to scanning every session and slicing in JS" "$C" \
   '    return this.summarize((await this.store.sessionsPage(opts)).sessions);' \
   '    const all = await this.store.listSessions();
@@ -734,6 +739,20 @@ mutate "listThreads goes back to scanning every session and slicing in JS" "$C" 
     return this.summarize(
       opts.limit === undefined ? all.slice(off) : all.slice(off, off + opts.limit),
     );' \
+  "returns threads newest-first"
+# THIS is the one that proves `scans() === 0` is load-bearing: it is the form the
+# route actually calls, and it returns a byte-identical response.
+mutate "listThreadsPage goes back to scanning every session and slicing in JS" "$C" \
+  '    const { sessions, total } = await this.store.sessionsPage(opts);
+    return { threads: await this.summarize(sessions), total };' \
+  '    const all = await this.store.listSessions();
+    const off = opts.offset ?? 0;
+    return {
+      threads: await this.summarize(
+        opts.limit === undefined ? all.slice(off) : all.slice(off, off + opts.limit),
+      ),
+      total: all.length,
+    };' \
   "NO full scan"
 mutate "the pg ORDER BY drops COLLATE C and follows the database locale" "$DS" \
   '.orderBy(sql`${sessions.createdAt} COLLATE "C" DESC, ${sessions.id} COLLATE "C" ASC`);' \
