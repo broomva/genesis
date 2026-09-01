@@ -114,8 +114,18 @@ chk "POST 5000-char answer"   413 "$(code -X POST -H "$S" -H 'content-type: appl
 HUGE=$(python3 -c 'print("y"*70000)')
 chk "POST 70KB body"          413 "$(code -X POST -H "$S" -H 'content-type: application/json' -d "{\"threadId\":\"t\",\"id\":\"a1\",\"answer\":\"$HUGE\"}" "$B/walkie/answer")"
 
-# --- 5. hand-write an ask, because nothing else can --------------------------
-say "round trip (ask hand-written — there is no producer)"
+# --- 5. hand-write an ask ----------------------------------------------------
+# NOT "because nothing else can" any more — the producer landed in BRO-2413 and
+# Supervisor.onAsk appends on the transition into `awaiting`. Still hand-written
+# HERE because producing one over HTTP needs a real agent turn making a real
+# AskUserQuestion, i.e. a model call and an API key: that would turn a fast,
+# deterministic, offline dogfood into a slow flaky one gated on a vendor.
+#
+# The producer's own evidence is apps/api/src/ask-producer.test.ts, which drives a
+# real Supervisor through a real dispatch into a real store and reads it back —
+# end to end in process, without calling `append`. Stating that here rather than
+# leaving the reader to infer the producer is still missing from this comment.
+say "round trip (ask hand-written — see the note; the producer IS live)"
 mkdir -p "$ASKDIR"
 cat >> "$ASKDIR/asks.jsonl" <<'JSON'
 {"id":"ask-1","threadId":"t-alpha","question":"Ship BRO-2387 or hold for the producer?","askedAt":"2026-08-31T12:00:00.000Z","options":["ship","hold"]}

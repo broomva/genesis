@@ -17,7 +17,7 @@
 // from diverging again.
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..");
@@ -74,5 +74,34 @@ describe("the documented test command runs the tests", () => {
     const wf = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
     expect(wf).toMatch(/^\s+- run: bun test$/m);
     expect(wf).not.toMatch(/^\s+- run: bun run test$/m);
+  });
+
+  test("every workspace package with TypeScript defines a `typecheck` script", () => {
+    // THE SIBLING GUARD, added after making the same mistake one command over.
+    //
+    // I found that `bun run test` skipped 30 files because two packages had no
+    // `test` script, fixed it, added the assertion above — and then verified this
+    // very change with `tsc --noEmit -p apps/api/tsconfig.json` while CI runs
+    // `turbo run typecheck` over ELEVEN packages. Two real type errors in
+    // packages/projection passed my local gate and failed CI.
+    //
+    // The instance was my habit; the class is a package that turbo would silently
+    // skip. This is the part that can be asserted.
+    const offenders: string[] = [];
+    for (const area of ["apps", "packages"]) {
+      for (const name of readdirSync(join(ROOT, area))) {
+        const pkgDir = join(area, name);
+        let scripts: Record<string, string> = {};
+        try {
+          scripts =
+            JSON.parse(readFileSync(join(ROOT, pkgDir, "package.json"), "utf8")).scripts ?? {};
+        } catch {
+          continue;
+        }
+        const hasTs = existsSync(join(ROOT, pkgDir, "tsconfig.json"));
+        if (hasTs && !scripts.typecheck) offenders.push(pkgDir);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

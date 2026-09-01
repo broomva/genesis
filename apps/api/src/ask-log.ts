@@ -6,19 +6,12 @@
 // is a view, not a record. Nothing in Genesis can tell you what an agent is
 // currently blocked on across a restart.
 //
-// NOTHING WRITES AN ASK YET, and that has to be said here rather than discovered.
-// `append` has zero non-test callers: no engine hook, no supervisor callback, no
-// tool-call interception produces an Ask. So in a real deploy asks.jsonl stays
-// empty, GET /walkie/asks returns {"asks":[]} forever and POST /walkie/answer
-// 404s forever. The store, the routes and their gate are real and tested; the
-// PRODUCER is not built.
-//
-// That is the ticket's scope — step 1 is the durable object and its two verbs,
-// and the engine integration comes later — but a surface that answers 200 while
-// being permanently empty reads as "working" to anyone who does not know, and
-// the boot log line saying where the ask log lives reinforces that. The gap is
-// named here, in the PR, and in the ticket rather than left for the first person
-// who wonders why the list is always empty. (P20 MAJOR.)
+// THE PRODUCER EXISTS NOW (BRO-2413). `Supervisor.onAsk` fires on the transition
+// INTO `awaiting` and appends here, wired in server.ts from this very store — so a
+// deploy cannot have one without the other. Until that landed `append` had zero
+// non-test callers and asks.jsonl stayed empty in every real deploy while 200s
+// came back from a surface that looked alive; the caveat that said so lived here,
+// in the boot line, in the PR and in a mutant, and all four came out together.
 //
 // NOT queue.jsonl. That file holds VoiceTicket: caller-originated intake, keyed by
 // an explicitly untrusted phone number. An ask is agent-originated and keyed by
