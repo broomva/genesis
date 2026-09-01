@@ -13,6 +13,7 @@
 // number, identical on every message, instead of part 2). So the decision
 // happens over WhatsApp and the apply stays a command the operator runs.
 
+import { normalizePhoneId } from "@genesis/identity";
 import { type Principal, principalOf } from "./allowlist";
 import type { TenantStore } from "./tenant-store";
 import {
@@ -66,7 +67,9 @@ export function isOperatorToken(token: string): boolean {
  *  waId), never against raw thread text, which would match our own phone number
  *  on every inbound message. */
 export function isOperator(threadId: string, operatorEnv: string | undefined): boolean {
-  const configured = (operatorEnv ?? "").replace(/\D/g, "");
+  // Compared against `principal.id`, which comes from the same rule via
+  // allowlist.ts's canonical() — an undocumented third pair that had to agree.
+  const configured = normalizePhoneId(operatorEnv ?? "");
   if (configured.length === 0) return false;
   const principal: Principal | undefined = principalOf(threadId, "kapso");
   if (principal === undefined || principal.channel !== "kapso") return false;
@@ -74,7 +77,7 @@ export function isOperator(threadId: string, operatorEnv: string | undefined): b
 }
 
 /** Digits-only, so an operator can paste `+57 301 775 8620` or `573017758620`. */
-const normalizeId = (v: string) => v.replace(/\D/g, "");
+const normalizeId = normalizePhoneId;
 
 export function parseOperatorCommand(
   token: string,

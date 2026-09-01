@@ -21,17 +21,13 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 
-/** Digits-only form of a phone number. "+57 300 123-4567" -> "573001234567".
- *
- *  MUST agree with the WhatsApp allowlist's `normalizePhone` (BRO-2224,
- *  apps/chat-bot/src/allowlist.ts). The two are separate implementations today
- *  because chat-bot and api are separate apps and BRO-2224 is unmerged; if they
- *  ever disagree, a caller whose number IS allowlisted resolves as unknown and
- *  silently drops to take-a-message, with nothing reporting the mismatch.
- *  Consolidate into one shared module when #107 lands — see the drift test. */
-export function normalizeCallerId(value: string): string {
-  return value.replace(/\D/g, "");
-}
+// `normalizeCallerId` used to be defined here as a second copy of the allowlist's
+// rule, with a comment saying the two MUST agree and a "DRIFT GUARD" test that
+// re-implemented the rule instead of importing it — so it could not detect the
+// drift it was named for (BRO-2422). There is one implementation now.
+import { normalizePhoneId } from "@genesis/identity";
+/** Kept as the public name for this app's callers (voice-queue.ts imports it). */
+export const normalizeCallerId = normalizePhoneId;
 
 /** Compare a presented secret against the expected one without leaking length
  *  or prefix through timing. Fail closed on absent/empty.

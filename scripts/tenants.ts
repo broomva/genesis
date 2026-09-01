@@ -26,6 +26,7 @@ import {
   setPolicy,
   suspend,
 } from "../apps/chat-bot/src/tenants";
+import { normalizePhoneId } from "../packages/identity/src/index";
 
 const dir = process.env.GENESIS_WHATSAPP_TENANTS_DIR?.trim();
 if (!dir) {
@@ -37,8 +38,13 @@ const [cmd, arg, ...rest] = process.argv.slice(2);
 const note = rest.join(" ") || undefined;
 const now = new Date().toISOString();
 
-/** Accept any spelling an operator might paste. The registry key is digits. */
-const normalize = (v: string) => v.replace(/\D/g, "");
+/** Accept any spelling an operator might paste. The registry key is digits.
+ *
+ *  This was a fifth copy of the rule. allowlist.ts's own comment says "a
+ *  provisioning script has no excuse to re-implement phone normalization" — and
+ *  this is that script, doing exactly that, two files away (BRO-2422). Relative
+ *  import to match this file's existing style; scripts/ is not a workspace member. */
+const normalize = normalizePhoneId;
 
 /** `sudo -E bun` does NOT work: sudo resets PATH and bun is not on root's, so
  *  it dies with "command not found" after the operator has already approved.

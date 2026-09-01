@@ -41,15 +41,15 @@
 export type ChannelId = "telegram" | "kapso";
 
 /** A resolved actor: the channel it spoke on, and its id on that channel. */
+import { normalizePhoneId } from "@genesis/identity";
+
 export interface Principal {
   readonly channel: ChannelId;
   readonly id: string;
 }
 
-/** Digits-only form of a phone number. "+57 300 123-4567" -> "573001234567". */
-function normalizePhone(value: string): string {
-  return value.replace(/\D/g, "");
-}
+// One implementation, in @genesis/identity — this was one of four copies (BRO-2422).
+const normalizePhone = normalizePhoneId;
 
 /** Channel-appropriate canonical form for comparison. */
 function canonical(channel: ChannelId, id: string): string {
