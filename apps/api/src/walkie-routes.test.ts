@@ -1110,3 +1110,146 @@ describe("Genesis serves the client, so both share one origin (BRO-2416)", () =>
     expect(await res.text()).not.toBe("not found");
   });
 });
+
+describe("an ask whose session moved on is stale, not pending (BRO-2415)", () => {
+  /** A store carrying exactly the session phases a test cares about. */
+  const storeWith = (sessions: { threadId: string; phase: string }[]) =>
+    ({
+      listSessions: async () => sessions.map((s, i) => ({ ...s, id: `s${i}`, workspaceId: "w" })),
+    }) as never;
+
+  const withStore = (sessions: { threadId: string; phase: string }[]) => {
+    const log = createAskLog(dir);
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      store: storeWith(sessions),
+    } as never);
+    return { app: app as App, log };
+  };
+
+  test("a session that finished retires its ask", async () => {
+    // The whole point: nothing ever ended an ask except an answer, so a turn
+    // that simply completed left its question waiting on a person forever.
+    const { app, log } = withStore([{ threadId: "t1", phase: "done" }]);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    expect(await asksOf(await get(app, "/walkie/asks", H))).toHaveLength(0);
+  });
+
+  test("a session still AWAITING keeps its ask — the negative control", async () => {
+    // Without this, markStale could retire everything and the test above passes.
+    const { app, log } = withStore([{ threadId: "t1", phase: "awaiting" }]);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    expect(await asksOf(await get(app, "/walkie/asks", H))).toHaveLength(1);
+  });
+
+  test("a crashed session — reconciled to `blocked` at boot — retires its ask", async () => {
+    // The case a third journal could never have covered: the edge OUT of
+    // `awaiting` is exactly what a dead process never observes.
+    // reconcileInterruptedSessions already turns that into `blocked`, so deriving
+    // from phase gets the restart right for free.
+    const { app, log } = withStore([{ threadId: "t1", phase: "blocked" }]);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    expect(await asksOf(await get(app, "/walkie/asks", H))).toHaveLength(0);
+  });
+
+  test("an UNKNOWN thread is left alone — absence is not evidence", async () => {
+    // The producer can append before the session is persisted. Retiring an ask
+    // because we have never heard of its thread would hide a live question, and
+    // this whole file refuses to read absence as an answer.
+    const { app, log } = withStore([]);
+    log.append(ask({ id: "a1", threadId: "t-unknown" }));
+    expect(await asksOf(await get(app, "/walkie/asks", H))).toHaveLength(1);
+  });
+
+  test("a stale ask is still visible under ?answered=1, marked", async () => {
+    // Retired, not deleted: a question that was asked and abandoned stays
+    // auditable.
+    const { app, log } = withStore([{ threadId: "t1", phase: "done" }]);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    const all = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(all).toHaveLength(1);
+    expect(all[0]?.status).toBe("stale");
+  });
+
+  test("an ANSWERED ask is never relabelled stale", async () => {
+    // The decision is the record. Its session finishing is normal — that is what
+    // happens right after an answer unblocks the agent — so aging must not reach
+    // an ask that already has one. Without this the guard `status !== "pending"`
+    // could be deleted and every other test here still passes: they all start
+    // from a pending ask.
+    const { app, log } = withStore([{ threadId: "t1", phase: "done" }]);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    log.answer({
+      threadId: "t1",
+      id: "a1",
+      answer: "SHIP",
+      answeredAt: "2026-09-01T12:00:00.000Z",
+    });
+    const [e] = await asksOf(await get(app, "/walkie/asks?answered=1", H));
+    expect(e?.status).toBe("answered");
+    expect(e?.answer).toBe("SHIP");
+  });
+
+  test("`total` counts what is SHOWN, not what is on disk", async () => {
+    // The client renders "N waiting" from this. Counting retired asks would put
+    // the dead ones back in the number they were removed from the list for.
+    const { app, log } = withStore([
+      { threadId: "t-live", phase: "awaiting" },
+      { threadId: "t-done", phase: "done" },
+    ]);
+    log.append(ask({ id: "a1", threadId: "t-live" }));
+    log.append(ask({ id: "a2", threadId: "t-done" }));
+    const body = (await (await get(app, "/walkie/asks", H)).json()) as { total: number };
+    expect(body.total).toBe(1);
+  });
+
+  test("a store that throws ages NOTHING rather than retiring everything", async () => {
+    // Fail-open on purpose: hiding a real question is worse than showing a dead
+    // one, and a read that could not look must not present as a clean list.
+    const log = createAskLog(dir);
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      store: {
+        listSessions: async () => {
+          throw new Error("store on fire");
+        },
+      },
+    } as never);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    const res = await get(app as App, "/walkie/asks", H);
+    expect(await asksOf(res)).toHaveLength(1);
+    // ...AND SAYS SO. Keeping the ask is right; keeping it silently is the
+    // failure this file's degraded channel exists to prevent — a clean-looking
+    // list whose lifecycle status is actually unknown.
+    const body = (await (await get(app as App, "/walkie/asks", H)).json()) as { degraded?: string };
+    expect(body.degraded).toContain("sessions could not be read");
+  });
+
+  test("a journal problem AND a session problem both travel", async () => {
+    // Joined, not overwritten — the same rule readAsks applies to its own
+    // problems. A caller must not have to guess which read failed.
+    const log = createAskLog(dir);
+    const { app } = build({
+      workspaceRoot: dir,
+      walkieSecret: SECRET,
+      askLog: log,
+      askLogDir: dir,
+      store: {
+        listSessions: async () => {
+          throw new Error("store on fire");
+        },
+      },
+    } as never);
+    log.append(ask({ id: "a1", threadId: "t1" }));
+    appendFileSync(join(dir, ASK_FILE), `${JSON.stringify({ id: "junk" })}\n`);
+    const body = (await (await get(app as App, "/walkie/asks", H)).json()) as { degraded?: string };
+    expect(body.degraded).toContain("skipped");
+    expect(body.degraded).toContain("sessions could not be read");
+  });
+});
