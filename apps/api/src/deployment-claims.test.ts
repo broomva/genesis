@@ -30,7 +30,16 @@ const INSTRUCTIONS: readonly string[] = Bun.spawnSync(["git", "ls-files"], { cwd
   .stdout.toString()
   .split("\n")
   .map((f) => f.trim())
-  .filter((f) => /\.(md|sh|example|yml|yaml)$/.test(f) || f.endsWith(".env.example"))
+  // Widened after the derived scan still missed `docs/deploy/systemd/*.service.template`
+  // — tracked, already mentioning tailscale, and sitting in the very directory this
+  // guard's own comment names. A unit file is where a funnel command idiomatically
+  // goes. Dropping the extension filter entirely is NOT the fix: this test file then
+  // scans itself and flags its own quoted evasions.
+  .filter(
+    (f) =>
+      /\.(md|mdx|sh|bash|example|yml|yaml|template|service|timer|plist|conf|toml|txt)$/.test(f) ||
+      /(^|\/)(Dockerfile|Makefile)$/.test(f),
+  )
   .filter((f) => {
     try {
       return /tailscale/i.test(read(f));
@@ -213,6 +222,13 @@ describe("no shipped instruction tells an operator to funnel the root", () => {
     // The discriminator: Hono's 404 is 13 bytes, tailscaled's is 19.
     expect(`19-byte check x${occurrences('[ "$bytes" = "19" ]')}`).toBe("19-byte check x2");
     expect(`13-byte check x${occurrences('[ "$bytes" = "13" ]')}`).toBe("13-byte check x1");
+    // The arity guard was self-consistent, not externally pinned: deleting every
+    // `probe` call AND setting EXPECTED_PROBES=0 printed an empty results table,
+    // exited 0, and left this suite green — the exact defect the guard closes,
+    // moved up one level of indirection. Both the call sites and the constant are
+    // now counted from outside the script.
+    expect(`probe calls x${occurrences("\nprobe ")}`).toBe("probe calls x6");
+    expect(`arity guard x${occurrences("EXPECTED_PROBES=6")}`).toBe("arity guard x1");
   });
 });
 
