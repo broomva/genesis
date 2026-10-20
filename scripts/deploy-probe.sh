@@ -40,6 +40,16 @@ API_PORT=${API_PORT:-8787}
 BOT_PORT=${BOT_PORT:-8788}
 WEBHOOK_PATH=${WEBHOOK_PATH:-/webhooks/kapso}
 
+# Renders a seconds gap as the largest sensible unit. "0d before its last source
+# commit" is what this replaced, which reads like the probe is broken.
+gap () {
+  local sec=$1
+  if   [ "$sec" -ge 172800 ]; then echo "$((sec / 86400))d"
+  elif [ "$sec" -ge 7200 ];   then echo "$((sec / 3600))h"
+  elif [ "$sec" -ge 120 ];    then echo "$((sec / 60))m"
+  else echo "${sec}s"; fi
+}
+
 TMPD=$(mktemp -d /tmp/deploy-probe.XXXXXX) || { echo "✗ could not create a temp dir"; exit 1; }
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -157,9 +167,31 @@ echo "▶ backend liveness"
 eq "genesis-api /health is 200" "200" \
   "$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 8 "http://127.0.0.1:$API_PORT/health")"
 
+echo "▶ deployment freshness"
+# Delegated to scripts/deploy-freshness.sh so it can be run against a fixture
+# repo with a shimmed systemctl. When this lived inline its tests were greps over
+# this file's text and a sweep put 12 of 15 wrong implementations past them —
+# including wrapping the whole section in `if false &&`.
+#
+# Exit codes: 0 every claim holds · 1 something is stale · 2 declined to answer.
+"$(dirname "$0")/deploy-freshness.sh"
+case $? in
+  0) FRESHNESS=ok ;;
+  2) FRESHNESS=declined ;;
+  *) FRESHNESS=stale; FAILED=$((FAILED+1)) ;;
+esac
+
 echo
 if [ "$FAILED" -eq 0 ]; then
   echo "✓ no differential detected, and both routes still refuse anonymous callers"
+  # The summary states which question was answered. It must never imply a
+  # freshness result that was declined, and "ok" here means every one of the
+  # freshness script's claims held — not that it merely ran.
+  case "$FRESHNESS" in
+    ok)       echo "✓ and the host is running origin/main" ;;
+    declined) echo "– freshness unknown (not run on the deployed host)" ;;
+    *)        echo "– freshness state: $FRESHNESS" ;;
+  esac
 else
   echo "✗ $FAILED check(s) FAILED"
 fi
